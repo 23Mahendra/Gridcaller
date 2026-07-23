@@ -1,0 +1,61 @@
+{
+  "name": "gridcaller",
+  "private": true,
+  "version": "2.1.0",
+  "description": "Real GridCaller + Mesh Network — PeerJS/Trystero/Gun, APK share BT/WiFi, GitHub/gh, GridAlive bridge",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5173",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 5173",
+    "signal": "node server/hub.mjs",
+    "hub": "node server/hub.mjs",
+    "start": "node server/hub.mjs",
+    "mesh": "node server/hub.mjs",
+    "cap:add": "npx cap add android",
+    "cap:sync": "npm run build && npx cap sync android && node scripts/patch-android-permissions.mjs",
+    "cap:open": "npx cap open android",
+    "cap:perms": "node scripts/patch-android-permissions.mjs",
+    "apk:copy": "node server/copy-apk.mjs",
+    "push": "node scripts/push-to-devices.mjs",
+    "push:ota": "node -e \"fetch('http://127.0.0.1:8765/api/update/push',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:true})}).then(r=>r.json()).then(console.log).catch(e=>console.error(e))\"",
+    "postinstall": "node -e \"console.log('[gridcaller] Real mesh stack ready: peerjs + trystero + gun + capacitor share')\""
+  },
+  "dependencies": {
+    "@capacitor-community/bluetooth-le": "7.1.1",
+    "@capacitor/android": "^7.2.0",
+    "@capacitor/app": "^7.0.1",
+    "@capacitor/core": "^7.2.0",
+    "@capacitor/filesystem": "^7.1.1",
+    "@capacitor/geolocation": "7.1.5",
+    "@capacitor/network": "7.0.2",
+    "@capacitor/share": "^7.0.1",
+    "@capacitor/status-bar": "^7.0.1",
+    "@sentry/react": "^10.67.0",
+    "dexie": "^4.4.4",
+    "gun": "^0.2020.1241",
+    "leaflet": "^1.9.4",
+    "lucide-react": "^0.546.0",
+    "peer": "^1.0.2",
+    "peerjs": "^1.5.5",
+    "qrcode": "^1.5.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "trystero": "^0.22.0",
+    "uuid": "^11.1.1",
+    "ws": "^8.18.1"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.2.0",
+    "@types/leaflet": "^1.9.21",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "~5.7.2",
+    "vite": "^6.2.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

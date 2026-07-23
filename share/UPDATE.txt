@@ -1,0 +1,10 @@
+GridCaller 2.1.0 — open this on BOTH phones (same Wi-Fi as PC):
+
+  http://192.168.1.8:8765/share/GridCaller.apk
+
+Tap Install / Update. Allow permissions once.
+
+Then PC + both phones auto mesh:
+  Wi-Fi hub  →  swarm  →  hop  →  Bluetooth nearby
+
+Later updates from PC: npm run push  (phones open Install automatically if app is open)

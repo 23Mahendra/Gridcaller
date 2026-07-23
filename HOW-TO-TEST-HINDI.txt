@@ -1,0 +1,20 @@
+══════════════════════════════════════════════════
+  D:\gridcaller = GridAlive wala GridCaller (same UI)
+══════════════════════════════════════════════════
+
+Naya UI nahi — GridAlive se copy:
+  GridCaller.tsx + kernel mesh / call engines
+
+1) PC: START.bat  (ya npm run hub)
+2) Browser / phone: http://PC-IP:8765
+3) Wahi GridCaller dikhega jo GridAlive me hai
+   (recents, contacts, keypad, SMS, mesh call)
+
+APK:
+  npm run cap:sync
+  npx cap open android → Build APK
+
+Update when GridAlive changes:
+  GridCaller.tsx + src\kernel  dubara copy karo
+
+══════════════════════════════════════════════════

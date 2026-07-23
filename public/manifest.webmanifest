@@ -1,0 +1,18 @@
+{
+  "name": "GridCaller",
+  "short_name": "GridCaller",
+  "description": "Mesh calls and messages without SIM",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#0b141a",
+  "theme_color": "#0b141a",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "any",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

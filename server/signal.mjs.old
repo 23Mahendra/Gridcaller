@@ -1,0 +1,233 @@
+/**
+ * GridCaller local mesh signal server
+ * ───────────────────────────────────
+ * PC pe chalao → phone same WiFi / hotspot pe connect kare.
+ * Internet / SIM zaroori nahi jab dono same LAN pe hon.
+ *
+ * Serves:
+ *  - static built UI (dist/) if present, else tips
+ *  - WebSocket room signaling on same port
+ */
+import http from "http";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { WebSocketServer } from "ws";
+import os from "os";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.join(__dirname, "..");
+const DIST = path.join(ROOT, "dist");
+const PORT = Number(process.env.PORT || 8765);
+
+/** roomId -> Map(peerId, ws) */
+const rooms = new Map();
+
+function getLanIPs() {
+  const out = [];
+  const ifs = os.networkInterfaces();
+  for (const name of Object.keys(ifs)) {
+    for (const info of ifs[name] || []) {
+      if (info.family === "IPv4" && !info.internal) out.push(info.address);
+    }
+  }
+  return out;
+}
+
+function mime(p) {
+  if (p.endsWith(".html")) return "text/html; charset=utf-8";
+  if (p.endsWith(".js")) return "text/javascript; charset=utf-8";
+  if (p.endsWith(".css")) return "text/css; charset=utf-8";
+  if (p.endsWith(".json") || p.endsWith(".webmanifest")) return "application/json";
+  if (p.endsWith(".svg")) return "image/svg+xml";
+  if (p.endsWith(".png")) return "image/png";
+  if (p.endsWith(".woff2")) return "font/woff2";
+  return "application/octet-stream";
+}
+
+function send(res, code, body, type = "text/plain; charset=utf-8") {
+  res.writeHead(code, {
+    "Content-Type": type,
+    "Access-Control-Allow-Origin": "*",
+    "Cache-Control": "no-store",
+  });
+  res.end(body);
+}
+
+const server = http.createServer((req, res) => {
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+      "Access-Control-Allow-Headers": "*",
+    });
+    return res.end();
+  }
+
+  const url = new URL(req.url || "/", `http://localhost:${PORT}`);
+
+  if (url.pathname === "/api/health") {
+    return send(
+      res,
+      200,
+      JSON.stringify({
+        ok: true,
+        app: "gridcaller-signal",
+        rooms: [...rooms.entries()].map(([id, m]) => ({ room: id, peers: m.size })),
+        lan: getLanIPs(),
+        port: PORT,
+      }),
+      "application/json"
+    );
+  }
+
+  // static from dist
+  let rel = url.pathname === "/" ? "/index.html" : url.pathname;
+  rel = path.normalize(rel).replace(/^(\.\.[/\\])+/, "");
+  const file = path.join(DIST, rel);
+
+  if (fs.existsSync(DIST) && file.startsWith(DIST) && fs.existsSync(file) && fs.statSync(file).isFile()) {
+    return send(res, 200, fs.readFileSync(file), mime(file));
+  }
+
+  if (url.pathname === "/" || url.pathname === "/index.html") {
+    return send(
+      res,
+      200,
+      `<!doctype html><html><body style="font-family:system-ui;background:#0b141a;color:#e9edef;padding:24px">
+      <h1>📞 GridCaller Mesh Signal</h1>
+      <p>Signal server LIVE on port <b>${PORT}</b></p>
+      <p>Pehle UI build karo: <code>npm run build</code> phir server restart.</p>
+      <p>Ya dev mode: <code>npm run dev</code> (UI) + is signal server alag.</p>
+      <pre>${JSON.stringify({ lan: getLanIPs(), port: PORT }, null, 2)}</pre>
+      </body></html>`,
+      "text/html; charset=utf-8"
+    );
+  }
+
+  send(res, 404, "Not found");
+});
+
+const wss = new WebSocketServer({ server, path: "/ws" });
+
+function roomPeers(roomId) {
+  const m = rooms.get(roomId);
+  if (!m) return [];
+  return [...m.entries()].map(([id, meta]) => ({
+    id,
+    name: meta.name || id.slice(0, 8),
+  }));
+}
+
+function broadcast(roomId, exceptId, payload) {
+  const m = rooms.get(roomId);
+  if (!m) return;
+  const raw = JSON.stringify(payload);
+  for (const [id, meta] of m) {
+    if (id === exceptId) continue;
+    if (meta.ws.readyState === 1) meta.ws.send(raw);
+  }
+}
+
+wss.on("connection", (ws) => {
+  let roomId = null;
+  let peerId = null;
+
+  ws.on("message", (buf) => {
+    let msg;
+    try {
+      msg = JSON.parse(String(buf));
+    } catch {
+      return;
+    }
+
+    // join: { type:'join', room, peerId, name }
+    if (msg.type === "join") {
+      roomId = String(msg.room || "gridcaller").slice(0, 64);
+      peerId = String(msg.peerId || `p_${Date.now()}`).slice(0, 64);
+      const name = String(msg.name || "Peer").slice(0, 40);
+
+      if (!rooms.has(roomId)) rooms.set(roomId, new Map());
+      const m = rooms.get(roomId);
+
+      // drop stale same id
+      const prev = m.get(peerId);
+      if (prev?.ws && prev.ws !== ws) {
+        try {
+          prev.ws.close();
+        } catch {}
+      }
+      m.set(peerId, { ws, name, joinedAt: Date.now() });
+
+      ws.send(
+        JSON.stringify({
+          type: "joined",
+          room: roomId,
+          peerId,
+          peers: roomPeers(roomId).filter((p) => p.id !== peerId),
+        })
+      );
+      broadcast(roomId, peerId, {
+        type: "peer-join",
+        peer: { id: peerId, name },
+      });
+      return;
+    }
+
+    if (!roomId || !peerId) return;
+
+    // relay signal / chat / call to target or room
+    if (msg.type === "signal" || msg.type === "chat" || msg.type === "call" || msg.type === "presence") {
+      const target = msg.to;
+      const packet = { ...msg, from: peerId, ts: Date.now() };
+      const m = rooms.get(roomId);
+      if (!m) return;
+
+      if (target && m.has(target)) {
+        const t = m.get(target);
+        if (t.ws.readyState === 1) t.ws.send(JSON.stringify(packet));
+      } else if (!target) {
+        broadcast(roomId, peerId, packet);
+      }
+      return;
+    }
+
+    if (msg.type === "ping") {
+      ws.send(JSON.stringify({ type: "pong", t: Date.now() }));
+    }
+  });
+
+  ws.on("close", () => {
+    if (!roomId || !peerId) return;
+    const m = rooms.get(roomId);
+    if (!m) return;
+    const cur = m.get(peerId);
+    if (cur?.ws === ws) {
+      m.delete(peerId);
+      broadcast(roomId, peerId, { type: "peer-leave", peerId });
+      if (m.size === 0) rooms.delete(roomId);
+    }
+  });
+});
+
+server.listen(PORT, "0.0.0.0", () => {
+  const ips = getLanIPs();
+  console.log("");
+  console.log("═══════════════════════════════════════════");
+  console.log("  📞 GridCaller Mesh Signal — LIVE");
+  console.log("═══════════════════════════════════════════");
+  console.log(`  Port:     ${PORT}`);
+  console.log(`  Health:   http://127.0.0.1:${PORT}/api/health`);
+  console.log(`  WebSocket ws://<LAN-IP>:${PORT}/ws`);
+  if (ips.length) {
+    console.log("  Phone se open / connect:");
+    for (const ip of ips) {
+      console.log(`    UI:  http://${ip}:${PORT}/`);
+      console.log(`    WS:  ws://${ip}:${PORT}/ws`);
+    }
+  } else {
+    console.log("  (LAN IP nahi mili — hotspot / WiFi check karo)");
+  }
+  console.log("═══════════════════════════════════════════");
+  console.log("");
+});

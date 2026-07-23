@@ -1,0 +1,10 @@
+{
+  "versionCode": 13,
+  "versionName": "2.8.0",
+  "force": true,
+  "notes": "PC push — multi-path mesh + auto OTA",
+  "apk": "GridCaller.apk",
+  "size": 5227822,
+  "mtime": 1784685048133.1997,
+  "updatedAt": 1784685048979
+}

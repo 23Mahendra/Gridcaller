@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GridCaller dual handle test</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0b0b0f; color: #eee; margin: 0; padding: 16px; }
+    h1 { font-size: 18px; margin: 0 0 12px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 700px) { .row { grid-template-columns: 1fr; } }
+    .card { background: #1c1c22; border-radius: 12px; padding: 14px; border: 1px solid #333; }
+    .ok { color: #30d158; }
+    .bad { color: #ff453a; }
+    .muted { color: #98989f; font-size: 12px; }
+    button { background: #0a84ff; color: #fff; border: none; border-radius: 10px; padding: 10px 14px; font-weight: 700; cursor: pointer; margin: 4px 4px 4px 0; }
+    button.green { background: #30d158; }
+    button.red { background: #ff453a; }
+    pre { background: #111; padding: 10px; border-radius: 8px; font-size: 11px; overflow: auto; max-height: 220px; white-space: pre-wrap; }
+    input { width: 100%; box-sizing: border-box; padding: 8px; border-radius: 8px; border: 1px solid #444; background: #111; color: #fff; margin: 4px 0 8px; }
+  </style>
+</head>
+<body>
+  <h1>GridCaller · dual test · 9503154355 ↔ 9284048967</h1>
+  <p class="muted">PC web test: two virtual clients on same hub. Real phones with same handles should also register.</p>
+  <div class="row">
+    <div class="card">
+      <b>Phone A</b>
+      <div class="muted">handle / number</div>
+      <input id="aHandle" value="9503154355" />
+      <div>id: <code id="aId">—</code></div>
+      <div id="aStatus" class="muted">idle</div>
+      <button class="green" id="aCall">A → Call B</button>
+      <button id="aMsg">A → Msg B</button>
+      <button class="red" id="aHang">Hang up A</button>
+      <pre id="aLog"></pre>
+    </div>
+    <div class="card">
+      <b>Phone B</b>
+      <div class="muted">handle / number</div>
+      <input id="bHandle" value="9284048967" />
+      <div>id: <code id="bId">—</code></div>
+      <div id="bStatus" class="muted">idle</div>
+      <button class="green" id="bAccept">B Accept call</button>
+      <button class="red" id="bReject">B Reject</button>
+      <button id="bMsg">B → Msg A</button>
+      <pre id="bLog"></pre>
+    </div>
+  </div>
+  <div class="card" style="margin-top:12px">
+    <b>Hub / resolve</b>
+    <div id="hubLine" class="muted">…</div>
+    <pre id="sysLog"></pre>
+  </div>
+  <script>
+    const HUB = location.origin.includes("8765")
+      ? location.origin
+      : "http://192.168.1.8:8765";
+
+    function log(el, msg) {
+      const t = new Date().toLocaleTimeString();
+      el.textContent = `[${t}] ${msg}\n` + el.textContent;
+    }
+    const sys = document.getElementById("sysLog");
+    const aLog = document.getElementById("aLog");
+    const bLog = document.getElementById("bLog");
+
+    function rid(p) {
+      return p + "_" + Math.random().toString(36).slice(2, 8);
+    }
+
+    class Client {
+      constructor(label, handleInput, idEl, statusEl, logEl) {
+        this.label = label;
+        this.handleInput = handleInput;
+        this.idEl = idEl;
+        this.statusEl = statusEl;
+        this.logEl = logEl;
+        this.id = rid(label === "A" ? "webA" : "webB");
+        this.pollAfter = 0;
+        this.pc = null;
+        this.pendingOffer = null;
+        this.callId = "";
+        this.remoteId = "";
+        this.idEl.textContent = this.id;
+      }
+      get handle() {
+        return this.handleInput.value.trim().replace(/\D/g, "") || this.handleInput.value.trim();
+      }
+      async register() {
+        const body = {
+          id: this.id,
+          name: "Web-" + this.label,
+          handle: this.handle,
+          phone: this.handle,
+          displayNumber: this.handle,
+        };
+        const r = await fetch(HUB + "/api/mesh/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const j = await r.json();
+        log(this.logEl, "register ok others=" + (j.others || []).length);
+        this.statusEl.textContent = "online · " + this.handle;
+        this.statusEl.className = "ok";
+        return j;
+      }
+      async resolve(q) {
+        const r = await fetch(HUB + "/api/mesh/resolve?q=" + encodeURIComponent(q));
+        return r.json();
+      }
+      async publish(type, data) {
+        await fetch(HUB + "/api/mesh/publish", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type,
+            from: this.id,
+            fromName: "Web-" + this.label,
+            time: Date.now(),
+            data,
+          }),
+        });
+      }
+      async pollOnce() {
+        const q = new URLSearchParams({
+          after: String(this.pollAfter),
+          id: this.id,
+          handle: this.handle,
+          phone: this.handle,
+        });
+        const r = await fetch(HUB + "/api/mesh/poll?" + q);
+        const j = await r.json();
+        if (typeof j.advanceTo === "number") this.pollAfter = j.advanceTo;
+        for (const e of j.messages || []) {
+          if (e.seq > this.pollAfter) this.pollAfter = e.seq;
+          await this.onMsg(e.msg);
+        }
+      }
+      async onMsg(msg) {
+        if (!msg || msg.from === this.id) return;
+        if (msg.type === "GRIDCALLER_RING" && msg.data?.to === this.id) {
+          this.statusEl.textContent = "📞 INCOMING from " + (msg.fromName || msg.from);
+          this.statusEl.className = "ok";
+          this.callId = msg.data.callId;
+          this.remoteId = msg.from;
+          log(this.logEl, "RING from " + msg.from);
+        }
+        if (msg.type === "GRIDCALLER_OFFER" && msg.data?.to === this.id) {
+          this.pendingOffer = msg;
+          this.callId = msg.data.callId;
+          this.remoteId = msg.from;
+          this.statusEl.textContent = "📞 OFFER — tap Accept";
+          this.statusEl.className = "ok";
+          log(this.logEl, "OFFER sdp=" + !!(msg.data && msg.data.offer));
+        }
+        if (msg.type === "GRIDCALLER_ANSWER" && msg.data?.callId === this.callId) {
+          log(this.logEl, "ANSWER received");
+          if (this.pc && msg.data.answer) {
+            try {
+              await this.pc.setRemoteDescription(msg.data.answer);
+              this.statusEl.textContent = "connected (signaling OK)";
+            } catch (e) {
+              log(this.logEl, "answer err " + e.message);
+            }
+          }
+        }
+        if (msg.type === "GRIDCALLER_ICE" && msg.data?.callId === this.callId && this.pc) {
+          try {
+            await this.pc.addIceCandidate(msg.data.candidate);
+          } catch {}
+        }
+        if (msg.type === "GRIDCALLER_SMS" && msg.data?.to === this.id) {
+          log(this.logEl, "SMS: " + msg.data.text);
+          this.statusEl.textContent = "SMS: " + msg.data.text;
+        }
+        if (msg.type === "GRIDCALLER_HANGUP") {
+          this.statusEl.textContent = "idle (hangup)";
+          this.pendingOffer = null;
+        }
+      }
+      async call(toId, toName) {
+        this.remoteId = toId;
+        this.callId = "web_" + Date.now();
+        this.statusEl.textContent = "calling " + toName + "…";
+        const pc = new RTCPeerConnection({
+          iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+        });
+        this.pc = pc;
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+        pc.onicecandidate = (e) => {
+          if (e.candidate) {
+            this.publish("GRIDCALLER_ICE", {
+              callId: this.callId,
+              to: toId,
+              candidate: e.candidate.toJSON(),
+            });
+          }
+        };
+        pc.ontrack = () => {
+          this.statusEl.textContent = "🔊 remote audio track";
+          log(this.logEl, "ontrack remote audio");
+        };
+        const offer = await pc.createOffer({ offerToReceiveAudio: true });
+        await pc.setLocalDescription(offer);
+        await this.publish("GRIDCALLER_RING", {
+          callId: this.callId,
+          to: toId,
+          fromName: "Web-" + this.label,
+        });
+        await this.publish("GRIDCALLER_OFFER", {
+          callId: this.callId,
+          to: toId,
+          offer: pc.localDescription,
+          fromName: "Web-" + this.label,
+          video: false,
+        });
+        log(this.logEl, "RING+OFFER → " + toId);
+      }
+      async accept() {
+        if (!this.pendingOffer) {
+          log(this.logEl, "no pending offer");
+          return;
+        }
+        const msg = this.pendingOffer;
+        const pc = new RTCPeerConnection({
+          iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+        });
+        this.pc = pc;
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+        pc.onicecandidate = (e) => {
+          if (e.candidate) {
+            this.publish("GRIDCALLER_ICE", {
+              callId: msg.data.callId,
+              to: msg.from,
+              candidate: e.candidate.toJSON(),
+            });
+          }
+        };
+        pc.ontrack = () => {
+          this.statusEl.textContent = "🔊 connected speak";
+          log(this.logEl, "ontrack remote audio");
+        };
+        await pc.setRemoteDescription(msg.data.offer);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        await this.publish("GRIDCALLER_ANSWER", {
+          callId: msg.data.callId,
+          to: msg.from,
+          answer: pc.localDescription,
+        });
+        this.statusEl.textContent = "answered — connecting";
+        log(this.logEl, "ANSWER sent");
+      }
+      async sendSms(toId, text) {
+        await this.publish("GRIDCALLER_SMS", {
+          id: "sms_" + Date.now(),
+          to: toId,
+          text,
+          fromName: "Web-" + this.label,
+        });
+        log(this.logEl, "SMS → " + toId + ": " + text);
+      }
+      hangup() {
+        if (this.remoteId) {
+          this.publish("GRIDCALLER_HANGUP", {
+            callId: this.callId,
+            to: this.remoteId,
+          });
+        }
+        try {
+          this.pc?.close();
+        } catch {}
+        this.pc = null;
+        this.pendingOffer = null;
+        this.statusEl.textContent = "idle";
+      }
+    }
+
+    const A = new Client(
+      "A",
+      document.getElementById("aHandle"),
+      document.getElementById("aId"),
+      document.getElementById("aStatus"),
+      aLog
+    );
+    const B = new Client(
+      "B",
+      document.getElementById("bHandle"),
+      document.getElementById("bId"),
+      document.getElementById("bStatus"),
+      bLog
+    );
+
+    async function boot() {
+      try {
+        const h = await fetch(HUB + "/api/health").then((r) => r.json());
+        document.getElementById("hubLine").innerHTML =
+          '<span class="ok">Hub OK</span> ' +
+          (h.version && h.version.versionName) +
+          " · " +
+          HUB +
+          " · lan " +
+          (h.lan || []).join(",");
+        log(sys, "hub ok");
+      } catch (e) {
+        document.getElementById("hubLine").innerHTML =
+          '<span class="bad">Hub offline</span> ' + HUB;
+        log(sys, "hub fail " + e.message);
+        return;
+      }
+      await A.register();
+      await B.register();
+      const rA = await A.resolve("9503154355");
+      const rB = await B.resolve("9284048967");
+      log(sys, "resolve 950 → " + (rA.peer && rA.peer.id) + " ok=" + rA.ok);
+      log(sys, "resolve 928 → " + (rB.peer && rB.peer.id) + " ok=" + rB.ok);
+      // continuous poll like APK
+      setInterval(() => {
+        A.pollOnce().catch(() => {});
+        B.pollOnce().catch(() => {});
+        A.register().catch(() => {});
+        B.register().catch(() => {});
+      }, 700);
+    }
+
+    document.getElementById("aCall").onclick = async () => {
+      try {
+        await A.register();
+        await B.register();
+        const r = await A.resolve(B.handle);
+        if (!r.ok || !r.peer) {
+          log(aLog, "resolve B failed — is B registered?");
+          return;
+        }
+        // Prefer live web B id if same handle
+        const to = r.peer.id === B.id || r.peer.handle === B.handle ? B.id : r.peer.id;
+        // Always call web B when testing on this page
+        await A.call(B.id, "Web-B " + B.handle);
+      } catch (e) {
+        log(aLog, "call err " + e.message);
+        if (/Permission|NotAllowed|getUserMedia/i.test(e.message)) {
+          log(aLog, "Allow microphone in browser");
+        }
+      }
+    };
+    document.getElementById("bAccept").onclick = () => B.accept().catch((e) => log(bLog, e.message));
+    document.getElementById("bReject").onclick = () => B.hangup();
+    document.getElementById("aHang").onclick = () => A.hangup();
+    document.getElementById("aMsg").onclick = async () => {
+      await A.register();
+      await A.sendSms(B.id, "PC web test SMS from 950 → 928");
+    };
+    document.getElementById("bMsg").onclick = async () => {
+      await B.register();
+      await B.sendSms(A.id, "PC web test SMS from 928 → 950");
+    };
+
+    boot();
+  </script>
+</body>
+</html>
