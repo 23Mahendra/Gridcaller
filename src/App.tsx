@@ -22,6 +22,8 @@ import { startMeshKeepAlive } from "./plugins/meshCallNative";
 import { startMeshDirectory } from "./kernel/meshDirectory";
 import { startNetworkHandoff } from "./kernel/networkHandoff";
 import { ensureMeshIdentity } from "./mesh/identity";
+import { ConsentGate } from "./ui/ConsentGate";
+import { getConsentState } from "./kernel/consent";
 
 function userFromStorage() {
   return {
@@ -48,6 +50,7 @@ async function setupNativeChrome() {
 export default function App() {
   const user = userFromStorage();
   const dark = S.get("dark_mode", true) !== false;
+  const [consentReady, setConsentReady] = useState(() => getConsentState().agreed);
   const [permNote, setPermNote] = useState("");
   const [otaNote, setOtaNote] = useState("");
   const [otaInfo, setOtaInfo] = useState<UpdateInfo | null>(null);
@@ -55,6 +58,8 @@ export default function App() {
   const [autoJoinNote, setAutoJoinNote] = useState("Auto-joining mesh");
 
   useEffect(() => {
+    if (!consentReady) return;
+
     const stop = installViewportFit();
     let heartbeatTimer: number | undefined;
 
@@ -199,12 +204,13 @@ export default function App() {
         offAj();
       } catch {}
     };
-  }, []);
+  }, [consentReady]);
 
   return (
-    <div
-      className="gc-app-shell"
-      style={{
+    <ConsentGate onAccepted={() => setConsentReady(true)}>
+      <div
+        className="gc-app-shell"
+        style={{
         height: "100%",
         width: "100%",
         maxWidth: "100%",
@@ -271,19 +277,20 @@ export default function App() {
           ) : null}
         </div>
       ) : null}
-      <div
-        style={{
-          flex: 1,
-          minHeight: 0,
-          minWidth: 0,
-          width: "100%",
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-        }}
-      >
-        <GridCaller user={user} />
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            minWidth: 0,
+            width: "100%",
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+          }}
+        >
+          <GridCaller user={user} />
+        </div>
       </div>
-    </div>
+    </ConsentGate>
   );
 }
