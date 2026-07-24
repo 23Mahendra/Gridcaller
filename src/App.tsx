@@ -18,7 +18,7 @@ import { MeshEngine } from "./kernel/mesh";
 import { startFullAutoJoin, onAutoJoinStatus } from "./kernel/autoJoin";
 import { deriveLifecycleState } from "./kernel/appLifecycle";
 import { startWifiMemory } from "./kernel/wifiMemory";
-import { startMeshKeepAlive } from "./plugins/meshCallNative";
+import { startMeshKeepAlive, startMeshVpn, stopMeshVpn } from "./plugins/meshCallNative";
 import { startMeshDirectory } from "./kernel/meshDirectory";
 import { startNetworkHandoff } from "./kernel/networkHandoff";
 import { ensureMeshIdentity, rememberDeviceIdentity } from "./mesh/identity";
@@ -123,6 +123,7 @@ export default function App() {
     startMeshDirectory(); // persistent peers + mesh memory
     startNetworkHandoff(); // smooth Wi‑Fi/path switch without killing voice
     void startMeshKeepAlive(); // FG service: mesh listen when app backgrounded/minimized
+    void startMeshVpn("gateway", navigator.onLine).catch(() => {});
     // FULL auto-join: Wi‑Fi mesh + swarm + Bluetooth scan — no manual Connect
     void startFullAutoJoin(S.get("user_name") || S.get("mesh_name") || "GridUser");
     void startAutoMesh(S.get("user_name") || S.get("mesh_name") || "GridUser");
@@ -172,8 +173,8 @@ export default function App() {
           if (!r.bluetooth) missing.push("Bluetooth");
           setPermNote(
             missing.length
-              ? `Allow once: ${missing.join(", ")} — then nearby GridCaller devices become part of the relay tower mesh for calls and texts.`
-              : `v${APP_VERSION_NAME} · Mesh tower fabric ON · every nearby GridCaller relays traffic automatically`
+              ? `Allow once: ${missing.join(", ")} — then nearby devices can connect for calls and texts.`
+              : `v${APP_VERSION_NAME} · Ready for nearby connections`
           );
           if (!missing.length) {
             setTimeout(() => setPermNote(""), 5000);
@@ -183,6 +184,7 @@ export default function App() {
         // After permissions → re-run full auto join (BT/Location now available)
         void startFullAutoJoin(S.get("user_name") || S.get("mesh_name") || "GridUser");
         void startMeshKeepAlive();
+        void startMeshVpn("gateway", navigator.onLine).catch(() => {});
       } catch (e: any) {
         setPermNote(e?.message || "");
       }
@@ -198,6 +200,9 @@ export default function App() {
       stop();
       try {
         window.removeEventListener("gc-native-incoming", onNativeIn as any);
+      } catch {}
+      try {
+        void stopMeshVpn();
       } catch {}
       try {
         offOta();

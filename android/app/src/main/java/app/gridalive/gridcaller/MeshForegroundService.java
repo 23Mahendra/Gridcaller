@@ -7,6 +7,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
@@ -21,6 +22,9 @@ public class MeshForegroundService extends Service {
     public static final String CHANNEL_CALL = "gridcaller_incoming_call";
     public static final int NOTIF_MESH = 7701;
     public static final int NOTIF_CALL = 7702;
+    private static final String PREFS = "mesh_vpn_state";
+    private static final String KEY_MODE = "mode";
+    private static final String KEY_ONLINE = "online";
 
     private PowerManager.WakeLock wakeLock;
 
@@ -190,5 +194,32 @@ public class MeshForegroundService extends Service {
             if (v != null) v.cancel();
         } catch (Exception ignored) {
         }
+    }
+
+    public static void startMeshVpn(Context ctx, String mode, boolean online) {
+        SharedPreferences sp = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        String resolved = "disabled";
+        if ("gateway".equalsIgnoreCase(mode) || "client".equalsIgnoreCase(mode)) {
+            resolved = mode.toLowerCase();
+        }
+        if ("gateway".equals(resolved) && !online) {
+            resolved = "client";
+        }
+        sp.edit().putString(KEY_MODE, resolved).putBoolean(KEY_ONLINE, online).apply();
+    }
+
+    public static void stopMeshVpn(Context ctx) {
+        SharedPreferences sp = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        sp.edit().putString(KEY_MODE, "disabled").putBoolean(KEY_ONLINE, false).apply();
+    }
+
+    public static String getMeshVpnMode(Context ctx) {
+        SharedPreferences sp = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        return sp.getString(KEY_MODE, "disabled");
+    }
+
+    public static boolean isMeshVpnOnline(Context ctx) {
+        SharedPreferences sp = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        return sp.getBoolean(KEY_ONLINE, false);
     }
 }

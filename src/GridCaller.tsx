@@ -4839,6 +4839,9 @@ export default function GridCaller({
                       {globalPeers.filter((p) => p.online).length}
                       {meshMapPeers.length ? ` · Map ${meshMapPeers.length}` : ""}
                     </div>
+                    <div style={{ fontSize: 12, color: tokens.green, marginTop: 6, fontWeight: 700 }}>
+                      Nearby devices are ready
+                    </div>
                     {(() => {
                       const cd = listConnectedDevices({
                         meshPeers: peers,
@@ -5294,7 +5297,7 @@ export default function GridCaller({
                         <div style={{ fontSize: 12, color: tokens.label }}>Strength</div>
                         <div style={{ fontSize: 32, fontWeight: 800, color: tokens.green }}>{r.score}/100</div>
                         <div style={{ fontSize: 12, color: tokens.secondary, lineHeight: 1.45 }}>
-                          Every nearby GridCaller can act as a relay tower, so calls and texts can hop across the mesh automatically.
+                          Nearby devices are available.
                           <br />
                           Neighbors: {r.softTowers} · {r.hopRange}
                           <br />
@@ -5340,7 +5343,7 @@ export default function GridCaller({
                     {deviceBusy ? "Scanning…" : "BT accessory (optional)"}
                   </button>
                   <div style={{ fontSize: 11, color: tokens.green, marginBottom: 10, lineHeight: 1.4 }}>
-                    Mesh is automatic. With permissions already granted, nearby GridCaller devices join the shared network by default for calls and texts.
+                    Nearby devices can join automatically when permissions are on.
                   </div>
                   {listBt().length === 0 ? (
                     <div style={{ fontSize: 12, color: tokens.label, marginBottom: 12 }}>
@@ -5438,7 +5441,7 @@ export default function GridCaller({
                     Save and connect
                   </button>
                   <div style={{ fontSize: 11, color: tokens.label, marginBottom: 12, lineHeight: 1.4 }}>
-                    Wi‑Fi is reused as a shared mesh path, so once devices are in range they can stay interconnected for calling and texting without extra setup.
+                    Wi‑Fi can be reused for nearby connection and calling.
                   </div>
 
                   {listWifi().map((w) => (
@@ -5546,7 +5549,10 @@ export default function GridCaller({
                       >
                         <div style={{ fontSize: 28, fontWeight: 800, color: tokens.blue }}>{h.softTowers}</div>
                         <div style={{ fontSize: 13, color: tokens.label }}>Devices (you + nearby)</div>
-                        <div style={{ fontSize: 13, color: tokens.green, marginTop: 8, fontWeight: 600 }}>
+                        <div style={{ fontSize: 12, color: tokens.green, marginTop: 8, fontWeight: 700 }}>
+                          Nearby devices are connected
+                        </div>
+                        <div style={{ fontSize: 13, color: tokens.green, marginTop: 6, fontWeight: 600 }}>
                           {h.estimatedRangeLabel}
                         </div>
                         <div style={{ fontSize: 12, color: tokens.label, marginTop: 6 }}>

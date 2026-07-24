@@ -24,6 +24,8 @@ import { MeshEngine } from "./mesh";
 import freeMeshFabric from "./freeMeshFabric";
 import { setForceLocalMesh } from "./offlineMode";
 import { MeshRoutingTable } from "./meshRoutingTable";
+import { resolveTowerRelayPolicy, type TowerRelayPolicy } from "./towerRelayPolicy";
+import { pickBestRoute, type SmartRouteCandidate } from "./smartRouting";
 
 export type HopTransport = "wifi-lan" | "bc-tab" | "fabric-bc" | "bt-web" | "optical";
 
@@ -76,6 +78,7 @@ class SoftTowerHopNet {
   private beaconTimer: ReturnType<typeof setInterval> | null = null;
   private stats = { tx: 0, rx: 0, relayed: 0, delivered: 0 };
   private routingTable = new MeshRoutingTable();
+  private policy: TowerRelayPolicy;
 
   get id() {
     return this.nodeId;
@@ -91,8 +94,9 @@ class SoftTowerHopNet {
       this.beacon();
       return this;
     }
+    this.policy = resolveTowerRelayPolicy(S);
     this.started = true;
-    setForceLocalMesh(true);
+    setForceLocalMesh(this.policy.localOnly !== false);
 
     this.nodeId =
       S.get("mesh_id") ||
@@ -137,7 +141,7 @@ class SoftTowerHopNet {
       this.pruneSeen();
       this.beacon();
       this.handshakeSweep();
-    }, BEACON_MS);
+    }, this.policy.beaconMs || BEACON_MS);
 
     this.beacon();
     bus.emit("softTowerHop:ready", { id: this.nodeId, name: this.nodeName });
@@ -177,6 +181,16 @@ class SoftTowerHopNet {
       .map((p) => ({ ...p, online: now - p.lastSeen < 45000 } as any))
       .filter((p: any) => p.online)
       .sort((a: any, b: any) => a.hops - b.hops);
+  }
+
+  getRouteFor(targetId: string) {
+    const candidates = this.routingTable.snapshot().filter((route) => route.targetId === targetId);
+    return pickBestRoute(candidates as SmartRouteCandidate[], {
+      battery: 0.7,
+      signal: 0.7,
+      stability: 0.8,
+      transportScore: 0.8,
+    });
   }
 
   getNetworkHealth() {
@@ -223,13 +237,14 @@ class SoftTowerHopNet {
 
   /** Handshake HELLO — announce as soft tower with capabilities */
   private beacon() {
+    if (!this.policy.enabled) return;
     const pkt: HopPacket = {
       id: rid("bcn"),
       kind: "tower-beacon",
       from: this.nodeId,
       fromName: this.nodeName,
       hops: 0,
-      ttl: 6,
+      ttl: Math.min(this.policy.maxTtl || MAX_TTL, 8),
       path: [this.nodeId],
       transportsTried: [],
       ts: Date.now(),
@@ -253,7 +268,7 @@ class SoftTowerHopNet {
         fromName: this.nodeName,
         to: p.id,
         hops: 0,
-        ttl: 8,
+        ttl: Math.min(this.policy.maxTtl || MAX_TTL, 10),
         path: [this.nodeId],
         transportsTried: [],
         ts: Date.now(),
@@ -368,7 +383,8 @@ class SoftTowerHopNet {
     }
 
     // Relay hop (soft tower behavior)
-    if ((pkt.hops || 0) + 1 < (pkt.ttl || MAX_TTL) && !(pkt.path || []).includes(this.nodeId)) {
+    const maxTtl = this.policy.maxTtl || MAX_TTL;
+    if ((pkt.hops || 0) + 1 < (pkt.ttl || maxTtl) && !(pkt.path || []).includes(this.nodeId)) {
       // Don't relay if unicast and we delivered to self only? Still relay flood for density
       const shouldRelay = !pkt.to || !forUs || pkt.kind === "tower-beacon" || pkt.kind === "hello";
       // Always relay unicast until delivered widely — store-and-forward style
@@ -391,7 +407,7 @@ class SoftTowerHopNet {
 
   private relay(pkt: HopPacket, via: HopTransport) {
     if ((pkt.path || []).includes(this.nodeId)) return;
-    if ((pkt.hops || 0) + 1 >= (pkt.ttl || MAX_TTL)) return;
+    if ((pkt.hops || 0) + 1 >= (pkt.ttl || this.policy.maxTtl || MAX_TTL)) return;
     this.stats.relayed++;
     const next: HopPacket = {
       ...pkt,

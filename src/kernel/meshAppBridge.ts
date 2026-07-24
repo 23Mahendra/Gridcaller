@@ -17,6 +17,9 @@ import meshComms from "./meshCommsEngine";
 import omniMesh from "./omniMeshEngine";
 import { createPendingEnvelopeEntry, shouldRetryPendingEnvelopeEntry, type PendingEnvelopeEntry } from "../lib/meshReliability";
 import { MeshRoutingTable } from "./meshRoutingTable";
+import { pickBestRoute, type SmartRouteCandidate } from "./smartRouting";
+import { compressBytes, decompressBytes } from "./compress";
+import { prioritizeTraffic, selectBestGateway, type GatewayCandidate, type MeshTrafficPacket } from "./meshPower";
 
 export type MeshAppSession = {
   appId: string;
@@ -217,10 +220,10 @@ class MeshAppBridge {
    * Send a cross-app message over all mesh transports
    * (used by GridCaller SMS + Mesh Comms text)
    */
-  sendMessage(channel: string, text: string, meta?: { to?: string; fromName?: string; id?: string }) {
+  async sendMessage(channel: string, text: string, meta?: { to?: string; fromName?: string; id?: string }) {
     const id = meta?.id || `mab_${Date.now().toString(36)}`;
     const fromName = meta?.fromName || S.get("user_name") || "User";
-    const packet = {
+    const packet: MeshTrafficPacket & { id: string; channel: string; text: string; to?: string; fromName: string; from: string; ts: number } = {
       id,
       channel,
       text,
@@ -230,23 +233,35 @@ class MeshAppBridge {
       ts: Date.now(),
     };
 
+    const prioritized = prioritizeTraffic({
+      kind: "message",
+      payload: packet,
+    });
+    const payload = { ...packet, priority: prioritized.priority };
+    try {
+      const raw = new TextEncoder().encode(text);
+      const compressed = await compressBytes(raw);
+      if (compressed.algo !== "none" && compressed.compressedBytes < raw.byteLength) {
+        payload.text = `[[gzip:${compressed.compressedBytes}]]${text}`;
+      }
+    } catch {}
     try {
       meshComms.joinWalkieChannel?.(channel, () => {});
-      meshComms.sendWalkieTextMessage?.(channel, text, fromName);
+      meshComms.sendWalkieTextMessage?.(channel, payload.text, fromName);
     } catch {}
     try {
-      omniMesh.sendSms?.(meta?.to || "broadcast", text, fromName);
+      omniMesh.sendSms?.(meta?.to || "broadcast", payload.text, fromName);
     } catch {}
     try {
-      this.queueEnvelope("app-msg", packet, meta?.to || packet.channel);
-      MeshEngine.broadcast("MESH_APP_MSG", packet);
+      this.queueEnvelope("app-msg", payload, meta?.to || packet.channel);
+      MeshEngine.broadcast("MESH_APP_MSG", payload);
     } catch {}
     try {
-      void omniMesh.send?.("MESH_APP_MSG", packet, { priority: "data", ttl: 12 });
+      void omniMesh.send?.("MESH_APP_MSG", payload, { priority: "data", ttl: 12 });
     } catch {}
 
-    bus.emit("meshApp:out", packet);
-    return packet;
+    bus.emit("meshApp:out", payload);
+    return payload;
   }
 
   /**
@@ -265,6 +280,39 @@ class MeshAppBridge {
       return fetch(url, init);
     }
     throw new Error("No mesh gateway / internet path for this request");
+  }
+
+  getBestGatewayRoute() {
+    const candidates = this.routingTable.snapshot().filter((route) => route.gateway);
+    const scored = candidates as SmartRouteCandidate[];
+    const selected = pickBestRoute(scored, {
+      battery: 0.7,
+      signal: 0.7,
+      stability: 0.8,
+      transportScore: 0.8,
+    });
+    if (selected) return selected;
+    return null;
+  }
+
+  getBestGatewayCandidate(): GatewayCandidate | null {
+    const preferredId = (S.get("mesh_selected_gateway", "") as string) || "";
+    const candidates: GatewayCandidate[] = this.routingTable.snapshot()
+      .filter((route) => route.gateway)
+      .map((route) => ({
+        id: route.nextHop || route.targetId,
+        speed: 0.7 + (route.quality || 0.5) * 0.25,
+        hops: route.hops || 1,
+        battery: 0.8,
+        stability: route.quality || 0.7,
+        signal: route.quality || 0.7,
+        online: true,
+      }));
+    const selected = selectBestGateway(candidates, preferredId);
+    if (selected) {
+      S.set("mesh_selected_gateway", selected.id);
+    }
+    return selected;
   }
 
   getStatus() {

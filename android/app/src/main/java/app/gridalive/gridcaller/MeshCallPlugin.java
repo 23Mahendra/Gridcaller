@@ -66,4 +66,45 @@ public class MeshCallPlugin extends Plugin {
             call.reject(e.getMessage());
         }
     }
+
+    @PluginMethod
+    public void startMeshVpn(PluginCall call) {
+        try {
+            String mode = call.getString("mode", "gateway");
+            boolean online = call.getBoolean("online", true);
+            MeshForegroundService.startMeshVpn(getContext(), mode, online);
+            JSObject ret = new JSObject();
+            ret.put("ok", true);
+            ret.put("mode", MeshForegroundService.getMeshVpnMode(getContext()));
+            ret.put("online", MeshForegroundService.isMeshVpnOnline(getContext()));
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject(e.getMessage());
+        }
+    }
+
+    @PluginMethod
+    public void stopMeshVpn(PluginCall call) {
+        try {
+            MeshForegroundService.stopMeshVpn(getContext());
+            JSObject ret = new JSObject();
+            ret.put("ok", true);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject(e.getMessage());
+        }
+    }
+
+    @PluginMethod
+    public void getMeshVpnStatus(PluginCall call) {
+        try {
+            JSObject ret = new JSObject();
+            ret.put("ok", true);
+            ret.put("mode", MeshForegroundService.getMeshVpnMode(getContext()));
+            ret.put("online", MeshForegroundService.isMeshVpnOnline(getContext()));
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject(e.getMessage());
+        }
+    }
 }

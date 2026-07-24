@@ -8,6 +8,9 @@ export interface MeshCallPlugin {
   stopKeepAlive(): Promise<{ ok: boolean }>;
   showIncomingCall(opts: { name: string; callId: string }): Promise<{ ok: boolean }>;
   cancelIncomingCall(): Promise<{ ok: boolean }>;
+  startMeshVpn(opts?: { mode?: string; online?: boolean }): Promise<{ ok: boolean; mode?: string }>;
+  stopMeshVpn(): Promise<{ ok: boolean }>;
+  getMeshVpnStatus(): Promise<{ ok: boolean; mode?: string; online?: boolean }>;
 }
 
 const MeshCall = registerPlugin<MeshCallPlugin>("MeshCall");
@@ -62,6 +65,42 @@ export async function nativeCancelIncoming(): Promise<void> {
   try {
     await MeshCall.cancelIncomingCall();
   } catch {}
+}
+
+export async function startMeshVpn(mode = "gateway", online = true): Promise<{ ok: boolean; mode?: string }> {
+  if (!Capacitor.isNativePlatform()) {
+    return { ok: false, mode: "disabled" };
+  }
+  try {
+    return await MeshCall.startMeshVpn({ mode, online });
+  } catch (e) {
+    console.warn("[MeshCall] meshVpn start", e);
+    return { ok: false, mode: "disabled" };
+  }
+}
+
+export async function stopMeshVpn(): Promise<{ ok: boolean }> {
+  if (!Capacitor.isNativePlatform()) {
+    return { ok: false };
+  }
+  try {
+    return await MeshCall.stopMeshVpn();
+  } catch (e) {
+    console.warn("[MeshCall] meshVpn stop", e);
+    return { ok: false };
+  }
+}
+
+export async function getMeshVpnStatus(): Promise<{ ok: boolean; mode?: string; online?: boolean }> {
+  if (!Capacitor.isNativePlatform()) {
+    return { ok: false, mode: "disabled", online: false };
+  }
+  try {
+    return await MeshCall.getMeshVpnStatus();
+  } catch (e) {
+    console.warn("[MeshCall] meshVpn status", e);
+    return { ok: false, mode: "disabled", online: false };
+  }
 }
 
 export default MeshCall;
