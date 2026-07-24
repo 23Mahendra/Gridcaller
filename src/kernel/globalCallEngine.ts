@@ -1,37 +1,24 @@
 /**
- * Global Call Engine — sovereign software voice (GridAlive ↔ GridAlive)
+ * Global Call Engine — hub-signaled sovereign voice (GridAlive ↔ GridAlive)
  *
- * Product law (see sovereignMesh.ts):
- *  · FREE calling — no SIM, no carrier voice bill, no satellite sub
- *  · Cross-network / cross-company: any dumb IP path (Jio data, Airtel Wi‑Fi, abroad)
- *  · Same-network NOT required
- *  · Decentralized Gun signaling → hard for one company to ban (Telegram-class)
- *  · PC · laptop · mobile · browser — all first-class
- *
- * How it works:
- *  1. Presence + WebRTC signaling on public Gun peers (or self-hosted)
- *  2. Media via WebRTC STUN + free TURN (NAT/cellular-data friendly)
- *  3. Dial by GridAlive handle / node id — not by carrier MSISDN
- *
- * Honest limits:
- *  · Callee must run GridAlive (or later PWA wake)
- *  · Bits need SOME path (any IP or local multi-hop fabric) — physics
- *  · Raw SIM without app = optional future PSTN (carriers become partners, not masters)
- *  · We do NOT hijack towers — we make tower-voice obsolete for our users
+ * Signaling path:
+ *  - Presence/lookup via hub /api/mesh/*
+ *  - Offer/answer/ice via MeshEngine (hub-backed ws/http bus)
+ *  - Optional Gun can still be used by other modules, but this call path is hub-first
  */
 
-import Gun from "gun/gun";
-import "gun/sea";
 import { bus } from "./bus";
 import { S } from "./storage";
-import { env } from "../env";
-import { gunPeersForMesh, iceServersForMesh, useLocalMeshOnly } from "./offlineMode";
+import { MeshEngine } from "./mesh";
+import { useLocalMeshOnly } from "./offlineMode";
 import { endPeerConnection, tryBeginPeerConnection } from "./networkGuard";
+import { fetchHubMeshPeers, resolveHubHttp, resolveMeshTarget } from "./meshHubConfig";
+import { getWebRtcIceServers } from "./webrtcConfig";
 
 export type GlobalPresence = {
   id: string;
   name: string;
-  handle: string; // searchable: name slug or +phone digits
+  handle: string;
   online: true;
   ts: number;
   platform?: string;
@@ -39,29 +26,6 @@ export type GlobalPresence = {
 };
 
 export type GlobalCallMode = "local-mesh" | "global-internet";
-
-const DEFAULT_GLOBAL_GUN_PEERS = [
-  // Community Gun relays — used only for lightweight signaling/presence (not media)
-  "https://gun-manhattan.herokuapp.com/gun",
-  "https://gunjs.herokuapp.com/gun",
-];
-
-function defaultIceServers(): RTCIceServer[] {
-  // Flight / no SIM: host-only ICE (same Wi‑Fi or hotspot) — no STUN/TURN
-  if (useLocalMeshOnly()) return iceServersForMesh();
-  try {
-    if (env.iceServersJson) return JSON.parse(env.iceServersJson);
-  } catch {}
-  return [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun2.l.google.com:19302" },
-    // TURN only when some internet exists (not flight-only)
-    { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
-    { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
-    { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
-  ];
-}
 
 function slug(s: string) {
   return String(s || "")
@@ -72,7 +36,6 @@ function slug(s: string) {
 }
 
 class GlobalCallEngine {
-  private gun: any = null;
   private myId = "";
   private myName = "";
   private handle = "";
@@ -83,9 +46,13 @@ class GlobalCallEngine {
   private activeCallId = "";
   private incomingHandler: ((from: GlobalPresence & { callId: string }, accept: () => void, reject: () => void) => void) | null =
     null;
+  private unsubMesh: (() => void) | null = null;
+  private pendingIceByCall = new Map<string, RTCIceCandidateInit[]>();
+  private presencePollTimer: ReturnType<typeof setInterval> | null = null;
+  private presenceListeners = new Set<(p: GlobalPresence) => void>();
 
   get ready() {
-    return this.started && !!this.gun;
+    return this.started;
   }
 
   get id() {
@@ -96,24 +63,8 @@ class GlobalCallEngine {
     return this.handle;
   }
 
-  /** Owner/user can add extra Gun signal peers (self-hosted / partner) */
-  getSignalPeers(): string[] {
-    // Airplane / offline: local Gun only (works without SIM / cloud)
-    if (useLocalMeshOnly()) return gunPeersForMesh([]);
-    const custom = S.get("global_gun_peers", "") as string;
-    const extra = String(custom || "")
-      .split(/[\n,]+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-    // Prefer custom first, then defaults — empty if force-local
-    return gunPeersForMesh(Array.from(new Set([...extra, ...DEFAULT_GLOBAL_GUN_PEERS])));
-  }
-
-  setSignalPeers(peersCsv: string) {
-    S.set("global_gun_peers", peersCsv);
-    // Restart gun with new peers
-    this.stop();
-    if (this.myId) this.start(this.myId, this.myName, this.handle);
+  setSignalPeers(_peersCsv: string) {
+    // kept for compatibility; signaling is now hub-backed
   }
 
   start(nodeId: string, name: string, handleHint?: string) {
@@ -123,48 +74,26 @@ class GlobalCallEngine {
     S.set("global_call_handle", this.handle);
     S.set("global_call_id", this.myId);
 
-    const peers = this.getSignalPeers();
-    try {
-      this.gun = Gun({
-        peers,
-        localStorage: true,
-        radisk: false,
-        multicast: false,
-      });
-    } catch (e) {
-      console.warn("[GlobalCall] Gun init failed", e);
-      return false;
-    }
-
     this.started = true;
     this.publishPresence();
     if (this.presenceTimer) clearInterval(this.presenceTimer);
     this.presenceTimer = setInterval(() => this.publishPresence(), 8000);
 
-    // Incoming offers
-    this.gun
-      .get("gridalive")
-      .get("global")
-      .get("webrtc")
-      .get("offer")
-      .map()
-      .on((data: any, key: string) => {
-        if (!data || data.to !== this.myId) return;
-        if (Date.now() - (data.ts || 0) > 90000) return;
-        this.onIncomingOffer(data, key);
-      });
+    if (this.unsubMesh) this.unsubMesh();
+    this.unsubMesh = MeshEngine.onMessage((msg: any) => {
+      void this.onMeshMessage(msg);
+    });
+    MeshEngine.start?.();
+
+    this.startPresencePolling();
 
     bus.emit("globalCall:ready", {
       id: this.myId,
       handle: this.handle,
-      peers: peers.length,
+      peers: 0,
       localOnly: useLocalMeshOnly(),
+      signaling: "hub-mesh",
     });
-    console.info(
-      "[GlobalCall] ready · handle:",
-      this.handle,
-      useLocalMeshOnly() ? "· LOCAL/flight (no cloud, no SIM)" : `· peers: ${peers.length}`
-    );
     return true;
   }
 
@@ -172,15 +101,11 @@ class GlobalCallEngine {
     this.started = false;
     if (this.presenceTimer) clearInterval(this.presenceTimer);
     this.presenceTimer = null;
+    if (this.presencePollTimer) clearInterval(this.presencePollTimer);
+    this.presencePollTimer = null;
+    if (this.unsubMesh) this.unsubMesh();
+    this.unsubMesh = null;
     this.hangup();
-    try {
-      this.gun
-        ?.get("gridalive")
-        .get("global")
-        .get("presence")
-        .get(this.myId)
-        .put({ online: false, ts: Date.now() });
-    } catch {}
   }
 
   setHandle(handle: string) {
@@ -189,114 +114,84 @@ class GlobalCallEngine {
     this.publishPresence();
   }
 
-  private publishPresence() {
-    if (!this.gun || !this.myId) return;
-    const p: GlobalPresence = {
+  private async publishPresence() {
+    if (!this.started || !this.myId) return;
+    const payload = {
       id: this.myId,
       name: this.myName,
       handle: this.handle,
-      online: true,
+      phone: String(S.get("user_phone", "") || "").replace(/\D/g, ""),
+      displayNumber:
+        String(S.get("gc_test_display_number", "") || "").trim() ||
+        this.handle ||
+        String(S.get("user_phone", "") || "").replace(/\D/g, ""),
+      hasLlm: false,
       ts: Date.now(),
-      platform: navigator.userAgent.slice(0, 40),
-      global: true,
     };
     try {
-      this.gun.get("gridalive").get("global").get("presence").get(this.myId).put(p);
-      // Index by handle for dial-by-name/phone
-      if (this.handle) {
-        this.gun.get("gridalive").get("global").get("handles").get(this.handle).put({
-          id: this.myId,
-          name: this.myName,
-          ts: Date.now(),
-        });
-      }
+      const hub = resolveHubHttp().replace(/\/$/, "");
+      await fetch(`${hub}/api/mesh/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(4000),
+      });
     } catch {}
   }
 
-  /** Lookup online peer by handle, Grid Number digits, or exact id */
   async resolvePeer(dial: string): Promise<{ id: string; name: string; handle?: string } | null> {
-    if (!this.gun) return null;
-    const raw = dial.trim();
-    const q = slug(dial) || raw.replace(/\D/g, "") || raw;
+    const raw = String(dial || "").trim();
+    if (!raw) return null;
+    const q = slug(raw) || raw.replace(/\D/g, "") || raw;
     if (!q) return null;
-
-    // Direct id match pattern
     if (q.startsWith("ga_") || q.startsWith("omni_") || q.startsWith("user_") || q.startsWith("node_")) {
-      return { id: dial.trim(), name: dial.trim() };
+      return { id: raw, name: raw };
     }
-
-    // Grid Number digits → try handles index (short dial published as handle)
-    const digits = raw.replace(/\D/g, "");
-    if (digits.length >= 8) {
-      const short = digits.slice(-10);
-      const short8 = digits.slice(-8);
-      for (const candidate of [short, short8, digits, slug(digits)]) {
-        if (!candidate) continue;
-        try {
-          const hit = await new Promise<{ id: string; name: string; handle?: string } | null>((resolve) => {
-            const t = setTimeout(() => resolve(null), 2500);
-            try {
-              this.gun
-                .get("gridalive")
-                .get("global")
-                .get("handles")
-                .get(candidate)
-                .once((data: any) => {
-                  clearTimeout(t);
-                  if (data?.id) resolve({ id: data.id, name: data.name || candidate, handle: candidate });
-                  else resolve(null);
-                });
-            } catch {
-              clearTimeout(t);
-              resolve(null);
-            }
-          });
-          if (hit) return hit;
-        } catch {}
-      }
+    const hit = await resolveMeshTarget(raw);
+    if (hit?.id) {
+      return { id: hit.id, name: hit.name || hit.id, handle: hit.handle };
     }
-
-    return new Promise((resolve) => {
-      let done = false;
-      const finish = (v: any) => {
-        if (done) return;
-        done = true;
-        resolve(v);
-      };
-      const t = setTimeout(() => finish(null), 4000);
-      try {
-        this.gun
-          .get("gridalive")
-          .get("global")
-          .get("handles")
-          .get(q)
-          .once((data: any) => {
-            clearTimeout(t);
-            if (data?.id) finish({ id: data.id, name: data.name || q, handle: q });
-            else finish(null);
-          });
-      } catch {
-        clearTimeout(t);
-        finish(null);
-      }
-    });
+    return null;
   }
 
-  /** List recent global presence (best-effort map) */
   listenPresence(cb: (p: GlobalPresence) => void): () => void {
-    if (!this.gun) return () => {};
-    const handler = (data: any) => {
-      if (!data || !data.id || !data.online) return;
-      if (Date.now() - (data.ts || 0) > 45000) return;
-      if (data.id === this.myId) return;
-      cb(data as GlobalPresence);
-    };
-    this.gun.get("gridalive").get("global").get("presence").map().on(handler);
+    this.presenceListeners.add(cb);
+    void this.emitPresenceNow();
     return () => {
-      try {
-        this.gun.get("gridalive").get("global").get("presence").map().off();
-      } catch {}
+      this.presenceListeners.delete(cb);
     };
+  }
+
+  private startPresencePolling() {
+    if (this.presencePollTimer) clearInterval(this.presencePollTimer);
+    this.presencePollTimer = setInterval(() => {
+      void this.emitPresenceNow();
+    }, 5000);
+    void this.emitPresenceNow();
+  }
+
+  private async emitPresenceNow() {
+    if (!this.started) return;
+    try {
+      const peers = await fetchHubMeshPeers();
+      const now = Date.now();
+      for (const p of peers) {
+        if (!p?.id || p.id === this.myId || p.id === "hub-pc") continue;
+        const gp: GlobalPresence = {
+          id: p.id,
+          name: p.name || p.id,
+          handle: p.handle || "",
+          online: true,
+          ts: p.lastSeen || now,
+          global: true,
+        };
+        for (const fn of this.presenceListeners) {
+          try {
+            fn(gp);
+          } catch {}
+        }
+      }
+    } catch {}
   }
 
   onIncoming(
@@ -305,8 +200,59 @@ class GlobalCallEngine {
     this.incomingHandler = fn;
   }
 
-  private onIncomingOffer(data: any, callId: string) {
+  private async onMeshMessage(msg: any) {
+    if (!msg?.type || !this.started) return;
+    const t = String(msg.type);
+    const d = msg.data || msg;
+    if (d?.to && d.to !== this.myId) return;
+    if (msg.from === this.myId) return;
+
+    if (t === "GLOBAL_CALL_OFFER" && d?.callId && d?.offer) {
+      this.onIncomingOffer({
+        callId: d.callId,
+        from: msg.from || d.from,
+        fromName: msg.fromName || d.fromName,
+        fromHandle: d.fromHandle || "",
+        offer: d.offer,
+        ts: d.ts || Date.now(),
+      });
+      return;
+    }
+
+    if (t === "GLOBAL_CALL_ANSWER" && d?.callId === this.activeCallId && d?.answer && this.pc) {
+      try {
+        if (!this.pc.remoteDescription) {
+          await this.pc.setRemoteDescription(new RTCSessionDescription(d.answer));
+        }
+      } catch (e) {
+        console.warn("[GlobalCall] answer", e);
+      }
+      return;
+    }
+
+    if (t === "GLOBAL_CALL_DECLINE" && d?.callId === this.activeCallId) {
+      bus.emit("globalCall:state", { state: "declined", peerId: msg.from || d.from, callId: d.callId });
+      return;
+    }
+
+    if (t === "GLOBAL_CALL_ICE" && d?.callId && d?.candidate) {
+      const callId = String(d.callId);
+      if (!this.pc || callId !== this.activeCallId) return;
+      if (!this.pc.remoteDescription) {
+        const q = this.pendingIceByCall.get(callId) || [];
+        q.push(d.candidate);
+        this.pendingIceByCall.set(callId, q);
+        return;
+      }
+      try {
+        await this.pc.addIceCandidate(new RTCIceCandidate(d.candidate));
+      } catch {}
+    }
+  }
+
+  private onIncomingOffer(data: any) {
     if (!this.incomingHandler) return;
+    const callId = String(data.callId || "");
     const from = {
       id: data.from,
       name: data.fromName || data.from,
@@ -320,21 +266,18 @@ class GlobalCallEngine {
       from,
       () => void this.acceptCall(callId, data),
       () => {
-        try {
-          this.gun
-            ?.get("gridalive")
-            .get("global")
-            .get("webrtc")
-            .get("answer")
-            .get(callId)
-            .put({ declined: true, from: this.myId, ts: Date.now() });
-        } catch {}
+        MeshEngine.broadcast("GLOBAL_CALL_DECLINE", {
+          to: data.from,
+          callId,
+          from: this.myId,
+          ts: Date.now(),
+        });
       }
     );
   }
 
   async placeCall(toId: string, toName?: string): Promise<{ pc: RTCPeerConnection; callId: string }> {
-    if (!this.gun) throw new Error("Global call not ready — check internet");
+    if (!this.started) throw new Error("Global call not ready — signaling offline");
     if (!("RTCPeerConnection" in window)) throw new Error("WebRTC not supported");
 
     this.hangup();
@@ -346,7 +289,8 @@ class GlobalCallEngine {
     if (!tryBeginPeerConnection()) {
       throw new Error("WebRTC budget exhausted; using offline-safe mode");
     }
-    const pc = new RTCPeerConnection({ iceServers: defaultIceServers(), iceCandidatePoolSize: 8 });
+    const iceServers = await getWebRtcIceServers();
+    const pc = new RTCPeerConnection({ iceServers, iceCandidatePoolSize: 8 });
     this.pc = pc;
     const originalClose = pc.close.bind(pc);
     pc.close = () => {
@@ -357,19 +301,17 @@ class GlobalCallEngine {
 
     const callId = `gcall_${this.myId}_${toId}_${Date.now().toString(36)}`;
     this.activeCallId = callId;
+    this.pendingIceByCall.set(callId, []);
 
     pc.onicecandidate = (e) => {
       if (!e.candidate) return;
-      try {
-        this.gun
-          .get("gridalive")
-          .get("global")
-          .get("webrtc")
-          .get("ice")
-          .get(callId)
-          .get(String(Date.now()))
-          .put(JSON.stringify(e.candidate));
-      } catch {}
+      MeshEngine.broadcast("GLOBAL_CALL_ICE", {
+        to: toId,
+        callId,
+        candidate: e.candidate.toJSON(),
+        from: this.myId,
+        ts: Date.now(),
+      });
     };
 
     pc.ontrack = (ev) => {
@@ -388,64 +330,21 @@ class GlobalCallEngine {
     const offer = await pc.createOffer({ offerToReceiveAudio: true });
     await pc.setLocalDescription(offer);
 
-    this.gun
-      .get("gridalive")
-      .get("global")
-      .get("webrtc")
-      .get("offer")
-      .get(callId)
-      .put({
-        from: this.myId,
-        fromName: this.myName,
-        fromHandle: this.handle,
-        to: toId,
-        toName: toName || toId,
-        offer: JSON.stringify(offer),
-        ts: Date.now(),
-      });
-
-    // Answer
-    this.gun
-      .get("gridalive")
-      .get("global")
-      .get("webrtc")
-      .get("answer")
-      .get(callId)
-      .on(async (data: any) => {
-        if (!data) return;
-        if (data.declined) {
-          bus.emit("globalCall:state", { state: "declined", peerId: toId, callId });
-          return;
-        }
-        if (!data.answer || pc.remoteDescription) return;
-        try {
-          await pc.setRemoteDescription(JSON.parse(data.answer));
-        } catch (e) {
-          console.warn("[GlobalCall] answer", e);
-        }
-      });
-
-    // Remote ICE
-    this.gun
-      .get("gridalive")
-      .get("global")
-      .get("webrtc")
-      .get("ice_remote")
-      .get(callId)
-      .map()
-      .on(async (data: any) => {
-        if (!data || !pc) return;
-        try {
-          await pc.addIceCandidate(JSON.parse(data));
-        } catch {}
-      });
+    MeshEngine.broadcast("GLOBAL_CALL_OFFER", {
+      to: toId,
+      callId,
+      from: this.myId,
+      fromName: this.myName,
+      fromHandle: this.handle,
+      offer: pc.localDescription || offer,
+      ts: Date.now(),
+    });
 
     bus.emit("globalCall:outgoing", { toId, toName, callId });
     return { pc, callId };
   }
 
   private async acceptCall(callId: string, offerData: any) {
-    if (!this.gun) return;
     this.hangup();
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
@@ -454,7 +353,8 @@ class GlobalCallEngine {
     if (!tryBeginPeerConnection()) {
       throw new Error("WebRTC budget exhausted; using offline-safe mode");
     }
-    const pc = new RTCPeerConnection({ iceServers: defaultIceServers(), iceCandidatePoolSize: 8 });
+    const iceServers = await getWebRtcIceServers();
+    const pc = new RTCPeerConnection({ iceServers, iceCandidatePoolSize: 8 });
     this.pc = pc;
     const originalClose = pc.close.bind(pc);
     pc.close = () => {
@@ -462,20 +362,18 @@ class GlobalCallEngine {
       return originalClose();
     };
     this.activeCallId = callId;
+    this.pendingIceByCall.set(callId, []);
     stream.getTracks().forEach((t) => pc.addTrack(t, stream));
 
     pc.onicecandidate = (e) => {
       if (!e.candidate) return;
-      try {
-        this.gun
-          .get("gridalive")
-          .get("global")
-          .get("webrtc")
-          .get("ice_remote")
-          .get(callId)
-          .get(String(Date.now()))
-          .put(JSON.stringify(e.candidate));
-      } catch {}
+      MeshEngine.broadcast("GLOBAL_CALL_ICE", {
+        to: offerData.from,
+        callId,
+        candidate: e.candidate.toJSON(),
+        from: this.myId,
+        ts: Date.now(),
+      });
     };
 
     pc.ontrack = (ev) => {
@@ -490,35 +388,25 @@ class GlobalCallEngine {
       bus.emit("globalCall:state", { state: pc.connectionState, peerId: offerData.from, callId });
     };
 
-    await pc.setRemoteDescription(JSON.parse(offerData.offer));
+    await pc.setRemoteDescription(new RTCSessionDescription(offerData.offer));
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
 
-    this.gun
-      .get("gridalive")
-      .get("global")
-      .get("webrtc")
-      .get("answer")
-      .get(callId)
-      .put({
-        from: this.myId,
-        answer: JSON.stringify(answer),
-        ts: Date.now(),
-      });
+    MeshEngine.broadcast("GLOBAL_CALL_ANSWER", {
+      to: offerData.from,
+      callId,
+      from: this.myId,
+      answer: pc.localDescription || answer,
+      ts: Date.now(),
+    });
 
-    this.gun
-      .get("gridalive")
-      .get("global")
-      .get("webrtc")
-      .get("ice")
-      .get(callId)
-      .map()
-      .on(async (data: any) => {
-        if (!data) return;
-        try {
-          await pc.addIceCandidate(JSON.parse(data));
-        } catch {}
-      });
+    const pending = this.pendingIceByCall.get(callId) || [];
+    for (const cand of pending) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(cand));
+      } catch {}
+    }
+    this.pendingIceByCall.set(callId, []);
   }
 
   hangup() {
@@ -538,10 +426,6 @@ class GlobalCallEngine {
     this.activeCallId = "";
   }
 
-  /**
-   * Doctrine: GridAlive does NOT depend on carriers.
-   * PSTN bridge is optional only for people who never install the app.
-   */
   getCarrierBridgeStatus() {
     return {
       enabled: false,
@@ -551,10 +435,10 @@ class GlobalCallEngine {
       noSimRequired: true,
       noSatelliteRequired: true,
       note:
-        "REAL path: GridAlive↔GridAlive free software call on any device/network. No SIM voice. No tower identity. No satellite bill. Optional PSTN later only for non-app numbers — then telcos tie-up as partners.",
+        "Primary path is GridAlive↔GridAlive software voice via self-hosted hub signaling + WebRTC.",
       futureProviders: ["Twilio", "Telnyx", "Plivo", "Carrier SIP interconnect"],
       productPosition:
-        "Public free calling + public earn (RAM/GPU/storage). Telco voice becomes optional legacy; we cannot be killed by one cellular company.",
+        "Public free calling + public earn (RAM/GPU/storage). Carrier voice interop stays optional.",
     };
   }
 }

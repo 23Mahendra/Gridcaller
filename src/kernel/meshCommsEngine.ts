@@ -21,9 +21,10 @@ import { env } from "../env";
 import { consumeRateLimit } from "./rateLimiter";
 import { captureMeshError } from "./sentry";
 import { attachAdaptiveBitrate } from "./adaptiveBitrate";
-import { gunPeersForMesh, iceServersForMesh, useLocalMeshOnly } from "./offlineMode";
+import { gunPeersForMesh, useLocalMeshOnly } from "./offlineMode";
 import { MeshEngine } from "./mesh";
 import { endPeerConnection, tryBeginPeerConnection } from "./networkGuard";
+import { getWebRtcIceServers } from "./webrtcConfig";
 
 const SEA = (Gun as any).SEA;
 
@@ -942,20 +943,7 @@ class MeshCommsEngine {
     this.hangUpCall(targetPeerId);
     this.enforcePcBudget();
 
-    const iceServers = (() => {
-      // Flight mode / no SIM: host candidates only (same hotspot Wi‑Fi)
-      if (useLocalMeshOnly()) return iceServersForMesh();
-      try { return JSON.parse(env.iceServersJson); } catch {}
-      return [
-        { urls: "stun:stun.l.google.com:19302" },
-        { urls: "stun:stun1.l.google.com:19302" },
-        { urls: "stun:stun2.l.google.com:19302" },
-        { urls: "stun:stunprotocol.org:3478" },
-        { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
-        { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
-        { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
-      ];
-    })();
+    const iceServers = await getWebRtcIceServers();
 
     const pc = this.createPeerConnection(iceServers);
     if (!pc) {
@@ -1055,12 +1043,7 @@ class MeshCommsEngine {
         async () => {
           this.hangUpCall(data.from);
           this.enforcePcBudget();
-          const iceServers = useLocalMeshOnly()
-            ? iceServersForMesh()
-            : [
-                { urls: "stun:stun.l.google.com:19302" },
-                { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
-              ];
+          const iceServers = await getWebRtcIceServers();
           const pc = this.createPeerConnection(iceServers);
           if (!pc) {
             return;
@@ -1194,19 +1177,8 @@ class MeshCommsEngine {
     this.hangUpCall(targetPeerId);
     this.enforcePcBudget();
 
-    // TURN-only config — skip STUN (no local mesh anyway)
-    const iceServers = (() => {
-      try { return JSON.parse(env.iceServersJson); } catch {}
-      return [
-        // Public TURN servers — carry the call via cellular radio when isolated
-        { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
-        { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
-        { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
-        // STUN as fallback in case TURN ticket is refused
-        { urls: "stun:stun.l.google.com:19302" },
-        { urls: "stun:stunprotocol.org:3478" },
-      ];
-    })();
+    // Self-hosted TURN from hub config; falls back to STUN only if unavailable.
+    const iceServers = await getWebRtcIceServers();
 
     const pc = this.createPeerConnection(iceServers, { iceCandidatePoolSize: 4 });
     if (!pc) {

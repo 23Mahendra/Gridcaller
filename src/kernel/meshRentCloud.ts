@@ -574,8 +574,25 @@ class MeshRentCloud {
           result = { text: "No local model — job deferred", deferred: true };
         }
       } else if (job.type === "embed") {
-        result = { note: "embed placeholder — use nomic-embed-text when installed" };
-        this.credit(Math.max(1, job.rewardGC / 2), "gpu_job", "Embed job");
+        const input = String(job.payload?.text || job.payload?.prompt || "").trim();
+        const model = String(job.model || "nomic-embed-text").trim();
+        if (!input) {
+          throw new Error("embed job requires non-empty text");
+        }
+        if (!ollamaEngine.available) {
+          result = { error: "Ollama unavailable for embedding", deferred: true };
+          throw new Error("embed deferred: ollama unavailable");
+        }
+        const embedding = await ollamaEngine.embed(input, model);
+        if (!Array.isArray(embedding) || embedding.length === 0) {
+          throw new Error("embedding failed");
+        }
+        result = {
+          model,
+          dimensions: embedding.length,
+          vectorPreview: embedding.slice(0, 8),
+        };
+        this.credit(job.rewardGC, "gpu_job", `Embed job ${job.id} (${model})`);
       } else if (job.type === "compress") {
         const raw = String(job.payload?.text || "");
         const packed = await compressBytes(raw);
@@ -617,8 +634,7 @@ class MeshRentCloud {
   private async onMesh(msg: any) {
     if (!msg?.type) return;
     if (msg.type === "MESH_CLOUD_PIN" && S.get(KEYS.accepting, false) && msg.data?.id) {
-      // Pin announce — credit tiny host intent
-      this.credit(0.5, "cloud_host", `Pin offer ${msg.data.name || msg.data.id}`);
+      // Pin intent is not billable until actual storage work is executed.
     }
     if (msg.type === "MESH_CLUSTER_JOB" && msg.data?.id && msg.from !== nodeId()) {
       const job = msg.data as ClusterJob;
@@ -629,16 +645,9 @@ class MeshRentCloud {
     }
   }
 
-  /** Simulate daily rent accrual for offered capacity (heartbeat earnings) */
+  /** No passive simulated rent accrual; earnings require executed work. */
   tickRentAccrual() {
-    if (!S.get(KEYS.accepting, false)) return;
-    const offer = this.getOffer();
-    const rates = getNetworkRates();
-    // Continuous earn from owner-published rates
-    const storageEarn = (offer.storageMB / 1024) * (rates.rateStoragePerMbDay / 24 / 60);
-    const ramEarn = (offer.ramMB / 512) * (rates.rateRamPerMbHour / 60);
-    const total = Math.max(rates.minRewardGC, storageEarn + ramEarn + rates.rateOnlineTickBase);
-    this.credit(Math.round(total * 100) / 100, "rent_storage", "Online capacity rent tick");
+    return;
   }
 }
 
