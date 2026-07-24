@@ -38,14 +38,24 @@ export function shouldSendHandshakeReply(
   return now >= nextReplyAt;
 }
 
+export function normalizeHandshakePeerId(
+  payload: { id?: string; peerId?: string } | null | undefined,
+  replyTo?: string,
+  fallback = ""
+): string {
+  const raw = String(payload?.id || payload?.peerId || replyTo || fallback || "").trim();
+  return raw;
+}
+
 export function buildHandshakeReply(
   payload: { id?: string; name?: string; phone?: string; displayNumber?: string; lat?: number; lng?: number; hops?: number; ts?: number; type?: string },
   replyTo: string
 ): MeshHandshakeReply {
   const now = Date.now();
+  const resolvedId = normalizeHandshakePeerId(payload, replyTo);
   return {
     type: "AM_HELLO",
-    id: String(payload?.id || ""),
+    id: resolvedId,
     name: String(payload?.name || "GridUser"),
     phone: payload?.phone,
     displayNumber: payload?.displayNumber,

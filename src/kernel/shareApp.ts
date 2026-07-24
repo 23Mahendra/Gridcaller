@@ -59,6 +59,12 @@ async function hubsToTry(): Promise<string[]> {
   };
   add(hubBase());
   add(getDefaultHubHttp());
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname || "";
+    if (host && !/localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(host)) {
+      add(`http://${host}:8765`);
+    }
+  }
   add("http://192.168.1.8:8765");
   try {
     const s = localStorage.getItem("gc_hub_http");

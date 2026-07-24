@@ -18,14 +18,43 @@
  * every nearby *app-running* device into a hop — soft cellular network.
  */
 
-import { bus } from "./bus";
-import { S } from "./storage";
-import { MeshEngine } from "./mesh";
-import freeMeshFabric from "./freeMeshFabric";
-import { setForceLocalMesh } from "./offlineMode";
-import { MeshRoutingTable } from "./meshRoutingTable";
-import { resolveTowerRelayPolicy, type TowerRelayPolicy } from "./towerRelayPolicy";
-import { pickBestRoute, type SmartRouteCandidate } from "./smartRouting";
+import { bus } from "./bus.ts";
+import { S } from "./storage.ts";
+import { MeshEngine } from "./mesh.ts";
+import freeMeshFabric from "./freeMeshFabric.ts";
+import { setForceLocalMesh } from "./offlineMode.ts";
+import { MeshRoutingTable } from "./meshRoutingTable.ts";
+import { resolveTowerRelayPolicy, type TowerRelayPolicy } from "./towerRelayPolicy.ts";
+import { pickBestRoute, type SmartRouteCandidate } from "./smartRouting.ts";
+import { buildAdaptiveRelayPlan } from "./jamResistance.ts";
+import {
+  createRuntimeDiagnosticsState,
+  persistRuntimeDiagnostics,
+  recordHandshake,
+  recordPeerSighting,
+  recordProbe,
+  recordProbeReceipt,
+  recordRelay,
+  recordSelfTestResult,
+  syncPeerCount,
+  updateNativeBridgeDiagnostics,
+  type SoftTowerRuntimeDiagnostics,
+} from "./softTowerDiagnostics.ts";
+import {
+  buildReplayEnvelope,
+  decryptReplayEnvelope,
+  enqueuePendingPacket,
+  prunePendingPackets,
+  shouldStoreForReplay,
+  type PendingPacket,
+} from "./meshReliability.ts";
+import {
+  addNativeMeshPacketListener,
+  broadcastNativeMeshPacket,
+  sendNativeMeshPacket,
+  startNativeMeshEngine,
+  stopNativeMeshEngine,
+} from "../plugins/meshCallNative.ts";
 
 export type HopTransport = "wifi-lan" | "bc-tab" | "fabric-bc" | "bt-web" | "optical";
 
@@ -64,7 +93,7 @@ function rid(p = "hop") {
   return `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-class SoftTowerHopNet {
+export class SoftTowerHopNet {
   private started = false;
   private nodeId = "";
   private nodeName = "Tower";
@@ -78,7 +107,12 @@ class SoftTowerHopNet {
   private beaconTimer: ReturnType<typeof setInterval> | null = null;
   private stats = { tx: 0, rx: 0, relayed: 0, delivered: 0 };
   private routingTable = new MeshRoutingTable();
-  private policy: TowerRelayPolicy;
+  private policy: TowerRelayPolicy = { enabled: true, maxTtl: MAX_TTL, beaconMs: BEACON_MS, localOnly: true };
+  private pendingPackets: PendingPacket[] = [];
+  private replayTimer: ReturnType<typeof setInterval> | null = null;
+  private runtimeDiagnostics: SoftTowerRuntimeDiagnostics = createRuntimeDiagnosticsState();
+  private nativeForwardedPackets = new Set<string>();
+  private nativeListenerCleanup: (() => void) | null = null;
 
   get id() {
     return this.nodeId;
@@ -97,6 +131,7 @@ class SoftTowerHopNet {
     this.policy = resolveTowerRelayPolicy(S);
     this.started = true;
     setForceLocalMesh(this.policy.localOnly !== false);
+    updateNativeBridgeDiagnostics(this.runtimeDiagnostics, "idle", "starting native bridge");
 
     this.nodeId =
       S.get("mesh_id") ||
@@ -109,6 +144,7 @@ class SoftTowerHopNet {
       })();
     this.nodeName = name || S.get("user_name") || S.get("mesh_name") || "SoftTower";
     this.routingTable.setLocalId(this.nodeId);
+    this.loadPendingPackets();
 
     try {
       freeMeshFabric.start(this.nodeName);
@@ -120,20 +156,20 @@ class SoftTowerHopNet {
 
     try {
       this.bc = new BroadcastChannel("gridcaller-soft-tower");
-      this.bc.onmessage = (ev) => this.ingest(ev.data, "bc-tab");
+      this.bc.onmessage = (ev) => void this.ingest(ev.data, "bc-tab");
     } catch {}
 
     try {
       this.fabricBc = new BroadcastChannel("gridalive-free-fabric");
       this.fabricBc.onmessage = (ev) => {
         const d = ev.data;
-        if (d?.type === "SOFT_TOWER_HOP" || d?.kind) this.ingest(d.type === "SOFT_TOWER_HOP" ? d.data || d : d, "fabric-bc");
+        if (d?.type === "SOFT_TOWER_HOP" || d?.kind) void this.ingest(d.type === "SOFT_TOWER_HOP" ? d.data || d : d, "fabric-bc");
       };
     } catch {}
 
     MeshEngine.onMessage((msg: any) => {
       if (msg?.type === "SOFT_TOWER_HOP" && msg.data) {
-        this.ingest(msg.data, "wifi-lan");
+        void this.ingest(msg.data, "wifi-lan");
       }
     });
 
@@ -141,8 +177,15 @@ class SoftTowerHopNet {
       this.pruneSeen();
       this.beacon();
       this.handshakeSweep();
+      this.replayPendingPackets();
     }, this.policy.beaconMs || BEACON_MS);
 
+    this.replayTimer = setInterval(() => {
+      this.replayPendingPackets();
+    }, 7000);
+
+    this.installNativePacketListener();
+    void this.bootstrapNativeBridge();
     this.beacon();
     bus.emit("softTowerHop:ready", { id: this.nodeId, name: this.nodeName });
     console.info("[SoftTowerHop] node online as soft cell tower ·", this.nodeId);
@@ -152,12 +195,19 @@ class SoftTowerHopNet {
   stop() {
     this.started = false;
     if (this.beaconTimer) clearInterval(this.beaconTimer);
+    if (this.replayTimer) clearInterval(this.replayTimer);
     try {
       this.bc?.close();
     } catch {}
     try {
       this.fabricBc?.close();
     } catch {}
+    try {
+      this.nativeListenerCleanup?.();
+      this.nativeListenerCleanup = null;
+    } catch {}
+    void stopNativeMeshEngine();
+    updateNativeBridgeDiagnostics(this.runtimeDiagnostics, "stopped", "native bridge stopped");
   }
 
   onPacket(fn: Listener) {
@@ -191,6 +241,38 @@ class SoftTowerHopNet {
       stability: 0.8,
       transportScore: 0.8,
     });
+  }
+
+  getRuntimeDiagnostics() {
+    syncPeerCount(this.runtimeDiagnostics, this.peers.size);
+    const snapshot = { ...this.runtimeDiagnostics, peerRoutes: { ...this.runtimeDiagnostics.peerRoutes } };
+    persistRuntimeDiagnostics(snapshot);
+    return snapshot;
+  }
+
+  markSelfTestResult(status: "pass" | "fail" | "pending", detail?: string) {
+    recordSelfTestResult(this.runtimeDiagnostics, status, detail);
+    persistRuntimeDiagnostics(this.getRuntimeDiagnostics());
+  }
+
+  probeRelay() {
+    const probeId = rid("probe");
+    recordProbe(this.runtimeDiagnostics);
+    const packet = {
+      id: probeId,
+      kind: "msg" as const,
+      from: this.nodeId,
+      fromName: this.nodeName,
+      to: "",
+      hops: 0,
+      ttl: MAX_TTL,
+      path: [this.nodeId],
+      transportsTried: [] as HopTransport[],
+      ts: Date.now(),
+      payload: { text: `diag:${Date.now()}`, emergency: false },
+    };
+    this.flood(packet);
+    return probeId;
   }
 
   getNetworkHealth() {
@@ -279,8 +361,19 @@ class SoftTowerHopNet {
   }
 
   /** Multi-hop text message (GridCaller SMS over soft towers) */
-  sendMessage(to: string, text: string, toName?: string) {
-    if (!to || !text.trim()) return null;
+  sendMessage(
+    to: string,
+    text: string,
+    toName?: string,
+    opts?: {
+      emergency?: boolean;
+      urgency?: "normal" | "critical";
+      lowBandwidth?: boolean;
+      location?: { lat: number; lng: number } | null;
+      kind?: "broadcast" | "sos" | "note" | "message";
+    }
+  ) {
+    if (!text.trim()) return null;
     const id = rid("msg");
     const pkt: HopPacket = {
       id,
@@ -289,15 +382,33 @@ class SoftTowerHopNet {
       fromName: this.nodeName,
       to,
       hops: 0,
-      ttl: MAX_TTL,
+      ttl: opts?.emergency ? Math.min(MAX_TTL + 4, 20) : MAX_TTL,
       path: [this.nodeId],
       transportsTried: [],
       ts: Date.now(),
-      payload: { text: text.trim(), toName, phone: S.get("user_phone", "") },
+      payload: {
+        text: text.trim(),
+        toName,
+        phone: S.get("user_phone", ""),
+        emergency: Boolean(opts?.emergency),
+        disaster: opts?.emergency
+          ? {
+              kind: opts.kind || "message",
+              priority: opts.urgency === "critical" ? "critical" : "normal",
+              lowBandwidth: Boolean(opts.lowBandwidth),
+              location: opts.location || undefined,
+            }
+          : undefined,
+        resilience: opts?.emergency
+          ? { urgency: opts.urgency || "critical", lowBandwidth: Boolean(opts.lowBandwidth) }
+          : undefined,
+      },
     };
-    this.flood(pkt);
-    // local echo for UI
-    bus.emit("softTowerHop:msg-sent", { id, to, text: text.trim() });
+    void this.protectPacket(pkt).then((protectedPkt) => {
+      this.maybeQueueForReplay(protectedPkt);
+      this.flood(protectedPkt);
+    });
+    bus.emit("softTowerHop:msg-sent", { id, to, text: text.trim(), emergency: Boolean(opts?.emergency) });
     return id;
   }
 
@@ -326,6 +437,34 @@ class SoftTowerHopNet {
   private flood(pkt: HopPacket) {
     this.stats.tx++;
     this.markSeen(pkt.id);
+    const emergency = this.isEmergencyTraffic(pkt);
+    if (emergency) {
+      const plan = this.buildEmergencyPlan(pkt);
+      if (plan.length) {
+        for (const copy of plan) {
+          const relayPacket = {
+            ...pkt,
+            payload: {
+              ...pkt.payload,
+              __jam: {
+                channel: copy.channel,
+                copyId: copy.id,
+                delayMs: copy.delayMs,
+                transportOrder: copy.transportOrder,
+              },
+            },
+          };
+          const transport = copy.transport as HopTransport;
+          if (copy.delayMs > 0) {
+            window.setTimeout(() => this.sendOn(transport, relayPacket), copy.delayMs);
+          } else {
+            this.sendOn(transport, relayPacket);
+          }
+        }
+        return;
+      }
+    }
+
     const order = this.permutationTransports();
     for (const t of order) {
       this.sendOn(t, pkt);
@@ -343,8 +482,44 @@ class SoftTowerHopNet {
     return base;
   }
 
+  private buildEmergencyPlan(pkt: HopPacket) {
+    const isCritical = pkt.payload?.disaster?.priority === "critical" || pkt.payload?.resilience?.urgency === "critical";
+    const linkQuality = typeof pkt.payload?.resilience?.linkQuality === "number"
+      ? pkt.payload.resilience.linkQuality
+      : 0.8;
+    const interference = typeof pkt.payload?.resilience?.interferenceScore === "number"
+      ? pkt.payload.resilience.interferenceScore
+      : 0.25;
+
+    const transports = this.permutationTransports().filter((t) => t !== "optical");
+    const copies = isCritical ? 6 : 4;
+    const plan = buildAdaptiveRelayPlan(
+      { id: pkt.id, hops: pkt.hops || 0, ttl: pkt.ttl || MAX_TTL },
+      transports,
+      {
+        copies,
+        seed: `${this.nodeId}:${pkt.id}:${this.nodeName}`,
+        urgency: isCritical ? "critical" : "normal",
+        interferenceScore: interference,
+        linkQuality,
+        batteryBudget: 0.9,
+      }
+    );
+    return plan;
+  }
+
+  private isEmergencyTraffic(pkt: HopPacket) {
+    return Boolean(
+      pkt.payload?.emergency ||
+      pkt.payload?.disaster ||
+      pkt.payload?.resilience?.urgency === "critical" ||
+      pkt.payload?.resilience?.lowBandwidth
+    );
+  }
+
   private sendOn(t: HopTransport, pkt: HopPacket) {
     const wire = { ...pkt, transportsTried: [...(pkt.transportsTried || []), t] };
+    this.maybeForwardToNativeBridge(wire);
     try {
       if (t === "bc-tab" && this.bc) {
         this.bc.postMessage(wire);
@@ -359,7 +534,68 @@ class SoftTowerHopNet {
     } catch {}
   }
 
-  private ingest(raw: any, via: HopTransport) {
+  private async bootstrapNativeBridge() {
+    const started = await startNativeMeshEngine();
+    if (started) {
+      updateNativeBridgeDiagnostics(this.runtimeDiagnostics, "ready", "native mesh bridge running");
+      return;
+    }
+    updateNativeBridgeDiagnostics(this.runtimeDiagnostics, "unavailable", "native mesh bridge unavailable");
+  }
+
+  private installNativePacketListener() {
+    try {
+      this.nativeListenerCleanup?.();
+    } catch {}
+    this.nativeListenerCleanup = addNativeMeshPacketListener((event) => {
+      const payloadText = this.decodeNativePacketPayload(event);
+      if (!payloadText) return;
+      const parsed = this.parseNativePacketPayload(payloadText);
+      if (parsed) {
+        void this.ingest(parsed, "wifi-lan");
+      }
+    });
+  }
+
+  private decodeNativePacketPayload(event: { payload?: string; payloadBase64?: string }) {
+    const raw = event.payloadBase64 || event.payload || "";
+    if (!raw) return "";
+    try {
+      if (typeof window !== "undefined" && typeof window.atob === "function" && event.payloadBase64) {
+        return window.atob(event.payloadBase64);
+      }
+    } catch {}
+    return typeof raw === "string" ? raw : "";
+  }
+
+  private parseNativePacketPayload(payloadText: string) {
+    if (!payloadText) return null;
+    try {
+      const parsed = JSON.parse(payloadText);
+      if (parsed?.type === "SOFT_TOWER_HOP" && parsed.data) {
+        return parsed.data;
+      }
+      if (parsed?.kind && parsed?.from) {
+        return parsed;
+      }
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  private maybeForwardToNativeBridge(pkt: HopPacket) {
+    if (!pkt?.id || this.nativeForwardedPackets.has(pkt.id)) return;
+    this.nativeForwardedPackets.add(pkt.id);
+    const payload = JSON.stringify(pkt);
+    if (pkt.to) {
+      void sendNativeMeshPacket(pkt.to, payload);
+    } else {
+      void broadcastNativeMeshPacket(payload);
+    }
+  }
+
+  private async ingest(raw: any, via: HopTransport) {
     if (!raw || typeof raw !== "object") return;
     const pkt = raw as HopPacket;
     if (!pkt.id || !pkt.kind || !pkt.from) return;
@@ -371,36 +607,44 @@ class SoftTowerHopNet {
     this.markSeen(pkt.id);
     this.stats.rx++;
 
+    const normalized = await this.unwrapPacket(pkt);
+    if (normalized) {
+      this.maybeQueueForReplay(normalized);
+    }
+
     // Learn tower peer
-    this.touchPeer(pkt.from, pkt.fromName || pkt.from, pkt.hops || 1, via, pkt.payload);
-    this.learnRoute(pkt);
+    this.touchPeer(normalized.from, normalized.fromName || normalized.from, normalized.hops || 1, via, normalized.payload);
+    this.learnRoute(normalized);
 
     // Deliver if for us or flood beacon
-    const forUs = !pkt.to || pkt.to === this.nodeId || pkt.to === MeshEngine.localId;
+    const forUs = !normalized.to || normalized.to === this.nodeId || normalized.to === MeshEngine.localId;
     if (forUs) {
       this.stats.delivered++;
-      this.deliver(pkt);
+      if (normalized.payload?.text?.startsWith("diag:")) {
+        recordProbeReceipt(this.runtimeDiagnostics);
+      }
+      this.deliver(normalized);
     }
 
     // Relay hop (soft tower behavior)
     const maxTtl = this.policy.maxTtl || MAX_TTL;
-    if ((pkt.hops || 0) + 1 < (pkt.ttl || maxTtl) && !(pkt.path || []).includes(this.nodeId)) {
+    if ((normalized.hops || 0) + 1 < (normalized.ttl || maxTtl) && !(normalized.path || []).includes(this.nodeId)) {
       // Don't relay if unicast and we delivered to self only? Still relay flood for density
-      const shouldRelay = !pkt.to || !forUs || pkt.kind === "tower-beacon" || pkt.kind === "hello";
+      const shouldRelay = !normalized.to || !forUs || normalized.kind === "tower-beacon" || normalized.kind === "hello";
       // Always relay unicast until delivered widely — store-and-forward style
-      if (shouldRelay || (pkt.to && !forUs) || (pkt.to && forUs)) {
-        if (pkt.to && forUs && (pkt.kind === "msg" || pkt.kind === "call-signal")) {
+      if (shouldRelay || (normalized.to && !forUs) || (normalized.to && forUs)) {
+        if (normalized.to && forUs && (normalized.kind === "msg" || normalized.kind === "call-signal")) {
           // delivered — still optional rebroadcast for redundant paths? skip msg rebroadcast to reduce storm
         } else {
-          this.relay(pkt, via);
+          this.relay(normalized, via);
         }
-        if (pkt.to && !forUs) this.relay(pkt, via);
+        if (normalized.to && !forUs) this.relay(normalized, via);
       }
     }
 
     for (const fn of this.listeners) {
       try {
-        fn(pkt);
+        fn(normalized);
       } catch {}
     }
   }
@@ -409,16 +653,44 @@ class SoftTowerHopNet {
     if ((pkt.path || []).includes(this.nodeId)) return;
     if ((pkt.hops || 0) + 1 >= (pkt.ttl || this.policy.maxTtl || MAX_TTL)) return;
     this.stats.relayed++;
+    recordRelay(this.runtimeDiagnostics, pkt.from, pkt.fromName, `forwarded ${((pkt.hops || 0) + 1)} hop${(pkt.hops || 0) + 1 === 1 ? "" : "s"}`);
     const next: HopPacket = {
       ...pkt,
       hops: (pkt.hops || 0) + 1,
       path: [...(pkt.path || []), this.nodeId],
       transportsTried: [],
     };
-    // Prefer transports other than the one we received on (path diversity)
-    const order = this.permutationTransports().filter((t) => t !== via);
-    const list = order.length ? order : this.permutationTransports();
-    for (const t of list) this.sendOn(t, next);
+    const transports = this.permutationTransports().filter((t) => t !== via);
+    const list = transports.length ? transports : this.permutationTransports();
+    const plan = buildAdaptiveRelayPlan(
+      { id: pkt.id, hops: next.hops, ttl: next.ttl || MAX_TTL },
+      list,
+      {
+        copies: Math.max(3, Math.min(7, list.length)),
+        seed: `${this.nodeId}:${pkt.id}:${this.nodeName}`,
+      }
+    );
+
+    for (const copy of plan) {
+      const relayPacket = {
+        ...next,
+        payload: {
+          ...next.payload,
+          __jam: {
+            channel: copy.channel,
+            copyId: copy.id,
+            delayMs: copy.delayMs,
+            transportOrder: copy.transportOrder,
+          },
+        },
+      };
+      const transport = copy.transport as HopTransport;
+      if (copy.delayMs > 0) {
+        window.setTimeout(() => this.sendOn(transport, relayPacket), copy.delayMs);
+      } else {
+        this.sendOn(transport, relayPacket);
+      }
+    }
   }
 
   private learnRoute(pkt: HopPacket) {
@@ -450,6 +722,9 @@ class SoftTowerHopNet {
 
   private deliver(pkt: HopPacket) {
     if (pkt.kind === "tower-beacon" || pkt.kind === "hello") {
+      if (pkt.kind === "hello") {
+        recordHandshake(this.runtimeDiagnostics, pkt.from, pkt.fromName);
+      }
       bus.emit("softTowerHop:peer", { from: pkt.from, name: pkt.fromName, hops: pkt.hops });
       return;
     }
@@ -496,6 +771,7 @@ class SoftTowerHopNet {
     if (Array.isArray(payload?.links)) {
       for (const L of payload.links) links.add(L);
     }
+    recordPeerSighting(this.runtimeDiagnostics, id, name, `sighted via ${via}`, via, hops, [this.nodeId, id]);
     this.peers.set(id, {
       id,
       name: name || prev?.name || id.slice(0, 10),
@@ -505,6 +781,7 @@ class SoftTowerHopNet {
       phone: payload?.phone || prev?.phone,
       isTower: true,
     });
+    void this.replayPendingPackets(id);
   }
 
   private markSeen(id: string) {
@@ -524,6 +801,84 @@ class SoftTowerHopNet {
     for (const [id, p] of this.peers) {
       if (now - p.lastSeen > 90000) this.peers.delete(id);
     }
+  }
+
+  private loadPendingPackets() {
+    try {
+      const raw = S.get("gridcaller_soft_tower_pending", []);
+      this.pendingPackets = Array.isArray(raw) ? raw : [];
+      this.pendingPackets = prunePendingPackets(this.pendingPackets, Date.now());
+    } catch {
+      this.pendingPackets = [];
+    }
+  }
+
+  private savePendingPackets() {
+    try {
+      S.set("gridcaller_soft_tower_pending", this.pendingPackets.slice(0, 24));
+    } catch {}
+  }
+
+  private maybeQueueForReplay(pkt: HopPacket) {
+    if (!shouldStoreForReplay(pkt, this.nodeId)) return;
+    const entry: PendingPacket = {
+      id: pkt.id,
+      to: pkt.to,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 180000,
+      attempts: 0,
+      payload: pkt.payload,
+      packet: pkt,
+    };
+    this.pendingPackets = enqueuePendingPacket(this.pendingPackets, entry);
+    this.savePendingPackets();
+  }
+
+  private replayPendingPackets(peerId?: string) {
+    this.pendingPackets = prunePendingPackets(this.pendingPackets, Date.now());
+    if (!this.pendingPackets.length) return;
+    const ready = this.pendingPackets.filter((entry) => !peerId || entry.to === peerId);
+    for (const entry of ready) {
+      const packet = entry.packet as HopPacket | undefined;
+      if (!packet) continue;
+      const replayPacket = {
+        ...packet,
+        ts: Date.now(),
+        hops: Math.max(0, (packet.hops || 0) - 1),
+        path: [...(packet.path || [])],
+      } as HopPacket;
+      this.flood(replayPacket);
+      entry.attempts += 1;
+      entry.expiresAt = Date.now() + 120000;
+      if (entry.attempts >= 3) {
+        this.pendingPackets = this.pendingPackets.filter((item) => item.id !== entry.id);
+      }
+    }
+    this.savePendingPackets();
+  }
+
+  private async protectPacket(pkt: HopPacket): Promise<HopPacket> {
+    const payload = pkt.payload;
+    if (!payload || typeof payload !== "object") return pkt;
+    const secret = String(S.get("gridcaller_transport_secret", "gridcaller-mesh"));
+    const envelope = await buildReplayEnvelope(payload, this.nodeId, secret);
+    return {
+      ...pkt,
+      payload: envelope,
+    };
+  }
+
+  private async unwrapPacket(pkt: HopPacket): Promise<HopPacket> {
+    const payload = pkt.payload;
+    if (!payload || typeof payload !== "object") return pkt;
+    const envelope = payload as { __encrypted?: boolean; __cipher?: string; __iv?: string; __body?: any };
+    if (!envelope.__encrypted || !envelope.__cipher || !envelope.__iv) return pkt;
+    const secret = String(S.get("gridcaller_transport_secret", "gridcaller-mesh"));
+    const plain = await decryptReplayEnvelope(envelope, this.nodeId, secret);
+    return {
+      ...pkt,
+      payload: plain,
+    };
   }
 
   /** Optical hop: export packet as QR-friendly JSON string */
@@ -548,7 +903,7 @@ class SoftTowerHopNet {
     try {
       const j = JSON.parse(raw);
       const data = j.data || j;
-      this.ingest(data, "optical");
+      void this.ingest(data, "optical");
       return true;
     } catch {
       return false;

@@ -8,6 +8,8 @@ export type GatewayCandidate = {
   stability?: number;
   signal?: number;
   online?: boolean;
+  load?: number;
+  capacity?: number;
 };
 
 export type MeshTrafficPacket = {
@@ -38,7 +40,10 @@ export function scoreGateway(candidate: GatewayCandidate): number {
   const stability = clamp(candidate.stability ?? 0.7, 0, 1);
   const signal = clamp(candidate.signal ?? 0.7, 0, 1);
   const online = candidate.online === false ? 0 : 1;
-  return speed * 0.35 + hops * 0.25 + battery * 0.15 + stability * 0.15 + signal * 0.1 + online * 0.05;
+  const load = clamp(candidate.load ?? 0, 0, 1);
+  const capacity = clamp(candidate.capacity ?? 1, 0.1, 1);
+  const loadPenalty = 1 - load * 0.6 * (1 / Math.max(0.2, capacity));
+  return (speed * 0.3 + hops * 0.2 + battery * 0.15 + stability * 0.15 + signal * 0.1 + online * 0.05) * loadPenalty;
 }
 
 export function getTrafficPriority(kind: TrafficKind): number {

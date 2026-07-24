@@ -103,6 +103,16 @@ import {
   shareAppWifiLink,
 } from "./kernel/shareApp";
 import { getPrivacyStatus, isPrivacyMode, setPrivacyMode } from "./kernel/privacyMode";
+import {
+  getDisasterModeState,
+  getEmergencyModeSummary,
+  sendEmergencyBroadcast,
+  sendSosBeacon,
+  setDisasterMode,
+  toggleDisasterBeaconing,
+  toggleDisasterBroadcast,
+  toggleLowBandwidthMode,
+} from "./kernel/emergencyMode";
 import { getHubHttp, getMeshHandle, rememberDeviceIdentity } from "./mesh/identity";
 import { ghStatus } from "./github/ghClient";
 import { normalizeBridgeStatus, type MenuBridgeStatus } from "./kernel/menuStatus";
@@ -119,6 +129,10 @@ import {
   shareCardWhatsApp,
   type ProfileCard,
 } from "./kernel/userProfileCard";
+import {
+  loadPersistedRuntimeDiagnostics,
+  persistRuntimeDiagnostics,
+} from "./kernel/softTowerDiagnostics";
 
 type Tokens = {
   bg: string;
@@ -372,6 +386,7 @@ export default function GridCaller({
   });
   const [groupSelection, setGroupSelection] = useState<string[]>([]);
   const [meshPeersCollapsed, setMeshPeersCollapsed] = useState(false);
+  const [meshShareNote, setMeshShareNote] = useState("");
   const [onlineNowCollapsed, setOnlineNowCollapsed] = useState(false);
   const [groupCallOpen, setGroupCallOpen] = useState(false);
   const [groupCallMuted, setGroupCallMuted] = useState(false);
@@ -403,15 +418,22 @@ export default function GridCaller({
   // Hamburger: network count + map + GridCaller settings
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuView, setMenuView] = useState<
-    "home" | "map" | "settings" | "radio" | "profile" | "tower" | "devices" | "share" | "privacy"
+    "home" | "map" | "settings" | "radio" | "profile" | "tower" | "devices" | "share" | "privacy" | "emergency"
   >("home");
   const [towerTick, setTowerTick] = useState(0);
+  const [hopDiagnostics, setHopDiagnostics] = useState(() => {
+    const persisted = loadPersistedRuntimeDiagnostics();
+    return persisted.peerSightings > 0 || persisted.recentEvents.length > 0 || Object.keys(persisted.peerRoutes).length > 0
+      ? persisted
+      : softTowerHop.getRuntimeDiagnostics();
+  });
   const [wifiSsid, setWifiSsid] = useState("");
   const [wifiPass, setWifiPass] = useState("");
   const [deviceMsg, setDeviceMsg] = useState("");
   const [deviceBusy, setDeviceBusy] = useState(false);
   const [shareMsg, setShareMsg] = useState("");
   const [privacyMsg, setPrivacyMsg] = useState("");
+  const [disasterState, setDisasterState] = useState(() => getDisasterModeState());
   const [apkInfo, setApkInfo] = useState<{ name: string; url: string; size?: number } | null>(null);
   const [myCard, setMyCard] = useState<ProfileCard>(() => loadMyCard());
   const [cardInbox, setCardInbox] = useState<ProfileCard[]>(() => loadInbox());
@@ -441,6 +463,10 @@ export default function GridCaller({
   /** Auto-mesh: all APKs join same network without per-device Connect */
   const [autoMeshStatus, setAutoMeshStatus] = useState<AutoMeshStatus | null>(null);
   const [settingsName, setSettingsName] = useState(myName);
+
+  useEffect(() => {
+    persistRuntimeDiagnostics(hopDiagnostics);
+  }, [hopDiagnostics]);
 
   /** All IDs that mean "this phone" — never call/msg these */
   const isSelfPeer = (peerId: string) => {
@@ -690,6 +716,13 @@ export default function GridCaller({
       meshAppBridge.start(myName);
       meshAppBridge.registerApp("gridcaller", "GridCaller");
       meshAppBridge.registerApp("meshcomms", "Mesh Comms");
+      setMeshShareNote(meshAppBridge.getStatus().note || "");
+      const shareTimer = window.setInterval(() => {
+        try {
+          setMeshShareNote(meshAppBridge.getStatus().note || "");
+        } catch {}
+      }, 10000);
+      (window as any).__gc_share_timer = shareTimer;
 
       const gidIdentity = gridNumberRegistry.start({ id: user?.id, name: myName });
       // Soft tower: virtual number + optional SIM alias (dial like phone)
@@ -1062,6 +1095,7 @@ export default function GridCaller({
       offMesh?.();
       offState?.();
       offBus?.();
+      try { clearInterval((window as any).__gc_share_timer); } catch {}
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [myName]);
@@ -1127,7 +1161,10 @@ export default function GridCaller({
         };
       }
     });
-    const iv = setInterval(() => setTowerTick((n) => n + 1), 3000);
+    const iv = setInterval(() => {
+      setTowerTick((n) => n + 1);
+      setHopDiagnostics(softTowerHop.getRuntimeDiagnostics());
+    }, 3000);
     return () => {
       offMsg();
       offCall();
@@ -4813,7 +4850,9 @@ export default function GridCaller({
                               ? "Share"
                               : menuView === "privacy"
                                 ? "Privacy"
-                                : "Settings"}
+                                : menuView === "emergency"
+                                  ? "Emergency / Mesh"
+                                  : "Settings"}
               </div>
             </div>
 
@@ -4858,12 +4897,15 @@ export default function GridCaller({
 
                   {(
                     [
+                      {
+                        id: "emergency" as const,
+                        icon: <Shield size={20} color={isPrivacyMode() ? tokens.green : tokens.orange} />,
+                        title: "Emergency / Mesh",
+                      },
                       { id: "share" as const, icon: <Share2 size={20} color={tokens.green} />, title: "Share app" },
-                      { id: "privacy" as const, icon: <Shield size={20} color={isPrivacyMode() ? tokens.green : tokens.orange} />, title: "Privacy" },
                       { id: "devices" as const, icon: <Wifi size={20} color={tokens.blue} />, title: "Devices" },
                       { id: "tower" as const, icon: <Smartphone size={20} color={tokens.blue} />, title: "Network" },
                       { id: "profile" as const, icon: <IdCard size={20} color={tokens.blue} />, title: "Profile" },
-                      { id: "radio" as const, icon: <Volume2 size={20} color={tokens.green} />, title: "Radio" },
                       { id: "map" as const, icon: <MapIcon size={20} color={tokens.blue} />, title: "Map" },
                       { id: "settings" as const, icon: <Settings size={20} color={tokens.orange} />, title: "Settings" },
                     ] as const
@@ -4906,6 +4948,322 @@ export default function GridCaller({
                     {mySerial && <div>Device: {mySerial}</div>}
                     {lanUrl && <div>LAN: {lanUrl}</div>}
                   </div>
+                </>
+              )}
+
+              {menuView === "emergency" && (
+                <>
+                  {(() => {
+                    const emergencySummary = getEmergencyModeSummary({
+                      localOnly: getForceLocalMesh(),
+                      privacyOn: isPrivacyMode(),
+                      bridgeReady: bridgeStatus.ready,
+                      radioOn: freeRadio.enabled,
+                      disasterActive: disasterState.active,
+                    });
+                    return (
+                      <div
+                        style={{
+                          background: `${tokens.blue}14`,
+                          border: `1px solid ${tokens.blue}44`,
+                          borderRadius: 14,
+                          padding: 12,
+                          marginBottom: 12,
+                          lineHeight: 1.5,
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                          <Shield size={18} color={tokens.blue} />
+                          <b style={{ color: tokens.text }}>{emergencySummary.title}</b>
+                        </div>
+                        <div style={{ fontSize: 13, color: tokens.secondary, marginBottom: 8 }}>{emergencySummary.subtitle}</div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                          {emergencySummary.badges.map((badge) => (
+                            <span
+                              key={badge}
+                              style={{
+                                padding: "4px 8px",
+                                borderRadius: 999,
+                                background: tokens.fill,
+                                color: tokens.label,
+                                fontSize: 11,
+                                fontWeight: 700,
+                              }}
+                            >
+                              {badge}
+                            </span>
+                          ))}
+                        </div>
+                        <div style={{ fontSize: 12, color: tokens.secondary, lineHeight: 1.5 }}>
+                          {emergencySummary.guidance.map((item) => (
+                            <div key={item} style={{ marginBottom: 4 }}>
+                              • {item}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  <div
+                    style={{
+                      background: tokens.fill,
+                      borderRadius: 12,
+                      padding: 12,
+                      marginBottom: 12,
+                      border: `1px solid ${tokens.sep}`,
+                      fontSize: 12,
+                      color: tokens.label,
+                      lineHeight: 1.45,
+                    }}
+                  >
+                    <div style={{ fontWeight: 700, color: tokens.text, marginBottom: 4 }}>Mode details</div>
+                    <div>Mode: {meshModeLabel()}</div>
+                    <div>Bridge: {bridgeStatus.text}</div>
+                    <div>Radio channel: {freeRadio.channelName}</div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = !getForceLocalMesh();
+                      setForceLocalMesh(next);
+                      setPrivacyMsg(next ? "Local relay on" : "Local relay off");
+                      setTowerTick((n) => n + 1);
+                    }}
+                    style={{
+                      width: "100%",
+                      padding: 12,
+                      borderRadius: 10,
+                      border: "none",
+                      background: getForceLocalMesh() ? tokens.green : tokens.blue,
+                      color: "#fff",
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      marginBottom: 8,
+                    }}
+                  >
+                    {getForceLocalMesh() ? "Disable local relay" : "Enable local relay"}
+                  </button>
+
+                  <div
+                    style={{
+                      background: disasterState.active ? `${tokens.red}22` : tokens.fill,
+                      border: `1px solid ${disasterState.active ? tokens.red : tokens.sep}`,
+                      borderRadius: 12,
+                      padding: 12,
+                      marginBottom: 10,
+                    }}
+                  >
+                    <div style={{ fontWeight: 800, color: tokens.text, marginBottom: 6 }}>Disaster mode</div>
+                    <div style={{ fontSize: 12, color: tokens.secondary, marginBottom: 8 }}>
+                      Emergency broadcast, store-and-forward, SOS beacons, and low-bandwidth relay work offline-first.
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = setDisasterMode(!disasterState.active);
+                        setDisasterState(next);
+                        setPrivacyMsg(next.active ? "Disaster mode on" : "Disaster mode off");
+                      }}
+                      style={{
+                        width: "100%",
+                        padding: 10,
+                        borderRadius: 10,
+                        border: "none",
+                        background: disasterState.active ? tokens.red : tokens.green,
+                        color: "#fff",
+                        fontWeight: 700,
+                        cursor: "pointer",
+                        marginBottom: 8,
+                      }}
+                    >
+                      {disasterState.active ? "Exit disaster mode" : "Enter disaster mode"}
+                    </button>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const next = toggleDisasterBroadcast();
+                          setDisasterState((prev) => ({ ...prev, broadcastMode: next }));
+                        }}
+                        style={{
+                          flex: 1,
+                          padding: 8,
+                          borderRadius: 8,
+                          border: `1px solid ${tokens.sep}`,
+                          background: disasterState.broadcastMode ? tokens.blue : tokens.fill,
+                          color: disasterState.broadcastMode ? "#fff" : tokens.text,
+                          fontWeight: 600,
+                        }}
+                      >
+                        {disasterState.broadcastMode ? "Broadcast on" : "Broadcast off"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const next = toggleLowBandwidthMode();
+                          setDisasterState((prev) => ({ ...prev, lowBandwidth: next }));
+                        }}
+                        style={{
+                          flex: 1,
+                          padding: 8,
+                          borderRadius: 8,
+                          border: `1px solid ${tokens.sep}`,
+                          background: disasterState.lowBandwidth ? tokens.orange : tokens.fill,
+                          color: disasterState.lowBandwidth ? "#fff" : tokens.text,
+                          fontWeight: 600,
+                        }}
+                      >
+                        {disasterState.lowBandwidth ? "Low-bandwidth on" : "Low-bandwidth off"}
+                      </button>
+                    </div>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const next = toggleDisasterBeaconing();
+                          setDisasterState((prev) => ({ ...prev, beaconing: next }));
+                        }}
+                        style={{
+                          flex: 1,
+                          padding: 8,
+                          borderRadius: 8,
+                          border: `1px solid ${tokens.sep}`,
+                          background: disasterState.beaconing ? tokens.green : tokens.fill,
+                          color: disasterState.beaconing ? "#fff" : tokens.text,
+                          fontWeight: 600,
+                        }}
+                      >
+                        {disasterState.beaconing ? "SOS beacon on" : "SOS beacon off"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const location = myGps ? { lat: myGps.lat, lng: myGps.lng } : null;
+                          sendEmergencyBroadcast(`Emergency alert from ${myName}`, location);
+                          setPrivacyMsg("Emergency broadcast sent");
+                        }}
+                        style={{
+                          flex: 1,
+                          padding: 8,
+                          borderRadius: 8,
+                          border: "none",
+                          background: tokens.red,
+                          color: "#fff",
+                          fontWeight: 700,
+                        }}
+                      >
+                        Emergency alert
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const location = myGps ? { lat: myGps.lat, lng: myGps.lng } : null;
+                        sendSosBeacon(location);
+                        setPrivacyMsg("SOS beacon sent");
+                      }}
+                      style={{
+                        width: "100%",
+                        padding: 10,
+                        borderRadius: 8,
+                        border: "none",
+                        background: tokens.orange,
+                        color: "#fff",
+                        fontWeight: 700,
+                      }}
+                    >
+                      Send SOS beacon
+                    </button>
+                    <div style={{ fontSize: 11, color: tokens.label, marginTop: 8 }}>
+                      Queue: {disasterState.queueDepth} · Beacon: {disasterState.beaconing ? "on" : "off"}
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const next = !isPrivacyMode();
+                      await setPrivacyMode(next, myName);
+                      setPrivacyMsg(next ? "Privacy on" : "Privacy off");
+                      setTowerTick((n) => n + 1);
+                    }}
+                    style={{
+                      width: "100%",
+                      padding: 12,
+                      borderRadius: 10,
+                      border: "none",
+                      background: isPrivacyMode() ? tokens.green : tokens.orange,
+                      color: "#fff",
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      marginBottom: 8,
+                    }}
+                  >
+                    {isPrivacyMode() ? "Turn privacy off" : "Turn privacy on"}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void freeRadio.enable(!freeRadio.enabled);
+                      setPrivacyMsg(freeRadio.enabled ? "Free radio on" : "Free radio off");
+                      setRadioTick((n) => n + 1);
+                    }}
+                    style={{
+                      width: "100%",
+                      padding: 12,
+                      borderRadius: 10,
+                      border: `1px solid ${tokens.sep}`,
+                      background: freeRadio.enabled ? tokens.green : tokens.fill,
+                      color: freeRadio.enabled ? "#fff" : tokens.text,
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      marginBottom: 8,
+                    }}
+                  >
+                    {freeRadio.enabled ? "Free radio on" : "Free radio off"}
+                  </button>
+
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button
+                      type="button"
+                      onClick={() => setMenuView("radio")}
+                      style={{
+                        flex: 1,
+                        padding: 10,
+                        borderRadius: 10,
+                        border: `1px solid ${tokens.sep}`,
+                        background: tokens.fill,
+                        color: tokens.text,
+                        fontWeight: 600,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Open radio
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMenuView("tower")}
+                      style={{
+                        flex: 1,
+                        padding: 10,
+                        borderRadius: 10,
+                        border: `1px solid ${tokens.sep}`,
+                        background: tokens.fill,
+                        color: tokens.text,
+                        fontWeight: 600,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Open network
+                    </button>
+                  </div>
+
+                  {privacyMsg ? (
+                    <div style={{ marginTop: 10, fontSize: 12, color: tokens.green }}>{privacyMsg}</div>
+                  ) : null}
                 </>
               )}
 
@@ -5567,6 +5925,118 @@ export default function GridCaller({
                       </div>
                     );
                   })()}
+                  <div
+                    style={{
+                      background: tokens.fill,
+                      borderRadius: 12,
+                      padding: 12,
+                      marginBottom: 12,
+                      border: `1px solid ${tokens.sep}`,
+                    }}
+                  >
+                    <div style={{ fontSize: 12, color: tokens.label, fontWeight: 700, marginBottom: 6 }}>
+                      Mesh proof panel
+                    </div>
+                    <div style={{ fontSize: 12, color: tokens.text, lineHeight: 1.45 }}>
+                      Live peers: {Object.keys(hopDiagnostics.peerRoutes || {}).length}
+                      <br />
+                      Native bridge: {hopDiagnostics.nativeBridgeStatus || "idle"}
+                      {hopDiagnostics.nativeBridgeDetail ? ` · ${hopDiagnostics.nativeBridgeDetail}` : ""}
+                      <br />
+                      Handshake state: {hopDiagnostics.lastHandshakePeerId ? (hopDiagnostics.lastHandshakePeerName || hopDiagnostics.lastHandshakePeerId) : "none"}
+                      <br />
+                      Last self-test: {hopDiagnostics.lastSelfTestStatus || "pending"}
+                      <br />
+                      Last detail: {hopDiagnostics.lastSelfTestDetail || "—"}
+                    </div>
+                    <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${tokens.sep}` }}>
+                      <div style={{ fontWeight: 700, marginBottom: 4 }}>Peer route history</div>
+                      {Object.entries(hopDiagnostics.peerRoutes || {}).length === 0 ? (
+                        <div style={{ color: tokens.label }}>No peer route history yet.</div>
+                      ) : (
+                        Object.entries(hopDiagnostics.peerRoutes || {}).slice(0, 6).map(([peerId, route]) => (
+                          <div key={peerId} style={{ color: tokens.label, marginTop: 2 }}>
+                            {route.peerName || peerId} · {route.handshakeState} · hops {route.hops} · {route.lastTransport || "—"}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                    <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          softTowerHop.probeRelay();
+                          const next = softTowerHop.getRuntimeDiagnostics();
+                          setHopDiagnostics(next);
+                          setContactBusy("Probe broadcast sent");
+                          setTimeout(() => setContactBusy(""), 1800);
+                        }}
+                        style={{
+                          flex: 1,
+                          padding: 10,
+                          borderRadius: 10,
+                          border: `1px solid ${tokens.sep}`,
+                          background: tokens.blue,
+                          color: "#fff",
+                          fontWeight: 700,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Probe relay
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const probeId = softTowerHop.probeRelay();
+                          const next = softTowerHop.getRuntimeDiagnostics();
+                          const status = next.probeReceipts > 0 || next.probeCount > 0 ? "pass" : "fail";
+                          softTowerHop.markSelfTestResult(status, `probe ${probeId} emitted`);
+                          setHopDiagnostics(softTowerHop.getRuntimeDiagnostics());
+                          setContactBusy(status === "pass" ? "Mesh self-test passed" : "Mesh self-test failed");
+                          setTimeout(() => setContactBusy(""), 1800);
+                        }}
+                        style={{
+                          flex: 1,
+                          padding: 10,
+                          borderRadius: 10,
+                          border: `1px solid ${tokens.sep}`,
+                          background: tokens.green,
+                          color: "#041510",
+                          fontWeight: 700,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Run mesh self-test
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const blob = new Blob([JSON.stringify(hopDiagnostics, null, 2)], { type: "application/json" });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement("a");
+                        a.href = url;
+                        a.download = `gridcaller-mesh-proof-${Date.now()}.json`;
+                        a.click();
+                        URL.revokeObjectURL(url);
+                        setContactBusy("Diagnostics exported");
+                        setTimeout(() => setContactBusy(""), 1600);
+                      }}
+                      style={{
+                        width: "100%",
+                        marginTop: 8,
+                        padding: 10,
+                        borderRadius: 10,
+                        border: `1px solid ${tokens.sep}`,
+                        background: tokens.fill2,
+                        color: tokens.text,
+                        fontWeight: 700,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Export diagnostics JSON
+                    </button>
+                  </div>
                   <div style={{ fontSize: 12, color: tokens.label, fontWeight: 600, marginBottom: 6 }}>
                     Nearby
                   </div>

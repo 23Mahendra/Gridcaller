@@ -44,24 +44,39 @@ function normalizeSeed(value: string): string {
     .slice(0, 24);
 }
 
+function digitsOnly(value: string): string {
+  return String(value || "").replace(/\D/g, "");
+}
+
 function stableHashSeed(seed: string): string {
   let hash = 0;
   for (let i = 0; i < seed.length; i += 1) {
     hash = (hash << 5) - hash + seed.charCodeAt(i);
     hash |= 0;
   }
-  const unsigned = hash >>> 0;
-  return unsigned.toString(36).padStart(6, "0");
+  return (hash >>> 0).toString();
+}
+
+function deriveNumericHandle(input?: { phone?: string; imei?: string; peerId?: string }): string {
+  const phone = digitsOnly(input?.phone || readStoredString(PHONE_KEY));
+  if (phone.length >= 10) {
+    return phone.slice(-10);
+  }
+
+  const imei = digitsOnly(input?.imei || readStoredString(IMEI_KEY));
+  if (imei.length >= 10) {
+    return imei.slice(-10);
+  }
+
+  const peerId = digitsOnly(input?.peerId || readStoredString(ID_KEY) || "mesh-local");
+  const seed = [phone, imei, peerId].filter(Boolean).join("");
+  const hash = stableHashSeed(seed || "mesh-local");
+  const numeric = (Number(hash) % 10000000000).toString().padStart(10, "0");
+  return numeric;
 }
 
 export function deriveStableMeshHandle(input?: { phone?: string; imei?: string; peerId?: string }): string {
-  const phone = normalizeSeed(input?.phone || readStoredString(PHONE_KEY));
-  const imei = normalizeSeed(input?.imei || readStoredString(IMEI_KEY));
-  const peerId = normalizeSeed(input?.peerId || readStoredString(ID_KEY) || "mesh-local");
-  const base = [phone, imei, peerId].filter(Boolean).join("-");
-  const seed = base || "mesh-local";
-  const suffix = stableHashSeed(seed);
-  return `mesh-${suffix}`;
+  return deriveNumericHandle(input);
 }
 
 function deriveHandleFromPeerId(peerId: string): string {
@@ -86,13 +101,21 @@ export function setDisplayName(name: string) {
 }
 
 export function getMeshHandle(): string {
-  const saved = readStoredString(HANDLE_KEY);
-  if (saved) return saved;
+  const saved = readStoredString(HANDLE_KEY) || readStoredString("global_call_handle");
+  if (saved) {
+    const normalized = digitsOnly(saved).slice(-10);
+    if (normalized) {
+      writeStoredString(HANDLE_KEY, normalized);
+      writeStoredString("global_call_handle", normalized);
+      return normalized;
+    }
+  }
   const peerId = getPeerId();
   const phone = readStoredString(PHONE_KEY);
   const imei = readStoredString(IMEI_KEY);
   const derived = deriveStableMeshHandle({ phone, imei, peerId });
   writeStoredString(HANDLE_KEY, derived);
+  writeStoredString("global_call_handle", derived);
   return derived;
 }
 
@@ -110,9 +133,10 @@ export function ensureMeshIdentity() {
 }
 
 export function setMeshHandle(handle: string) {
-  const normalized = String(handle || "").trim().replace(/^@/, "").slice(0, 24);
+  const normalized = digitsOnly(String(handle || "").trim().replace(/^@/, "")).slice(-10);
   if (!normalized) return getMeshHandle();
   writeStoredString(HANDLE_KEY, normalized);
+  writeStoredString("global_call_handle", normalized);
   return normalized;
 }
 
@@ -125,6 +149,7 @@ export function rememberDeviceIdentity(input: { phone?: string; imei?: string; p
   if (peerId) writeStoredString(ID_KEY, peerId);
   const derived = deriveStableMeshHandle({ phone, imei, peerId });
   writeStoredString(HANDLE_KEY, derived);
+  writeStoredString("global_call_handle", derived);
   return derived;
 }
 

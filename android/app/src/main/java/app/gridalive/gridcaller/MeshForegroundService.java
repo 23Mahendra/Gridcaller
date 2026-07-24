@@ -25,6 +25,7 @@ public class MeshForegroundService extends Service {
     private static final String PREFS = "mesh_vpn_state";
     private static final String KEY_MODE = "mode";
     private static final String KEY_ONLINE = "online";
+    private static final String KEY_STATE = "state";
 
     private PowerManager.WakeLock wakeLock;
 
@@ -46,6 +47,15 @@ public class MeshForegroundService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         ensureChannels();
+        String mode = getMeshVpnMode(this);
+        String state = getMeshVpnState(this);
+        String title = "GridCaller mesh online";
+        String body = "Soft tower mode is active in the background.";
+        if (!"disabled".equals(mode)) {
+            title = "GridCaller mesh VPN active";
+            body = "Gateway/client preview is active for shared internet over the mesh.";
+        }
+
         Intent open = new Intent(this, MainActivity.class);
         open.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NEW_TASK);
         open.putExtra("mesh_keepalive", true);
@@ -57,8 +67,8 @@ public class MeshForegroundService extends Service {
         );
 
         Notification n = new NotificationCompat.Builder(this, CHANNEL_MESH)
-            .setContentTitle("GridCaller mesh online")
-            .setContentText("Listening for mesh calls — tap to open")
+            .setContentTitle(title)
+            .setContentText(body + " · " + state)
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .setContentIntent(pi)
             .setOngoing(true)
@@ -205,12 +215,22 @@ public class MeshForegroundService extends Service {
         if ("gateway".equals(resolved) && !online) {
             resolved = "client";
         }
-        sp.edit().putString(KEY_MODE, resolved).putBoolean(KEY_ONLINE, online).apply();
+        String state = "idle";
+        if ("gateway".equals(resolved)) {
+            state = online ? "gateway-ready" : "gateway-waiting";
+        } else if ("client".equals(resolved)) {
+            state = online ? "client-ready" : "client-waiting";
+        }
+        sp.edit()
+            .putString(KEY_MODE, resolved)
+            .putBoolean(KEY_ONLINE, online)
+            .putString(KEY_STATE, state)
+            .apply();
     }
 
     public static void stopMeshVpn(Context ctx) {
         SharedPreferences sp = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        sp.edit().putString(KEY_MODE, "disabled").putBoolean(KEY_ONLINE, false).apply();
+        sp.edit().putString(KEY_MODE, "disabled").putBoolean(KEY_ONLINE, false).putString(KEY_STATE, "stopped").apply();
     }
 
     public static String getMeshVpnMode(Context ctx) {
@@ -221,5 +241,10 @@ public class MeshForegroundService extends Service {
     public static boolean isMeshVpnOnline(Context ctx) {
         SharedPreferences sp = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         return sp.getBoolean(KEY_ONLINE, false);
+    }
+
+    public static String getMeshVpnState(Context ctx) {
+        SharedPreferences sp = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        return sp.getString(KEY_STATE, "stopped");
     }
 }

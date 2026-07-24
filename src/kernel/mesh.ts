@@ -36,22 +36,39 @@ function meshWsUrl(): string {
   return resolveMeshWsUrl();
 }
 
+function getMeshSecret(engine: any) {
+  return String(S.get("mesh_secret") || S.get("mesh_id") || engine?.localId || "gridcaller");
+}
+
+function unwrapMeshEnvelope(raw: any, engine: any) {
+  if (!raw || typeof raw !== "object") return raw;
+  if (raw.kind === "mesh-envelope" || raw.type === "mesh-envelope") {
+    try {
+      const decoded = readLocalMeshEnvelope(raw, getMeshSecret(engine));
+      if (decoded && typeof decoded === "object") return decoded;
+    } catch {}
+  }
+  return raw;
+}
+
 function deliverToListeners(engine: any, m: any) {
   if (!m) return;
+  const payload = unwrapMeshEnvelope(m, engine);
+  if (!payload || typeof payload !== "object") return;
   // Never deliver our own outbound as inbound (self-call / self-msg bug)
-  if (m.from && m.from === engine.localId) return;
-  if (m.from) {
+  if (payload.from && payload.from === engine.localId) return;
+  if (payload.from) {
     engine.peers = engine.peers || {};
-    engine.peers[m.from] = {
-      ...(engine.peers[m.from] || {}),
-      name: m.fromName || m.data?.fromName || m.data?.name || m.from,
+    engine.peers[payload.from] = {
+      ...(engine.peers[payload.from] || {}),
+      name: payload.fromName || payload.data?.fromName || payload.data?.name || payload.from,
       lastSeen: Date.now(),
     };
   }
   const list = (engine.listeners || []) as any[];
   for (const f of list) {
     try {
-      f(m);
+      f(payload);
     } catch (err) {
       console.warn("[MeshEngine] listener error", err);
     }
@@ -291,8 +308,9 @@ function connectMeshWs(engine: any) {
     };
     ws.onmessage = (ev) => {
       try {
-        const m = JSON.parse(String(ev.data));
-        if (m.type === "WELCOME" && Array.isArray(m.data?.peers)) {
+        const raw = JSON.parse(String(ev.data));
+        const m = unwrapMeshEnvelope(raw, engine);
+        if (m?.type === "WELCOME" && Array.isArray(m.data?.peers)) {
           for (const p of m.data.peers) {
             if (!p?.id || p.id === engine.localId) continue;
             engine.peers = engine.peers || {};
@@ -300,7 +318,7 @@ function connectMeshWs(engine: any) {
           }
           return;
         }
-        if (m.type === "PEER_ANNOUNCE") {
+        if (m?.type === "PEER_ANNOUNCE") {
           const id = m.from || m.data?.id;
           if (id && id !== engine.localId) {
             engine.peers = engine.peers || {};
@@ -360,7 +378,7 @@ export const MeshEngine: MeshEngineAPI = {
       const base = data && typeof data === "object" ? { ...data } : { value: data };
       if (!base.handle && handle) base.handle = handle;
       if (!base.phone && phone) base.phone = phone;
-      const secret = String(S.get("mesh_secret") || S.get("mesh_id") || this.localId || "gridcaller");
+      const secret = getMeshSecret(this);
       const msg = {
         type,
         data: base,
@@ -368,18 +386,18 @@ export const MeshEngine: MeshEngineAPI = {
         fromName,
         time: Date.now(),
         ts: Date.now(),
-        encrypted: false,
+        encrypted: true,
       };
       const envelope = createLocalMeshEnvelope(msg, secret);
-      queuePendingOutbound(msg);
+      queuePendingOutbound(envelope);
       // 1) same-origin tabs only
       try {
-        meshBC?.postMessage(msg);
+        meshBC?.postMessage(envelope);
       } catch {}
       // 2) WebSocket hub
       try {
         if (meshWs && meshWs.readyState === WebSocket.OPEN) {
-          meshWs.send(JSON.stringify(msg));
+          meshWs.send(JSON.stringify(envelope));
         }
       } catch {}
       // 3) HTTP publish → hub bus (critical for APK when WS is dead)
@@ -388,7 +406,7 @@ export const MeshEngine: MeshEngineAPI = {
         fetch(`${hub}/api/mesh/publish`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(msg),
+          body: JSON.stringify(envelope),
         }).catch(() => {});
       } catch {}
       // DO NOT deliver outbound to local listeners (that was self-msg / self-call)

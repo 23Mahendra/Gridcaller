@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildHandshakeReply, shouldSendHandshakeReply } from "./meshHandshake";
+import { buildHandshakeReply, normalizeHandshakePeerId, shouldSendHandshakeReply } from "./meshHandshake.ts";
 
 test("replies to a fresh hello after a brief silence", () => {
   const now = 1000;
@@ -19,4 +19,10 @@ test("builds a reply that carries the peer id and a handshake marker", () => {
   assert.equal(payload.replyTo, "peer-3");
   assert.equal(payload.handshake, true);
   assert.equal(payload.type, "AM_HELLO");
+});
+
+test("falls back to the reply target when a hello has no explicit id", () => {
+  const payload = buildHandshakeReply({ name: "You", type: "AM_HELLO" }, "peer-3");
+  assert.equal(payload.id, "peer-3");
+  assert.equal(normalizeHandshakePeerId({ id: "" }, "peer-3"), "peer-3");
 });

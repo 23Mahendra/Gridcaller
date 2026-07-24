@@ -297,6 +297,7 @@ class MeshAppBridge {
 
   getBestGatewayCandidate(): GatewayCandidate | null {
     const preferredId = (S.get("mesh_selected_gateway", "") as string) || "";
+    const gatewayPayload = (S.get(KEYS.gateway, null) as any) || null;
     const candidates: GatewayCandidate[] = this.routingTable.snapshot()
       .filter((route) => route.gateway)
       .map((route) => ({
@@ -307,6 +308,8 @@ class MeshAppBridge {
         stability: route.quality || 0.7,
         signal: route.quality || 0.7,
         online: true,
+        load: gatewayPayload?.load ?? 0.1,
+        capacity: gatewayPayload?.capacity ?? 1,
       }));
     const selected = selectBestGateway(candidates, preferredId);
     if (selected) {
@@ -321,14 +324,20 @@ class MeshAppBridge {
     try {
       peers = (meshComms.getPeers?.() || meshComms.nearbyPeers || []).filter((p: any) => p.online).length;
     } catch {}
+    const bestGateway = this.getBestGatewayCandidate();
+    const gatewayMode = gw?.gateway ? "shared" : "mesh-only";
+    const gatewayNote = gw?.gateway
+      ? `Mesh internet preview: ${bestGateway ? `best path ${bestGateway.id}` : "gateway available"} · voice-first traffic + limited browsing`
+      : "Mesh internet preview disabled; calls and local messages still work without a gateway.";
     return {
       started: this.started,
       online: typeof navigator !== "undefined" ? navigator.onLine : false,
       meshPeers: peers,
       gateway: gw,
       apps: this.listApps().length,
-      note:
-        "Browser mesh carries GridAlive apps + messages + calls. Native OS apps need Electron shell or mesh-node proxy for full internet hop.",
+      bestGateway,
+      gatewayMode,
+      note: `${gatewayNote} Browser mesh carries GridAlive apps + messages + calls. Native OS apps need Electron shell or mesh-node proxy for full internet hop.`,
     };
   }
 }

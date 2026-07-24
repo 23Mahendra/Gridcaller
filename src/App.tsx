@@ -18,7 +18,7 @@ import { MeshEngine } from "./kernel/mesh";
 import { startFullAutoJoin, onAutoJoinStatus } from "./kernel/autoJoin";
 import { deriveLifecycleState } from "./kernel/appLifecycle";
 import { startWifiMemory } from "./kernel/wifiMemory";
-import { startMeshKeepAlive, startMeshVpn, stopMeshVpn } from "./plugins/meshCallNative";
+import { bridgeMeshRuntimeEvent, startMeshKeepAlive, startMeshVpn, stopMeshVpn } from "./plugins/meshCallNative";
 import { startMeshDirectory } from "./kernel/meshDirectory";
 import { startNetworkHandoff } from "./kernel/networkHandoff";
 import { ensureMeshIdentity, rememberDeviceIdentity } from "./mesh/identity";
@@ -123,6 +123,7 @@ export default function App() {
     startMeshDirectory(); // persistent peers + mesh memory
     startNetworkHandoff(); // smooth Wi‑Fi/path switch without killing voice
     void startMeshKeepAlive(); // FG service: mesh listen when app backgrounded/minimized
+    void bridgeMeshRuntimeEvent("mesh-start", { localId: identity.peerId, name: user.name });
     void startMeshVpn("gateway", navigator.onLine).catch(() => {});
     // FULL auto-join: Wi‑Fi mesh + swarm + Bluetooth scan — no manual Connect
     void startFullAutoJoin(S.get("user_name") || S.get("mesh_name") || "GridUser");

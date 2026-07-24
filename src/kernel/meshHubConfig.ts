@@ -10,6 +10,12 @@ const DEFAULT_PORT = "8765";
 const LOCALHOST_FALLBACK = "127.0.0.1";
 
 export function getDefaultHubHttp(): string {
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname || "";
+    if (host && !isLocalPreviewHost(host)) {
+      return `http://${host}:${DEFAULT_PORT}`;
+    }
+  }
   return `http://${DEFAULT_LAN}:${DEFAULT_PORT}`;
 }
 
@@ -31,6 +37,9 @@ export function resolveHubHttp(): string {
     const host = window.location.hostname || "";
     if (isLocalPreviewHost(host)) {
       return localMeshFallback();
+    }
+    if (host) {
+      return `http://${host}:${DEFAULT_PORT}`;
     }
   }
 
