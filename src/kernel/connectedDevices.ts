@@ -56,6 +56,39 @@ function isStale(lastSeen?: number, maxAge = 45000): boolean {
   return Date.now() - lastSeen > maxAge;
 }
 
+function isPlaceholderPeerIdentity(id: string, name: string): boolean {
+  const normalizedId = String(id || "").trim().toLowerCase();
+  const normalizedName = String(name || "").trim().toLowerCase();
+  const placeholderIds = new Set([
+    "",
+    "self",
+    "me",
+    "mesh",
+    "meshpeer",
+    "mesh-peer",
+    "peer",
+    "node",
+    "unknown",
+    "this-device",
+    "this-phone",
+    "device",
+  ]);
+  const placeholderNames = new Set([
+    "",
+    "me",
+    "self",
+    "mesh",
+    "mesh peer",
+    "meshpeer",
+    "peer",
+    "node",
+    "unknown",
+    "this device",
+    "this phone",
+  ]);
+  return placeholderIds.has(normalizedId) || placeholderNames.has(normalizedName);
+}
+
 /**
  * Real devices only:
  * · You (once)
@@ -102,6 +135,7 @@ export function listConnectedDevices(opts?: {
     for (const p of getAutoMeshPeers()) {
       if (!p?.id || isSelfId(p.id, localIds)) continue;
       if (!p.online) continue;
+      if (isPlaceholderPeerIdentity(p.id, p.name || "")) continue;
       push({
         id: p.id,
         name: p.name || p.id.slice(0, 12),
@@ -117,6 +151,7 @@ export function listConnectedDevices(opts?: {
   for (const p of opts?.meshPeers || []) {
     if (!p?.id || isSelfId(p.id, localIds)) continue;
     if (p.online === false) continue;
+    if (isPlaceholderPeerIdentity(p.id, p.name || "")) continue;
     push({
       id: p.id,
       name: p.name || p.id.slice(0, 12),
@@ -129,6 +164,7 @@ export function listConnectedDevices(opts?: {
   for (const p of opts?.globalPeers || []) {
     if (!p?.id || isSelfId(p.id, localIds)) continue;
     if (p.online === false) continue;
+    if (isPlaceholderPeerIdentity(p.id, p.name || "")) continue;
     push({
       id: p.id,
       name: p.name || p.id.slice(0, 12),

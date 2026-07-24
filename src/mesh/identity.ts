@@ -5,6 +5,8 @@ const SIGNAL_KEY = "gc_signal_url";
 const HUB_KEY = "gc_hub_http";
 const HANDLE_KEY = "gc_mesh_handle";
 const DEVICE_KEY = "gc_device_label";
+const IMEI_KEY = "gc_device_imei";
+const PHONE_KEY = "user_phone";
 
 function rid(prefix = "gc") {
   return `${prefix}_${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36).slice(-4)}`;
@@ -34,9 +36,36 @@ function writeStoredString(key: string, value: string) {
   storage.setItem(key, value);
 }
 
+function normalizeSeed(value: string): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "")
+    .slice(0, 24);
+}
+
+function stableHashSeed(seed: string): string {
+  let hash = 0;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash = (hash << 5) - hash + seed.charCodeAt(i);
+    hash |= 0;
+  }
+  const unsigned = hash >>> 0;
+  return unsigned.toString(36).padStart(6, "0");
+}
+
+export function deriveStableMeshHandle(input?: { phone?: string; imei?: string; peerId?: string }): string {
+  const phone = normalizeSeed(input?.phone || readStoredString(PHONE_KEY));
+  const imei = normalizeSeed(input?.imei || readStoredString(IMEI_KEY));
+  const peerId = normalizeSeed(input?.peerId || readStoredString(ID_KEY) || "mesh-local");
+  const base = [phone, imei, peerId].filter(Boolean).join("-");
+  const seed = base || "mesh-local";
+  const suffix = stableHashSeed(seed);
+  return `mesh-${suffix}`;
+}
+
 function deriveHandleFromPeerId(peerId: string): string {
-  const base = peerId.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase();
-  return base ? `mesh-${base}` : "mesh-local";
+  return deriveStableMeshHandle({ peerId });
 }
 
 export function getPeerId(): string {
@@ -60,14 +89,18 @@ export function getMeshHandle(): string {
   const saved = readStoredString(HANDLE_KEY);
   if (saved) return saved;
   const peerId = getPeerId();
-  const derived = deriveHandleFromPeerId(peerId);
+  const phone = readStoredString(PHONE_KEY);
+  const imei = readStoredString(IMEI_KEY);
+  const derived = deriveStableMeshHandle({ phone, imei, peerId });
   writeStoredString(HANDLE_KEY, derived);
   return derived;
 }
 
 export function ensureMeshIdentity() {
   const peerId = getPeerId();
-  const handle = getMeshHandle();
+  const phone = readStoredString(PHONE_KEY);
+  const imei = readStoredString(IMEI_KEY);
+  const handle = rememberDeviceIdentity({ phone, imei, peerId });
   const deviceLabel = readStoredString(DEVICE_KEY);
   if (!deviceLabel) {
     const fallback = `device-${peerId.split("_")[1] || peerId.slice(-4)}`;
@@ -81,6 +114,18 @@ export function setMeshHandle(handle: string) {
   if (!normalized) return getMeshHandle();
   writeStoredString(HANDLE_KEY, normalized);
   return normalized;
+}
+
+export function rememberDeviceIdentity(input: { phone?: string; imei?: string; peerId?: string }) {
+  const phone = String(input.phone || "").replace(/\D/g, "");
+  const imei = String(input.imei || "").replace(/\D/g, "");
+  const peerId = String(input.peerId || readStoredString(ID_KEY) || "").trim();
+  if (phone) writeStoredString(PHONE_KEY, phone);
+  if (imei) writeStoredString(IMEI_KEY, imei);
+  if (peerId) writeStoredString(ID_KEY, peerId);
+  const derived = deriveStableMeshHandle({ phone, imei, peerId });
+  writeStoredString(HANDLE_KEY, derived);
+  return derived;
 }
 
 export function getRoom(): string {

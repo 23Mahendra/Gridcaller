@@ -23,6 +23,7 @@ import { S } from "./storage";
 import { MeshEngine } from "./mesh";
 import freeMeshFabric from "./freeMeshFabric";
 import { setForceLocalMesh } from "./offlineMode";
+import { MeshRoutingTable } from "./meshRoutingTable";
 
 export type HopTransport = "wifi-lan" | "bc-tab" | "fabric-bc" | "bt-web" | "optical";
 
@@ -53,7 +54,7 @@ export type SoftTowerPeer = {
 
 const MAX_TTL = 16;
 const SEEN_MAX = 800;
-const BEACON_MS = 4000;
+const BEACON_MS = 2500;
 
 type Listener = (pkt: HopPacket) => void;
 
@@ -74,6 +75,7 @@ class SoftTowerHopNet {
   private fabricBc: BroadcastChannel | null = null;
   private beaconTimer: ReturnType<typeof setInterval> | null = null;
   private stats = { tx: 0, rx: 0, relayed: 0, delivered: 0 };
+  private routingTable = new MeshRoutingTable();
 
   get id() {
     return this.nodeId;
@@ -102,6 +104,7 @@ class SoftTowerHopNet {
         return id;
       })();
     this.nodeName = name || S.get("user_name") || S.get("mesh_name") || "SoftTower";
+    this.routingTable.setLocalId(this.nodeId);
 
     try {
       freeMeshFabric.start(this.nodeName);
@@ -205,7 +208,7 @@ class SoftTowerHopNet {
       relayed: this.stats.relayed,
       delivered: this.stats.delivered,
       transports: this.availableTransports(),
-      doctrine: "Every GridCaller = soft tower · hop until clear · no SIM",
+      doctrine: "Every GridCaller = soft tower · relay calls/texts until clear · no SIM",
     };
   }
 
@@ -355,6 +358,7 @@ class SoftTowerHopNet {
 
     // Learn tower peer
     this.touchPeer(pkt.from, pkt.fromName || pkt.from, pkt.hops || 1, via, pkt.payload);
+    this.learnRoute(pkt);
 
     // Deliver if for us or flood beacon
     const forUs = !pkt.to || pkt.to === this.nodeId || pkt.to === MeshEngine.localId;
@@ -399,6 +403,33 @@ class SoftTowerHopNet {
     const order = this.permutationTransports().filter((t) => t !== via);
     const list = order.length ? order : this.permutationTransports();
     for (const t of list) this.sendOn(t, next);
+  }
+
+  private learnRoute(pkt: HopPacket) {
+    if (!pkt?.from || pkt.from === this.nodeId) return;
+    const targetId = pkt.to || pkt.from;
+    const nextHop = pkt.path?.[pkt.path.length - 2] || pkt.from;
+    const quality = Math.max(0.1, Math.min(1, 1 - (pkt.hops || 0) * 0.08));
+    const cost = Math.max(1, (pkt.hops || 0) + 2);
+    const route = this.routingTable.observeRoute(targetId, nextHop, {
+      via: pkt.kind === "tower-beacon" ? "beacon" : "relay",
+      quality,
+      cost,
+      hops: (pkt.hops || 0) + 1,
+      path: pkt.path || [pkt.from, targetId],
+      lastSeen: Date.now(),
+      gateway: Boolean(pkt.payload?.gateway || pkt.payload?.isTower),
+    });
+    if (route && pkt.to) {
+      this.routingTable.observeDirectLink(pkt.from, {
+        via: "direct",
+        quality: Math.max(0.6, route.quality),
+        cost: Math.max(1, route.cost - 1),
+        hops: Math.max(1, route.hops - 1),
+        path: [pkt.from],
+        lastSeen: Date.now(),
+      });
+    }
   }
 
   private deliver(pkt: HopPacket) {

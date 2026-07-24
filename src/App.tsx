@@ -21,7 +21,7 @@ import { startWifiMemory } from "./kernel/wifiMemory";
 import { startMeshKeepAlive } from "./plugins/meshCallNative";
 import { startMeshDirectory } from "./kernel/meshDirectory";
 import { startNetworkHandoff } from "./kernel/networkHandoff";
-import { ensureMeshIdentity } from "./mesh/identity";
+import { ensureMeshIdentity, rememberDeviceIdentity } from "./mesh/identity";
 import { ConsentGate } from "./ui/ConsentGate";
 import { getConsentState } from "./kernel/consent";
 
@@ -108,7 +108,12 @@ export default function App() {
 
     // Critical for APK: hub must be PC LAN IP, not localhost
     ensureHubDefaults();
-    ensureMeshIdentity();
+    const identity = ensureMeshIdentity();
+    rememberDeviceIdentity({
+      phone: S.get("user_phone", "") || "",
+      imei: S.get("gc_device_imei", "") || "",
+      peerId: identity.peerId,
+    });
     unifyLocalIdentity();
     try {
       (MeshEngine as any).start?.();
@@ -167,8 +172,8 @@ export default function App() {
           if (!r.bluetooth) missing.push("Bluetooth");
           setPermNote(
             missing.length
-              ? `Allow once: ${missing.join(", ")} — then phones auto-join (no Connect).`
-              : `v${APP_VERSION_NAME} · Auto mesh ON`
+              ? `Allow once: ${missing.join(", ")} — then nearby GridCaller devices become part of the relay tower mesh for calls and texts.`
+              : `v${APP_VERSION_NAME} · Mesh tower fabric ON · every nearby GridCaller relays traffic automatically`
           );
           if (!missing.length) {
             setTimeout(() => setPermNote(""), 5000);

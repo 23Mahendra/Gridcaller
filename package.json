@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@capacitor-community/bluetooth-le": "7.1.1",
+    "@capacitor-community/sqlite": "^6.0.1",
     "@capacitor/android": "^7.2.0",
     "@capacitor/app": "^7.0.1",
     "@capacitor/core": "^7.2.0",
@@ -34,6 +35,8 @@
     "@sentry/react": "^10.67.0",
     "dexie": "^4.4.4",
     "gun": "^0.2020.1241",
+    "libp2p": "^2.7.0",
+    "simple-peer": "^9.0.0",
     "leaflet": "^1.9.4",
     "lucide-react": "^0.546.0",
     "peer": "^1.0.2",

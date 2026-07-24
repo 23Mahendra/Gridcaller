@@ -19,6 +19,8 @@ import { ensureMeshIdentity, getMeshHandle } from "../mesh/identity";
 import { ensureHubDefaults, resolveHubHttp, probeHub } from "./meshHubConfig";
 import softTowerHop from "./softTowerHopNet";
 import freeMeshFabric from "./freeMeshFabric";
+import { createPendingEnvelopeEntry, shouldRetryPendingEnvelopeEntry, type PendingEnvelopeEntry } from "../lib/meshReliability";
+import { buildHandshakeReply, shouldReplyToHello, rememberHelloPeer } from "./meshHandshake";
 
 export const AUTO_MESH_APP_ID = "gridcaller-auto-mesh-v1";
 export const AUTO_MESH_ROOM = "gridcaller-global";
@@ -72,11 +74,13 @@ let announceTimer: ReturnType<typeof setInterval> | null = null;
 let hubProbeTimer: ReturnType<typeof setInterval> | null = null;
 let announceBackoffMs = 3500;
 let presenceTimer: ReturnType<typeof setInterval> | null = null;
+let presenceRetryTimer: ReturnType<typeof setInterval> | null = null;
 let hubOk = false;
 let trysteroOk = false;
 let lastGps: { lat: number; lng: number } | null = null;
 
 const peers = new Map<string, AutoMeshPeer>();
+let pendingPresenceEnvelopes: PendingEnvelopeEntry[] = [];
 const listeners = new Set<(peers: AutoMeshPeer[]) => void>();
 const statusListeners = new Set<(s: AutoMeshStatus) => void>();
 const locationListeners = new Set<(p: AutoMeshPeer) => void>();
@@ -246,11 +250,65 @@ function buildPresence(extra?: Partial<PresencePayload>): PresencePayload {
   };
 }
 
+function savePendingPresenceEnvelopes() {
+  try {
+    S.set("auto_mesh_pending_presence", pendingPresenceEnvelopes.slice(0, 200));
+  } catch {}
+}
+
+function queuePresenceEnvelope(kind: string, payload: any) {
+  const entry = createPendingEnvelopeEntry({
+    id: `${kind}:${payload?.id || payload?.peerId || Date.now().toString(36)}`,
+    kind,
+    payload,
+    createdAt: Date.now(),
+    target: payload?.id || payload?.peerId,
+  });
+  const existing = pendingPresenceEnvelopes.find((item) => item.id === entry.id);
+  if (existing) {
+    existing.payload = entry.payload;
+    existing.status = "pending";
+    existing.attempts = Math.max(existing.attempts, 1);
+  } else {
+    pendingPresenceEnvelopes.unshift(entry);
+  }
+  savePendingPresenceEnvelopes();
+}
+
+function flushPendingPresenceEnvelopes(now = Date.now()) {
+  if (!pendingPresenceEnvelopes.length) return;
+  for (const entry of [...pendingPresenceEnvelopes]) {
+    if (entry.status === "sent" || entry.status === "acked") continue;
+    if (!shouldRetryPendingEnvelopeEntry(entry, now)) continue;
+    entry.lastAttemptAt = now;
+    entry.attempts += 1;
+    savePendingPresenceEnvelopes();
+    try {
+      if (entry.kind === "AM_PRESENCE") {
+        MeshEngine.broadcast("AM_PRESENCE", entry.payload);
+        MeshEngine.broadcast("GRIDCALLER_LOCATION", {
+          lat: entry.payload.lat,
+          lng: entry.payload.lng,
+          name: entry.payload.name,
+          phone: entry.payload.phone,
+          displayNumber: entry.payload.displayNumber,
+          peerId: entry.payload.id,
+        });
+      }
+    } catch {}
+    if (entry.attempts >= 6) {
+      entry.status = "sent";
+      savePendingPresenceEnvelopes();
+    }
+  }
+}
+
 function announce() {
   const payload = buildPresence({ type: "AM_HELLO" });
   if (!navigator.onLine && !S.get("gc_allow_offline_mesh", true)) {
     return;
   }
+  queuePresenceEnvelope("AM_PRESENCE", payload);
   // 1) Hub mesh bus
   try {
     MeshEngine.broadcast("AM_PRESENCE", payload);
@@ -283,6 +341,18 @@ function handleInbound(raw: any, via: string) {
   const type = data.type || raw.type;
   const id = String(data.id || data.peerId || raw.from || "").trim();
   if (!id || isSelf(id)) return;
+
+  if (type === "AM_HELLO" || type === "PEER_HELLO" || type === "AM_PRESENCE") {
+    const now = Date.now();
+    rememberHelloPeer(id, now);
+    const replyTo = String(data.replyTo || "").trim();
+    if (!replyTo && shouldReplyToHello(id, now)) {
+      const reply = buildHandshakeReply(buildPresence({ type: "AM_HELLO" }), id);
+      try {
+        MeshEngine.broadcast("AM_HELLO", reply);
+      } catch {}
+    }
+  }
 
   if (
     type === "AM_PRESENCE" ||
@@ -454,6 +524,13 @@ export async function startAutoMesh(name?: string): Promise<AutoMeshStatus> {
   void startTrystero();
   void probeAndRegisterHub();
   announce();
+
+  pendingPresenceEnvelopes = (S.get("auto_mesh_pending_presence", []) as PendingEnvelopeEntry[]) || [];
+  if (!presenceRetryTimer) {
+    presenceRetryTimer = setInterval(() => {
+      flushPendingPresenceEnvelopes(Date.now());
+    }, 3000);
+  }
 
   presenceTimer = setInterval(() => {
     prune();

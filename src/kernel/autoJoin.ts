@@ -40,6 +40,7 @@ import softTowerHop from "./softTowerHopNet";
 import freeMeshFabric from "./freeMeshFabric";
 import { ensureLocationPermission } from "./nativePermissions";
 import { rememberPeer } from "./meshDirectory";
+import { buildHandshakeReply, shouldReplyToHello, rememberHelloPeer } from "./meshHandshake";
 
 export type AutoJoinStatus = {
   running: boolean;
@@ -192,6 +193,9 @@ function floodPresence() {
     fabric: true,
     ts: Date.now(),
   };
+  try {
+    rememberHelloPeer(me.id, Date.now());
+  } catch {}
   try {
     MeshEngine.broadcast("AM_HELLO", payload);
     MeshEngine.broadcast("PEER_HELLO", payload);
@@ -495,10 +499,25 @@ export async function startFullAutoJoin(userName?: string): Promise<AutoJoinStat
     MeshEngine.onMessage((msg: any) => {
       if (!msg?.from || msg.from === MeshEngine.localId) return;
       const t = String(msg.type || "");
-      if (
-        /HELLO|PRESENCE|ANNOUNCE|AM_|PEER_|FABRIC|SOFT_TOWER|GRIDCALLER_LOCATION/i.test(t)
-      ) {
-        const d = msg.data || {};
+      const d = msg.data || {};
+      const now = Date.now();
+      if (/HELLO|PRESENCE|ANNOUNCE|AM_|PEER_|FABRIC|SOFT_TOWER|GRIDCALLER_LOCATION/i.test(t)) {
+        const id = String(d?.id || msg.from || "").trim();
+        if (id) {
+          rememberHelloPeer(id, now);
+          if (shouldReplyToHello(id, now)) {
+            const reply = buildHandshakeReply({
+              id: MeshEngine.localId,
+              name: meName(),
+              handle: String(S.get("global_call_handle", "") || "").replace(/^@/, ""),
+              phone: String(S.get("user_phone", "") || "").replace(/\D/g, ""),
+              ts: now,
+            }, id);
+            try {
+              MeshEngine.broadcast("AM_HELLO", reply);
+            } catch {}
+          }
+        }
         injectPeer(msg.from, msg.fromName || d.name || msg.from, "proximity", {
           handle: d.handle,
           phone: d.phone,

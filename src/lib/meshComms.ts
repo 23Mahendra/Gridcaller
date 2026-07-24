@@ -8,6 +8,12 @@
 import { MeshEngine, type MeshMsg } from "./meshEngine";
 import S from "./storage";
 import { v4 as uuidv4 } from "uuid";
+import { createPendingDmEntry, shouldRetryPendingDm, type PendingDmEntry } from "./meshCommsReliability";
+import {
+  createPendingCallSignal,
+  shouldRetryPendingCallSignal,
+  type PendingCallSignalEntry,
+} from "./meshCallReliability";
 
 export type CallState =
   | "idle"
@@ -58,6 +64,9 @@ type Listener = () => void;
 const DM_KEY = "mesh_dms_v1";
 const CALL_HIST_KEY = "mesh_call_history_v1";
 const CONTACTS_KEY = "mesh_contacts_v1";
+const PENDING_DMS_KEY = "mesh_pending_dms_v1";
+const PENDING_CALLS_KEY = "mesh_pending_calls_v1";
+const PENDING_RETRY_MS = 2500;
 
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
@@ -84,6 +93,9 @@ class MeshCommsImpl {
   private hooked = false;
   private pendingIce: RTCIceCandidateInit[] = [];
   private audioEl: HTMLAudioElement | null = null;
+  private pendingDms: PendingDmEntry[] = [];
+  private pendingCallSignals: PendingCallSignalEntry[] = [];
+  private pendingTimer: number | null = null;
 
   start() {
     if (this.hooked) return;
@@ -91,6 +103,11 @@ class MeshCommsImpl {
     this.dms = S.getRaw(DM_KEY, []) || [];
     this.callHistory = S.getRaw(CALL_HIST_KEY, []) || [];
     this.contacts = S.getRaw(CONTACTS_KEY, []) || [];
+    this.pendingDms = (S.getRaw(PENDING_DMS_KEY, []) || []) as PendingDmEntry[];
+    this.pendingCallSignals = (S.getRaw(PENDING_CALLS_KEY, []) || []) as PendingCallSignalEntry[];
+    this._schedulePendingDmFlush();
+    this._flushPendingDms(Date.now());
+    this._flushPendingCallSignals(Date.now());
     MeshEngine.onMessage((msg) => this._onMesh(msg));
   }
 
@@ -123,6 +140,124 @@ class MeshCommsImpl {
     try {
       S.setRaw(CONTACTS_KEY, this.contacts.slice(0, 300));
     } catch {}
+  }
+
+  private _savePendingDms() {
+    try {
+      S.setRaw(PENDING_DMS_KEY, this.pendingDms.slice(0, 200));
+    } catch {}
+  }
+
+  private _savePendingCallSignals() {
+    try {
+      S.setRaw(PENDING_CALLS_KEY, this.pendingCallSignals.slice(0, 200));
+    } catch {}
+  }
+
+  private _schedulePendingDmFlush() {
+    if (this.pendingTimer != null || typeof window === "undefined") return;
+    this.pendingTimer = window.setInterval(() => {
+      this._flushPendingDms(Date.now());
+    }, PENDING_RETRY_MS);
+  }
+
+  private _queuePendingDm(dm: MeshDm) {
+    const existing = this.pendingDms.find((entry) => entry.id === dm.id);
+    if (existing) {
+      existing.to = dm.to;
+      existing.text = dm.text;
+      existing.lastAttemptAt = Date.now();
+      existing.attempts = Math.max(existing.attempts, 1);
+      existing.status = "pending";
+    } else {
+      this.pendingDms.unshift(
+        createPendingDmEntry({
+          id: dm.id,
+          to: dm.to,
+          text: dm.text,
+          createdAt: dm.ts,
+        })
+      );
+    }
+    this._savePendingDms();
+    this._flushPendingDms(Date.now());
+  }
+
+  private _flushPendingDms(now = Date.now()) {
+    if (!this.pendingDms.length) return;
+    for (const entry of [...this.pendingDms]) {
+      if (entry.status === "acked" || entry.status === "failed") continue;
+      if (!shouldRetryPendingDm(entry, now)) continue;
+      const existing = this.dms.find((dm) => dm.id === entry.id);
+      if (!existing) {
+        this.pendingDms = this.pendingDms.filter((item) => item.id !== entry.id);
+        this._savePendingDms();
+        continue;
+      }
+      entry.lastAttemptAt = now;
+      entry.attempts += 1;
+      this._savePendingDms();
+      MeshEngine.sendTo(entry.to, "MESH_DM", {
+        id: entry.id,
+        text: entry.text,
+        fromName: MeshEngine.localName,
+      });
+      MeshEngine.broadcast(
+        "MESH_DM_BROADCAST",
+        { hint: "dm", from: MeshEngine.localId, to: entry.to },
+        2
+      );
+      if (entry.attempts >= 6) {
+        entry.status = "failed";
+        this._savePendingDms();
+      }
+    }
+  }
+
+  private _markPendingDmAcked(id: string) {
+    this.pendingDms = this.pendingDms.filter((entry) => entry.id !== id || entry.status === "acked");
+    this._savePendingDms();
+  }
+
+  private _queuePendingCallSignal(entry: PendingCallSignalEntry) {
+    const existing = this.pendingCallSignals.find((item) => item.id === entry.id);
+    if (existing) {
+      existing.payload = entry.payload;
+      existing.lastAttemptAt = Date.now();
+      existing.attempts = Math.max(existing.attempts, 1);
+      existing.status = "pending";
+    } else {
+      this.pendingCallSignals.unshift(entry);
+    }
+    this._savePendingCallSignals();
+    this._flushPendingCallSignals(Date.now());
+  }
+
+  private _flushPendingCallSignals(now = Date.now()) {
+    if (!this.pendingCallSignals.length) return;
+    for (const entry of [...this.pendingCallSignals]) {
+      if (entry.status === "acked" || entry.status === "failed") continue;
+      if (!shouldRetryPendingCallSignal(entry, now)) continue;
+      if (!this.call || this.call.callId !== entry.callId || this.call.state === "ended") {
+        entry.status = "failed";
+        this._savePendingCallSignals();
+        continue;
+      }
+      entry.lastAttemptAt = now;
+      entry.attempts += 1;
+      this._savePendingCallSignals();
+      MeshEngine.sendTo(entry.peerId, entry.kind === "sdp" ? "MESH_CALL_SDP" : entry.kind === "accept" ? "MESH_CALL_ACCEPT" : "MESH_CALL_INVITE", entry.payload);
+      if (entry.attempts >= 6) {
+        entry.status = "failed";
+        this._savePendingCallSignals();
+      }
+    }
+  }
+
+  private _markPendingCallSignalAcked(callId: string, kind: PendingCallSignalKind) {
+    const id = `${callId}:${kind}:${this.call?.peerId || ""}`;
+    this.pendingCallSignals = this.pendingCallSignals.filter((entry) => entry.id !== id || entry.status === "acked");
+    this._savePendingCallSignals();
   }
 
   /** Upsert contact from peer presence (Truecaller-style identity) */
@@ -242,6 +377,7 @@ class MeshCommsImpl {
       { hint: "dm", from: MeshEngine.localId, to: toPeerId },
       2
     );
+    this._queuePendingDm(dm);
     this._emit();
     return dm;
   }
@@ -313,12 +449,22 @@ class MeshCommsImpl {
     await this._prepareMedia(video);
     await this._createPc(peerId, callId, true);
 
-    MeshEngine.sendTo(peerId, "MESH_CALL_INVITE", {
+    const payload = {
       callId,
       video,
       fromName: MeshEngine.localName,
       fromId: MeshEngine.localId,
-    });
+    };
+    MeshEngine.sendTo(peerId, "MESH_CALL_INVITE", payload);
+    this._queuePendingCallSignal(
+      createPendingCallSignal({
+        callId,
+        peerId,
+        kind: "invite",
+        payload,
+        createdAt: Date.now(),
+      })
+    );
 
     setTimeout(() => {
       if (this.call?.callId === callId && this.call.state === "outgoing") {
@@ -336,10 +482,20 @@ class MeshCommsImpl {
     await this._prepareMedia(video);
     await this._createPc(peerId, callId, false);
 
-    MeshEngine.sendTo(peerId, "MESH_CALL_ACCEPT", {
+    const payload = {
       callId,
       fromName: MeshEngine.localName,
-    });
+    };
+    MeshEngine.sendTo(peerId, "MESH_CALL_ACCEPT", payload);
+    this._queuePendingCallSignal(
+      createPendingCallSignal({
+        callId,
+        peerId,
+        kind: "accept",
+        payload,
+        createdAt: Date.now(),
+      })
+    );
   }
 
   rejectCall() {
@@ -427,6 +583,7 @@ class MeshCommsImpl {
         this._saveDms();
         this.rememberContact(msg.from, dm.fromName);
         MeshEngine.sendTo(msg.from, "MESH_DM_ACK", { id: dm.id });
+        this._markPendingDmAcked(dm.id);
         this._emit();
       }
       return;
@@ -436,6 +593,7 @@ class MeshCommsImpl {
       this.dms = this.dms.map((d) =>
         d.id === msg.data.id ? { ...d, status: "delivered" as const } : d
       );
+      this._markPendingDmAcked(msg.data.id);
       this._saveDms();
       this._emit();
       return;
@@ -470,16 +628,27 @@ class MeshCommsImpl {
 
     if (msg.type === "MESH_CALL_ACCEPT" && this.call?.callId === msg.data?.callId) {
       this.call = { ...this.call, state: "connecting" };
+      this._markPendingCallSignalAcked(this.call.callId, "accept");
       this._emit();
       if (this.call.direction === "out" && this.pc) {
         try {
           const offer = await this.pc.createOffer();
           await this.pc.setLocalDescription(offer);
-          MeshEngine.sendTo(this.call.peerId, "MESH_CALL_SDP", {
+          const payload = {
             callId: this.call.callId,
             sdp: offer,
             kind: "offer",
-          });
+          };
+          MeshEngine.sendTo(this.call.peerId, "MESH_CALL_SDP", payload);
+          this._queuePendingCallSignal(
+            createPendingCallSignal({
+              callId: this.call.callId,
+              peerId: this.call.peerId,
+              kind: "sdp",
+              payload,
+              createdAt: Date.now(),
+            })
+          );
         } catch (e) {
           console.warn("[MeshCall] offer failed", e);
           this.endCall("offer_failed");
@@ -515,13 +684,24 @@ class MeshCommsImpl {
         if (msg.data.kind === "offer") {
           const answer = await this.pc!.createAnswer();
           await this.pc!.setLocalDescription(answer);
-          MeshEngine.sendTo(this.call.peerId, "MESH_CALL_SDP", {
+          const payload = {
             callId: this.call.callId,
             sdp: answer,
             kind: "answer",
-          });
+          };
+          MeshEngine.sendTo(this.call.peerId, "MESH_CALL_SDP", payload);
+          this._queuePendingCallSignal(
+            createPendingCallSignal({
+              callId: this.call.callId,
+              peerId: this.call.peerId,
+              kind: "sdp",
+              payload,
+              createdAt: Date.now(),
+            })
+          );
         }
         this.call = { ...this.call, state: "connecting" };
+        this._markPendingCallSignalAcked(this.call.callId, "sdp");
         this._emit();
       } catch (e) {
         console.warn("[MeshCall] SDP error", e);

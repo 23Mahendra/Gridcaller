@@ -8,6 +8,8 @@ import type { MeshEngineAPI } from "./types";
 import { S } from "./storage";
 import { resolveHubHttp, resolveMeshWsUrl, ensureHubDefaults } from "./meshHubConfig";
 import { endPeerConnection, tryBeginPeerConnection } from "./networkGuard";
+import { createPendingOutboundMessage, shouldRetryPendingOutboundMessage, type PendingOutboundMessage } from "../lib/meshReliability";
+import { createLocalMeshEnvelope, readLocalMeshEnvelope } from "./serverlessMesh";
 
 let meshBC: BroadcastChannel | null = null;
 let meshBCListenerAttached = false;
@@ -19,6 +21,8 @@ let pollAfter = 0;
 let lastRegister = 0;
 let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let wsReconnectAttempt = 0;
+let pendingOutbound: PendingOutboundMessage[] = [];
+let pendingOutboundTimer: ReturnType<typeof setInterval> | null = null;
 
 try {
   meshBC = new BroadcastChannel("gridalive-mesh");
@@ -192,8 +196,64 @@ async function httpPoll(engine: any) {
   }
 }
 
+function savePendingOutbound() {
+  try {
+    S.set("mesh_pending_outbound", pendingOutbound.slice(0, 200));
+  } catch {}
+}
+
+function queuePendingOutbound(msg: any) {
+  const entry = createPendingOutboundMessage({
+    id: msg.id || `${msg.type}:${Date.now()}`,
+    type: msg.type,
+    payload: msg,
+    createdAt: Date.now(),
+  });
+  const existing = pendingOutbound.find((item) => item.id === entry.id);
+  if (existing) {
+    existing.payload = entry.payload;
+    existing.attempts = Math.max(existing.attempts, 1);
+    existing.status = "pending";
+  } else {
+    pendingOutbound.unshift(entry);
+  }
+  savePendingOutbound();
+}
+
+function flushPendingOutbound(engine: any, now = Date.now()) {
+  if (!pendingOutbound.length) return;
+  for (const entry of [...pendingOutbound]) {
+    if (entry.status === "sent") continue;
+    if (!shouldRetryPendingOutboundMessage(entry, now)) continue;
+    entry.lastAttemptAt = now;
+    entry.attempts += 1;
+    savePendingOutbound();
+    try {
+      if (meshWs && meshWs.readyState === WebSocket.OPEN) {
+        meshWs.send(JSON.stringify(entry.payload));
+      }
+    } catch {}
+    try {
+      const hub = meshHubHttp();
+      fetch(`${hub}/api/mesh/publish`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(entry.payload),
+      }).catch(() => {});
+    } catch {}
+    if (entry.attempts >= 6) {
+      entry.status = "sent";
+      savePendingOutbound();
+    }
+  }
+}
+
 function startHttpBus(engine: any) {
   if (pollTimer) return;
+  pendingOutbound = (S.get("mesh_pending_outbound", []) || []) as PendingOutboundMessage[];
+  if (!pendingOutboundTimer) {
+    pendingOutboundTimer = setInterval(() => flushPendingOutbound(engine, Date.now()), 2500);
+  }
   void httpRegister(engine);
   void httpPoll(engine);
   // Fast poll so call signaling (OFFER/ANSWER/ICE) arrives quickly on 2 phones
@@ -218,6 +278,7 @@ function connectMeshWs(engine: any) {
     ws.onopen = () => {
       meshConnected = true;
       wsReconnectAttempt = 0;
+      flushPendingOutbound(engine, Date.now());
       try {
         const name = S.get("mesh_name") || S.get("user_name") || engine.localId;
         ws.send(JSON.stringify({ type: "HELLO", id: engine.localId, name }));
@@ -299,6 +360,7 @@ export const MeshEngine: MeshEngineAPI = {
       const base = data && typeof data === "object" ? { ...data } : { value: data };
       if (!base.handle && handle) base.handle = handle;
       if (!base.phone && phone) base.phone = phone;
+      const secret = String(S.get("mesh_secret") || S.get("mesh_id") || this.localId || "gridcaller");
       const msg = {
         type,
         data: base,
@@ -306,7 +368,10 @@ export const MeshEngine: MeshEngineAPI = {
         fromName,
         time: Date.now(),
         ts: Date.now(),
+        encrypted: false,
       };
+      const envelope = createLocalMeshEnvelope(msg, secret);
+      queuePendingOutbound(msg);
       // 1) same-origin tabs only
       try {
         meshBC?.postMessage(msg);

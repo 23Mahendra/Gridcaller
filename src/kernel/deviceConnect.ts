@@ -14,6 +14,54 @@ import { ensureLocationPermission } from "./nativePermissions";
 
 const WIFI_KEY = "gc_wifi_networks_v1";
 const BT_KEY = "gc_bt_devices_v1";
+const STRENGTH_STATE_KEY = "gc_mesh_strength_state_v1";
+const MAX_BT_LINKS = 2;
+const MAX_WIFI_LINKS = 2;
+
+type MeshStrengthState = {
+  score: number;
+  lastUpdated: number;
+  cycles: number;
+  bestScore: number;
+};
+
+let strengthAutoTimer: ReturnType<typeof setInterval> | null = null;
+let strengthStateCache: MeshStrengthState | null = null;
+
+function loadStrengthState(): MeshStrengthState {
+  if (strengthStateCache) return strengthStateCache;
+  const raw = S.get(STRENGTH_STATE_KEY, null) as Partial<MeshStrengthState> | null;
+  const state: MeshStrengthState = {
+    score: Math.max(20, Math.min(100, raw?.score ?? 30)),
+    lastUpdated: raw?.lastUpdated ?? Date.now(),
+    cycles: Math.max(0, raw?.cycles ?? 0),
+    bestScore: Math.max(20, Math.min(100, raw?.bestScore ?? raw?.score ?? 30)),
+  };
+  strengthStateCache = state;
+  return state;
+}
+
+function saveStrengthState(state: MeshStrengthState) {
+  strengthStateCache = state;
+  try {
+    S.set(STRENGTH_STATE_KEY, state);
+  } catch {}
+}
+
+function startStrengthAutoboost() {
+  if (strengthAutoTimer) return;
+  strengthAutoTimer = setInterval(() => {
+    try {
+      const hop = softTowerHop.getNetworkHealth();
+      const fabric = freeMeshFabric.getStats();
+      const bt = listBt().length;
+      const wifi = listWifi().length;
+      scoreStrength(hop, fabric, bt, wifi);
+    } catch {}
+  }, 10000);
+}
+
+startStrengthAutoboost();
 
 export type SavedWifi = {
   id: string;
@@ -36,13 +84,29 @@ function uid() {
   return `dev_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`;
 }
 
+function trimLinks<T extends { id: string }>(rows: T[], max: number): T[] {
+  return rows.slice(0, max);
+}
+
+function upsertLimited<T extends { id: string }>(rows: T[], item: T, max: number): T[] {
+  const next = [...rows];
+  const existingIndex = next.findIndex((row) => row.id === item.id);
+  if (existingIndex >= 0) {
+    next[existingIndex] = item;
+    return trimLinks(next, max);
+  }
+  next.push(item);
+  return trimLinks(next, max);
+}
+
 export function listWifi(): SavedWifi[] {
   return (S.get(WIFI_KEY, []) as SavedWifi[]) || [];
 }
 
 export function saveWifi(ssid: string, password: string, opts?: { note?: string; home?: boolean }): SavedWifi {
   const rows = listWifi();
-  const existing = rows.find((w) => w.ssid.toLowerCase() === ssid.trim().toLowerCase());
+  const ssidKey = ssid.trim().toLowerCase();
+  const existing = rows.find((w) => w.ssid.toLowerCase() === ssidKey);
   if (existing) {
     existing.password = password;
     existing.note = opts?.note ?? existing.note;
@@ -69,8 +133,10 @@ export function saveWifi(ssid: string, password: string, opts?: { note?: string;
     home: opts?.home !== false,
     lastUsed: Date.now(),
   };
-  rows.unshift(row);
-  S.set(WIFI_KEY, rows.slice(0, 40));
+  const nextRows = [...rows];
+  nextRows.unshift(row);
+  const limited = trimLinks(nextRows, MAX_WIFI_LINKS);
+  S.set(WIFI_KEY, limited);
   bus.emit("deviceConnect:wifi-saved", row);
   try {
     S.set("gc_wifi_memory_meta_v1", {
@@ -98,20 +164,22 @@ function saveBt(device: { id?: string; name?: string; deviceId?: string }) {
   const rows = listBt();
   const id = device.id || device.deviceId || `bt_${Date.now()}`;
   const name = device.name || "Bluetooth device";
-  const i = rows.findIndex((b) => b.id === id || b.deviceId === id || b.name === name);
-  if (i >= 0) {
-    rows[i] = { ...rows[i], name, deviceId: device.deviceId || id, lastOk: Date.now() };
+  const existingIndex = rows.findIndex((b) => b.id === id || b.deviceId === id || b.name === name);
+  const entry = {
+    id,
+    name,
+    deviceId: device.deviceId || id,
+    linkedAt: Date.now(),
+    lastOk: Date.now(),
+  };
+  if (existingIndex >= 0) {
+    rows[existingIndex] = { ...rows[existingIndex], ...entry, lastOk: Date.now() };
   } else {
-    rows.unshift({
-      id,
-      name,
-      deviceId: device.deviceId || id,
-      linkedAt: Date.now(),
-      lastOk: Date.now(),
-    });
+    rows.unshift(entry);
   }
-  S.set(BT_KEY, rows.slice(0, 40));
-  return rows[0];
+  const limited = trimLinks(rows, MAX_BT_LINKS);
+  S.set(BT_KEY, limited);
+  return limited[0];
 }
 
 export function removeBt(id: string) {
@@ -199,18 +267,18 @@ async function connectBluetoothNative(): Promise<{
       return b.rssi - a.rssi;
     });
 
-    const pick = found[0];
+    const picks = found.slice(0, MAX_BT_LINKS);
 
-    // Best-effort GATT connect (optional for mesh presence)
-    try {
-      await BleClient.connect(pick.deviceId, () => {
-        bus.emit("deviceConnect:bt-disconnect", { id: pick.deviceId });
-      });
-    } catch {
-      /* scan-link is enough for mesh list */
+    for (const pick of picks) {
+      try {
+        await BleClient.connect(pick.deviceId, () => {
+          bus.emit("deviceConnect:bt-disconnect", { id: pick.deviceId });
+        });
+      } catch {
+        /* keep the link as a saved mesh option; do not tear down existing links */
+      }
+      saveBt({ id: pick.deviceId, deviceId: pick.deviceId, name: pick.name });
     }
-
-    saveBt({ id: pick.deviceId, deviceId: pick.deviceId, name: pick.name });
     try {
       await freeMeshFabric.enableBluetooth();
     } catch {}
@@ -220,7 +288,7 @@ async function connectBluetoothNative(): Promise<{
     bus.emit("deviceConnect:bt", { name: pick.name, id: pick.deviceId, native: true });
     return {
       ok: true,
-      name: `${pick.name} (${found.length} nearby)`,
+      name: `${picks.map((pick) => pick.name).join(", ")} (${found.length} nearby · multi-link ready)`,
     };
   } catch (e: any) {
     const msg = String(e?.message || e || "");
@@ -347,8 +415,8 @@ export async function connectWifiWithPassword(
     ok: true,
     copied,
     message: copied
-      ? `“${ssid}” saved. Password copied. Select this network in Wi‑Fi settings and paste the password. Mesh strengthens after join.`
-      : `“${ssid}” saved. Open Settings → Wi‑Fi → “${ssid}” and enter the password. Keep GridCaller open.`,
+      ? `“${ssid}” saved. Password copied. Select this network in Wi‑Fi settings and paste the password. Nearby GridCaller devices will then strengthen the shared mesh automatically.`
+      : `“${ssid}” saved. Open Settings → Wi‑Fi → “${ssid}” and enter the password. Keep GridCaller open so nearby devices can join the shared mesh automatically.`,
   };
 }
 
@@ -363,6 +431,8 @@ export function networkStrengthReport() {
     hop = softTowerHop.getNetworkHealth();
   } catch {}
   const online = typeof navigator !== "undefined" ? navigator.onLine : false;
+  const btLinks = Math.min(MAX_BT_LINKS, listBt().length);
+  const wifiLinks = Math.min(MAX_WIFI_LINKS, listWifi().length);
   let downlink: number | undefined;
   try {
     downlink = (navigator as any).connection?.downlink;
@@ -372,25 +442,34 @@ export function networkStrengthReport() {
     online,
     downlinkMbps: downlink,
     wifiSaved: listWifi().length,
-    btLinked: listBt().length,
+    btLinked: btLinks,
     softTowers: hop?.softTowers ?? 1,
     hopRange: hop?.estimatedRangeLabel ?? "—",
     hopRelayed: hop?.relayed ?? 0,
     fabricPeers: fabric?.onlinePeers ?? 0,
     fabricRange: fabric?.estimatedRangeLabel ?? "—",
     fabricLinks: fabric?.bonded || [],
-    score: scoreStrength(hop, fabric, listBt().length, listWifi().length),
+    score: scoreStrength(hop, fabric, btLinks, wifiLinks),
   };
 }
 
 export { getDevicePanelStatus } from "./devicePanelStatus";
 
 function scoreStrength(hop: any, fabric: any, bt: number, wifi: number): number {
-  let s = 10;
-  s += Math.min(40, (hop?.softTowers || 1) * 8);
-  s += Math.min(20, (fabric?.onlinePeers || 0) * 5);
-  s += Math.min(15, (fabric?.bonded?.length || 0) * 5);
-  s += Math.min(10, bt * 3);
-  s += Math.min(5, wifi > 0 ? 5 : 0);
-  return Math.min(100, Math.round(s));
+  const state = loadStrengthState();
+  const now = Date.now();
+  const elapsedMinutes = Math.max(0, (now - state.lastUpdated) / 60000);
+  const peerLift = Math.min(28, (hop?.softTowers || 1) * 6 + (fabric?.onlinePeers || 0) * 4 + (fabric?.bonded?.length || 0) * 3);
+  const linkLift = Math.min(18, (bt > 0 ? 8 : 0) + (wifi > 0 ? 6 : 0));
+  const backgroundLift = Math.min(24, Math.round(elapsedMinutes * 1.3 + state.cycles * 0.22));
+  const nextScore = Math.min(100, Math.round(24 + peerLift + linkLift + backgroundLift + Math.min(10, (bt > 0 ? 3 : 0) + (wifi > 0 ? 3 : 0))));
+
+  const updated: MeshStrengthState = {
+    score: nextScore,
+    lastUpdated: now,
+    cycles: state.cycles + 1,
+    bestScore: Math.max(state.bestScore, nextScore),
+  };
+  saveStrengthState(updated);
+  return updated.score;
 }

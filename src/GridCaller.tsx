@@ -103,7 +103,7 @@ import {
   shareAppWifiLink,
 } from "./kernel/shareApp";
 import { getPrivacyStatus, isPrivacyMode, setPrivacyMode } from "./kernel/privacyMode";
-import { getHubHttp, getMeshHandle } from "./mesh/identity";
+import { getHubHttp, getMeshHandle, rememberDeviceIdentity } from "./mesh/identity";
 import { ghStatus } from "./github/ghClient";
 import { normalizeBridgeStatus, type MenuBridgeStatus } from "./kernel/menuStatus";
 import {
@@ -362,9 +362,14 @@ export default function GridCaller({
   const [messageFolder, setMessageFolder] = useState<MessageFolder>("inbox");
   const [composeTo, setComposeTo] = useState("");
   const [err, setErr] = useState("");
-  const [callScope, setCallScope] = useState<"local" | "global">(() =>
-    S.get("gridcaller_scope", "global") === "local" ? "local" : "global"
-  );
+  const [callScope, setCallScope] = useState<"auto" | "local" | "global">(() => {
+    const saved = String(S.get("gridcaller_scope", "auto") || "auto").trim().toLowerCase();
+    if (saved === "local" || saved === "global") {
+      S.set("gridcaller_scope", "auto");
+      return "auto";
+    }
+    return saved === "auto" ? "auto" : "auto";
+  });
   const [groupSelection, setGroupSelection] = useState<string[]>([]);
   const [meshPeersCollapsed, setMeshPeersCollapsed] = useState(false);
   const [onlineNowCollapsed, setOnlineNowCollapsed] = useState(false);
@@ -1380,12 +1385,11 @@ export default function GridCaller({
     const looksPhone = digits.length >= 8 && digits.length <= 15;
 
     if (looksPhone) {
-      // Normalize: store full digits + 10-digit handle
       S.set("user_phone", digits);
       setSettingsPhone(digits);
-      const handle10 = digits.length >= 10 ? digits.slice(-10) : digits;
-      S.set("global_call_handle", handle10);
-      setGlobalHandle(handle10);
+      const derived = rememberDeviceIdentity({ phone: digits, peerId: S.get("mesh_id", "") || S.get("gc_peer_id", "") || undefined });
+      S.set("global_call_handle", derived);
+      setGlobalHandle(derived);
       const display = formatTestPhone(digits);
       S.set("gc_test_display_number", display);
       setMyGridDisplay(display);
@@ -1394,7 +1398,7 @@ export default function GridCaller({
         softTower.bindSimAlias(digits);
       } catch {}
       try {
-        globalCall.setHandle?.(handle10);
+        globalCall.setHandle?.(derived);
       } catch {}
     } else {
       S.set("global_call_handle", h);
@@ -1414,7 +1418,6 @@ export default function GridCaller({
       softTowerHop.start(myName);
     } catch {}
 
-    // Force re-read so UI cannot stay on stale value
     const shown = resolveMyPublicNumber();
     setMyGridDisplay(shown);
     return { ok: true, display: shown };
@@ -1440,11 +1443,10 @@ export default function GridCaller({
 
     if (phoneDigits.length >= 8) {
       S.set("user_phone", phoneDigits);
-      const handle10 = phoneDigits.length >= 10 ? phoneDigits.slice(-10) : phoneDigits;
-      S.set("global_call_handle", handle10);
-      setGlobalHandle(handle10);
+      const derived = rememberDeviceIdentity({ phone: phoneDigits, peerId: id });
+      S.set("global_call_handle", derived);
+      setGlobalHandle(derived);
       const display = formatTestPhone(phoneDigits);
-      // Always overwrite custom display when phone is set — phone is source of truth
       S.set("gc_test_display_number", display);
       setMyGridDisplay(display);
       setSettingsDisplayNum(display);
@@ -1452,7 +1454,7 @@ export default function GridCaller({
         softTower.bindSimAlias(phoneDigits);
       } catch {}
       try {
-        globalCall.setHandle?.(handle10);
+        globalCall.setHandle?.(derived);
       } catch {}
     } else {
       S.set("user_phone", "");
@@ -1905,7 +1907,7 @@ export default function GridCaller({
 
       const sc = await sovereignCall.placeCall(peerId, {
         fromName: myName,
-        preferLocal: callScope === "local",
+        preferLocal: callScope !== "global",
       });
 
       if (sc.mode === "webrtc" && sc.pc) {
@@ -3227,38 +3229,20 @@ export default function GridCaller({
                 gap: 2,
               }}
             >
-              <button
-                type="button"
-                onClick={() => setCallScope("local")}
+              <div
                 style={{
-                  border: "none",
+                  border: `1px solid ${tokens.sep}`,
                   borderRadius: 8,
                   padding: "6px 10px",
                   fontSize: 12,
-                  fontWeight: 600,
-                  cursor: "pointer",
-                  background: callScope === "local" ? tokens.card : "transparent",
-                  color: callScope === "local" ? tokens.blue : tokens.label,
+                  fontWeight: 700,
+                  color: tokens.blue,
+                  background: `${tokens.blue}14`,
                 }}
+                title="Auto routing: local first, global fallback"
               >
-                Local
-              </button>
-              <button
-                type="button"
-                onClick={() => setCallScope("global")}
-                style={{
-                  border: "none",
-                  borderRadius: 8,
-                  padding: "6px 10px",
-                  fontSize: 12,
-                  fontWeight: 600,
-                  cursor: "pointer",
-                  background: callScope === "global" ? tokens.card : "transparent",
-                  color: callScope === "global" ? tokens.blue : tokens.label,
-                }}
-              >
-                Global
-              </button>
+                Auto
+              </div>
             </div>
           </div>
         </div>
@@ -5310,6 +5294,8 @@ export default function GridCaller({
                         <div style={{ fontSize: 12, color: tokens.label }}>Strength</div>
                         <div style={{ fontSize: 32, fontWeight: 800, color: tokens.green }}>{r.score}/100</div>
                         <div style={{ fontSize: 12, color: tokens.secondary, lineHeight: 1.45 }}>
+                          Every nearby GridCaller can act as a relay tower, so calls and texts can hop across the mesh automatically.
+                          <br />
                           Neighbors: {r.softTowers} · {r.hopRange}
                           <br />
                           Peers: {r.fabricPeers} · {(r.fabricLinks || []).join(", ") || "—"}
@@ -5354,7 +5340,7 @@ export default function GridCaller({
                     {deviceBusy ? "Scanning…" : "BT accessory (optional)"}
                   </button>
                   <div style={{ fontSize: 11, color: tokens.green, marginBottom: 10, lineHeight: 1.4 }}>
-                    Optional Bluetooth link.
+                    Mesh is automatic. With permissions already granted, nearby GridCaller devices join the shared network by default for calls and texts.
                   </div>
                   {listBt().length === 0 ? (
                     <div style={{ fontSize: 12, color: tokens.label, marginBottom: 12 }}>
@@ -5452,7 +5438,7 @@ export default function GridCaller({
                     Save and connect
                   </button>
                   <div style={{ fontSize: 11, color: tokens.label, marginBottom: 12, lineHeight: 1.4 }}>
-                    Wi‑Fi details are saved on this device.
+                    Wi‑Fi is reused as a shared mesh path, so once devices are in range they can stay interconnected for calling and texting without extra setup.
                   </div>
 
                   {listWifi().map((w) => (
@@ -6681,27 +6667,18 @@ export default function GridCaller({
                   </div>
 
                   <label style={{ fontSize: 12, color: tokens.label, fontWeight: 600 }}>Call type</label>
-                  <div style={{ display: "flex", gap: 8, margin: "6px 0 14px" }}>
-                    {(["local", "global"] as const).map((s) => (
-                      <button
-                        key={s}
-                        type="button"
-                        onClick={() => setCallScope(s)}
-                        style={{
-                          flex: 1,
-                          padding: 10,
-                          borderRadius: 10,
-                          border: `1px solid ${tokens.sep}`,
-                          background: callScope === s ? tokens.blue : tokens.fill,
-                          color: callScope === s ? "#fff" : tokens.text,
-                          fontWeight: 600,
-                          cursor: "pointer",
-                          textTransform: "capitalize",
-                        }}
-                      >
-                        {s}
-                      </button>
-                    ))}
+                  <div
+                    style={{
+                      padding: 12,
+                      borderRadius: 10,
+                      border: `1px solid ${tokens.sep}`,
+                      background: tokens.fill,
+                      color: tokens.text,
+                      margin: "6px 0 14px",
+                      lineHeight: 1.45,
+                    }}
+                  >
+                    Auto route is on. The app will try local mesh first and smoothly fall back to global when needed.
                   </div>
 
                   <label style={{ fontSize: 12, color: tokens.label, fontWeight: 600 }}>Handle</label>

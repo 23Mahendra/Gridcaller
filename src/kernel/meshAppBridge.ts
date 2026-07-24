@@ -15,6 +15,8 @@ import { S } from "./storage";
 import { MeshEngine } from "./mesh";
 import meshComms from "./meshCommsEngine";
 import omniMesh from "./omniMeshEngine";
+import { createPendingEnvelopeEntry, shouldRetryPendingEnvelopeEntry, type PendingEnvelopeEntry } from "../lib/meshReliability";
+import { MeshRoutingTable } from "./meshRoutingTable";
 
 export type MeshAppSession = {
   appId: string;
@@ -32,6 +34,9 @@ const KEYS = {
 class MeshAppBridge {
   private started = false;
   private unsub: (() => void) | null = null;
+  private pendingEnvelopes: PendingEnvelopeEntry[] = [];
+  private retryTimer: number | null = null;
+  private routingTable = new MeshRoutingTable();
 
   start(userName?: string) {
     if (this.started) return this.getStatus();
@@ -62,6 +67,10 @@ class MeshAppBridge {
       });
     } catch {}
 
+    this.routingTable.setLocalId(MeshEngine.localId || S.get("mesh_id") || "mesh-bridge");
+    this.pendingEnvelopes = (S.get("mesh_app_bridge_pending", []) as PendingEnvelopeEntry[]) || [];
+    this.resumePendingEnvelopes();
+
     // Advertise this node as internet gateway when online
     this.publishGateway();
     const iv = setInterval(() => this.publishGateway(), 15000);
@@ -76,6 +85,67 @@ class MeshAppBridge {
     this.started = false;
     this.unsub?.();
     this.unsub = null;
+    if (this.retryTimer != null) {
+      clearInterval(this.retryTimer);
+      this.retryTimer = null;
+    }
+  }
+
+  private savePendingEnvelopes() {
+    try {
+      S.set("mesh_app_bridge_pending", this.pendingEnvelopes.slice(0, 200));
+    } catch {}
+  }
+
+  private queueEnvelope(kind: string, payload: any, target?: string) {
+    const entry = createPendingEnvelopeEntry({
+      id: `${kind}:${payload?.id || payload?.nodeId || Date.now().toString(36)}:${Date.now().toString(36)}`,
+      kind,
+      payload,
+      createdAt: Date.now(),
+      target,
+    });
+    const existing = this.pendingEnvelopes.find((item) => item.id === entry.id);
+    if (existing) {
+      existing.payload = entry.payload;
+      existing.status = "pending";
+      existing.attempts = Math.max(existing.attempts, 1);
+    } else {
+      this.pendingEnvelopes.unshift(entry);
+    }
+    this.savePendingEnvelopes();
+    this.flushPendingEnvelopes(Date.now());
+  }
+
+  private flushPendingEnvelopes(now = Date.now()) {
+    if (!this.pendingEnvelopes.length) return;
+    for (const entry of [...this.pendingEnvelopes]) {
+      if (entry.status === "sent" || entry.status === "acked") continue;
+      if (!shouldRetryPendingEnvelopeEntry(entry, now)) continue;
+      entry.lastAttemptAt = now;
+      entry.attempts += 1;
+      this.savePendingEnvelopes();
+      try {
+        if (entry.kind === "gateway") {
+          MeshEngine.broadcast("MESH_INTERNET_GATEWAY", entry.payload);
+        } else if (entry.kind === "app-register") {
+          MeshEngine.broadcast("MESH_APP_REGISTER", entry.payload);
+        } else if (entry.kind === "app-msg") {
+          MeshEngine.broadcast("MESH_APP_MSG", entry.payload);
+        }
+      } catch {}
+      if (entry.attempts >= 6) {
+        entry.status = "sent";
+        this.savePendingEnvelopes();
+      }
+    }
+  }
+
+  private resumePendingEnvelopes() {
+    if (this.retryTimer != null) return;
+    this.retryTimer = window.setInterval(() => {
+      this.flushPendingEnvelopes(Date.now());
+    }, 3000) as unknown as number;
   }
 
   private publishGateway() {
@@ -89,6 +159,25 @@ class MeshAppBridge {
     };
     S.set(KEYS.gateway, payload);
     try {
+      const route = this.routingTable.observeDirectLink(payload.nodeId || MeshEngine.localId, {
+        via: online ? "internet" : "local",
+        quality: online ? 0.98 : 0.7,
+        cost: online ? 2 : 4,
+        hops: 1,
+        path: [payload.nodeId || MeshEngine.localId],
+        lastSeen: Date.now(),
+        gateway: Boolean(online),
+      });
+      this.routingTable.observeRoute(payload.nodeId || MeshEngine.localId, MeshEngine.localId, {
+        via: online ? "internet" : "mesh",
+        quality: route?.quality || 0.7,
+        cost: route?.cost || 4,
+        hops: 1,
+        path: [MeshEngine.localId, payload.nodeId || MeshEngine.localId],
+        lastSeen: Date.now(),
+        gateway: Boolean(online),
+      });
+      this.queueEnvelope("gateway", payload, payload.nodeId);
       MeshEngine.broadcast("MESH_INTERNET_GATEWAY", payload);
     } catch {}
     try {
@@ -112,6 +201,7 @@ class MeshAppBridge {
     };
     S.set(KEYS.apps, apps);
     try {
+      this.queueEnvelope("app-register", apps[appId], apps[appId].appId);
       MeshEngine.broadcast("MESH_APP_REGISTER", apps[appId]);
     } catch {}
     bus.emit("meshApp:register", apps[appId]);
@@ -148,6 +238,7 @@ class MeshAppBridge {
       omniMesh.sendSms?.(meta?.to || "broadcast", text, fromName);
     } catch {}
     try {
+      this.queueEnvelope("app-msg", packet, meta?.to || packet.channel);
       MeshEngine.broadcast("MESH_APP_MSG", packet);
     } catch {}
     try {
