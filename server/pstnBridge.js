@@ -1,7 +1,7 @@
 /**
  * GridAlive PSTN Bridge — call ANY real phone without GridAlive on the handset
  *
- * Uses Twilio REST (or dry-run for PC testing without keys).
+ * Uses Twilio REST when configured; otherwise PSTN is unavailable.
  * Infinite dial permutations for India/global numbers.
  *
  * Env:
@@ -9,7 +9,7 @@
  *   TWILIO_AUTH_TOKEN
  *   TWILIO_PHONE          E.164 from-number
  *   TWILIO_VOICE_URL      optional public TwiML URL
- *   PSTN_TEST_MODE=1     force dry-run even with keys
+ *   PSTN_TEST_MODE=1     disable provider even when keys exist
  */
 
 function digits(s) {
@@ -75,14 +75,14 @@ export function getPstnConfig() {
   return {
     configured,
     testMode: testMode || !configured,
-    provider: configured ? "twilio" : "dry-run",
+    provider: configured ? "twilio" : "unconfigured",
     from: from ? from.slice(0, 4) + "…" + from.slice(-4) : "",
     hasSid: !!sid,
     hasToken: !!token,
     hasFrom: !!from,
     note: configured
       ? "Live PSTN: Twilio will ring real phones without GridAlive on handset."
-      : "PC test / dry-run: set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE in .env for live any-number calls.",
+      : "PSTN unavailable: configure TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE.",
   };
 }
 
@@ -101,19 +101,16 @@ export async function placeOutboundCall({ to, message, callerName }) {
   const token = process.env.TWILIO_AUTH_TOKEN || process.env.VITE_TWILIO_AUTH_TOKEN || "";
   const from = process.env.TWILIO_PHONE || process.env.VITE_TWILIO_PHONE || "";
 
-  // Dry-run for PC testing without keys
+  // Unconfigured provider is unavailable (no fake success)
   if (!cfg.configured) {
     return {
-      ok: true,
-      dryRun: true,
-      provider: "dry-run",
-      to: perms[0],
+      ok: false,
+      dryRun: false,
+      provider: "unconfigured",
+      to: undefined,
       permutations: perms,
-      callSid: `dry_${Date.now().toString(36)}`,
-      status: "queued-dry-run",
-      message:
-        "PSTN dry-run OK — number valid. Add Twilio keys to .env to ring the real phone. Without keys, use OS dialer fallback.",
-      twimlPreview: buildTwiml(message, callerName),
+      error: "PSTN provider is not configured",
+      status: "unavailable",
     };
   }
 
@@ -207,15 +204,13 @@ export async function placeOutboundSms({ to, body, fromName }) {
 
   if (!cfg.configured) {
     return {
-      ok: true,
-      dryRun: true,
-      provider: "dry-run",
-      to: perms[0],
+      ok: false,
+      dryRun: false,
+      provider: "unconfigured",
+      to: undefined,
       permutations: perms,
-      sid: `dry_sms_${Date.now().toString(36)}`,
-      status: "queued-dry-run",
-      message:
-        "SMS dry-run OK — number valid. Add Twilio keys to .env for live SMS. Without keys, client opens device SMS app.",
+      error: "PSTN provider is not configured",
+      status: "unavailable",
     };
   }
 

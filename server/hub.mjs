@@ -13,6 +13,7 @@ import http from "http";
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { createHash } from "crypto";
 import { fileURLToPath } from "url";
 import { WebSocketServer } from "ws";
 import { PeerServer } from "peer";
@@ -32,11 +33,72 @@ const ROOT = path.join(__dirname, "..");
 const DIST = path.join(ROOT, "dist");
 const SHARE = path.join(ROOT, "share");
 const TRANSFER = path.join(ROOT, "transfer");
+const DATA = path.join(ROOT, "data");
+const USAGE_LEDGER_FILE = path.join(DATA, "usage-ledger.json");
 const PORT = Number(process.env.PORT || 8765);
 const PEER_PORT = Number(process.env.PEER_PORT || 9000);
 
-for (const d of [SHARE, TRANSFER, defaultWorkDir()]) {
+for (const d of [SHARE, TRANSFER, DATA, defaultWorkDir()]) {
   fs.mkdirSync(d, { recursive: true });
+}
+
+function readJsonFile(file, fallback) {
+  try {
+    if (!fs.existsSync(file)) return fallback;
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJsonFile(file, data) {
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  fs.renameSync(tmp, file);
+}
+
+const usageLedger = readJsonFile(USAGE_LEDGER_FILE, {
+  entries: [],
+  balancesByNode: {},
+  updatedAt: 0,
+});
+
+function hashReceiptPayload(payload) {
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
+function appendUsageEntry(entry) {
+  usageLedger.entries.unshift(entry);
+  if (usageLedger.entries.length > 5000) usageLedger.entries = usageLedger.entries.slice(0, 5000);
+  usageLedger.balancesByNode[entry.nodeId] =
+    (Number(usageLedger.balancesByNode[entry.nodeId]) || 0) + Number(entry.amountCredited || 0);
+  usageLedger.updatedAt = Date.now();
+  writeJsonFile(USAGE_LEDGER_FILE, usageLedger);
+}
+
+function getWebRtcConfig() {
+  const stunCsv = String(process.env.STUN_URLS || "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302");
+  const turnCsv = String(process.env.TURN_URLS || process.env.TURN_URL || "");
+  const turnUsername = String(process.env.TURN_USERNAME || "");
+  const turnCredential = String(process.env.TURN_CREDENTIAL || "");
+  const stun = stunCsv
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const turn = turnCsv
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const iceServers = [];
+  for (const urls of stun) iceServers.push({ urls });
+  for (const urls of turn) {
+    if (!turnUsername || !turnCredential) continue;
+    iceServers.push({ urls, username: turnUsername, credential: turnCredential });
+  }
+  return {
+    configuredTurn: !!(turn.length && turnUsername && turnCredential),
+    iceServers,
+  };
 }
 
 /** roomId -> Map(peerId, { ws, name, role, meta }) */
@@ -263,6 +325,80 @@ const server = http.createServer(async (req, res) => {
   const { pathname } = url;
 
   try {
+    if (pathname === "/api/webrtc/config") {
+      const cfg = getWebRtcConfig();
+      return send(
+        res,
+        200,
+        JSON.stringify({
+          ok: true,
+          ...cfg,
+        }),
+        "application/json"
+      );
+    }
+
+    if (pathname === "/api/accounting/usage/record" && req.method === "POST") {
+      const body = await readJson(req);
+      const payload = {
+        nodeId: String(body.nodeId || "").trim(),
+        serviceId: String(body.serviceId || "").trim(),
+        units: Number(body.units || 0),
+        amountCredited: Number(body.amountCredited || 0),
+        currency: String(body.currency || "usage_credits"),
+        executed: !!body.executed,
+        peerId: String(body.peerId || ""),
+        ts: Number(body.ts || Date.now()),
+        nonce: String(body.nonce || ""),
+      };
+      if (!payload.nodeId || !payload.serviceId || !Number.isFinite(payload.units) || payload.units <= 0) {
+        return send(res, 400, JSON.stringify({ ok: false, error: "invalid usage payload" }), "application/json");
+      }
+      const expectedHash = hashReceiptPayload(payload);
+      const clientHash = String(body.receiptHash || "");
+      const verified = clientHash && clientHash === expectedHash;
+      const entry = {
+        id: `usage_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+        ...payload,
+        receiptHash: clientHash || expectedHash,
+        verified,
+        recordedAt: Date.now(),
+      };
+      appendUsageEntry(entry);
+      return send(
+        res,
+        200,
+        JSON.stringify({
+          ok: true,
+          entryId: entry.id,
+          verified,
+          nodeBalance: Number(usageLedger.balancesByNode[payload.nodeId] || 0),
+        }),
+        "application/json"
+      );
+    }
+
+    if (pathname === "/api/accounting/usage/summary") {
+      const nodeId = String(url.searchParams.get("nodeId") || "").trim();
+      const entries = nodeId
+        ? usageLedger.entries.filter((e) => e.nodeId === nodeId).slice(0, 200)
+        : usageLedger.entries.slice(0, 200);
+      return send(
+        res,
+        200,
+        JSON.stringify({
+          ok: true,
+          nodeId: nodeId || null,
+          balance: nodeId ? Number(usageLedger.balancesByNode[nodeId] || 0) : null,
+          balancesByNode: nodeId ? undefined : usageLedger.balancesByNode,
+          totalEntries: usageLedger.entries.length,
+          updatedAt: usageLedger.updatedAt || 0,
+          entries,
+        }),
+        "application/json"
+      );
+    }
+
     // ── PSTN: virtual GridCaller number → real cellular ──
     if (pathname === "/api/pstn/status") {
       const cfg = getPstnConfig();
@@ -601,6 +737,7 @@ const server = http.createServer(async (req, res) => {
     // Health / mesh status
     if (pathname === "/api/health") {
       const gh = await ghAvailable();
+      const rtc = getWebRtcConfig();
       const ver = readAppVersion();
       const apk = primaryApkMeta();
       // PC hub counts as a mesh node
@@ -639,6 +776,14 @@ const server = http.createServer(async (req, res) => {
           })),
           httpMeshPeers: [...httpMeshPeers.values()],
           meshBusLen: meshBus.length,
+          webrtc: {
+            configuredTurn: rtc.configuredTurn,
+            iceServers: rtc.iceServers.map((s) => ({ urls: s.urls })),
+          },
+          usageLedger: {
+            entries: usageLedger.entries.length,
+            updatedAt: usageLedger.updatedAt || 0,
+          },
           stack: [
             "gridalive-mesh-ws",
             "websocket-signal",
