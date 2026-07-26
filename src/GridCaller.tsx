@@ -1424,15 +1424,20 @@ export default function GridCaller({
 
       // Free radio + soft-tower hop fabric: every phone is a cell tower
       try {
-        enableFreeRadioMeshDefaults();
-        void freeRadio.enable(true);
+        const savedRadioMode = S.get("gc_radio_mode", null);
+        const savedMeshMode = S.get("gc_mesh_path_mode", null);
+        const savedForceLocal = S.get("gc_force_local_mesh", null);
+        if (savedRadioMode === null && savedMeshMode === null && savedForceLocal === null) {
+          enableFreeRadioMeshDefaults();
+        }
+        void freeRadio.enable(S.get("gc_radio_mode", false) === true);
         freeRadio.setOperatorName(myName);
       } catch {}
       try {
         softTowerHop.start(myName);
         freeMeshFabric.start(myName);
       } catch {}
-      if (S.get("gc_force_local_mesh", null) === null) {
+      if (S.get("gc_force_local_mesh", null) === null && S.get("gc_mesh_path_mode", null) === null) {
         try {
           setForceLocalMesh(true);
         } catch {}

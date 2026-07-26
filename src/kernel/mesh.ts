@@ -8,7 +8,12 @@ import type { MeshEngineAPI } from "./types";
 import { S } from "./storage";
 import { resolveHubHttp, resolveMeshWsUrl, ensureHubDefaults } from "./meshHubConfig";
 import { endPeerConnection, tryBeginPeerConnection } from "./networkGuard";
-import { createPendingOutboundMessage, shouldRetryPendingOutboundMessage, type PendingOutboundMessage } from "../lib/meshReliability";
+import {
+  PENDING_OUTBOUND_MAX_AGE_MS,
+  createPendingOutboundMessage,
+  shouldRetryPendingOutboundMessage,
+  type PendingOutboundMessage,
+} from "../lib/meshReliability";
 import { createLocalMeshEnvelope, readLocalMeshEnvelope } from "./serverlessMesh";
 
 let meshBC: BroadcastChannel | null = null;
@@ -268,6 +273,13 @@ function queuePendingOutbound(msg: any) {
 
 function flushPendingOutbound(engine: any, now = Date.now()) {
   if (!pendingOutbound.length) return;
+  const pruned = pendingOutbound.filter(
+    (entry) => entry.status !== "sent" && now - entry.createdAt <= PENDING_OUTBOUND_MAX_AGE_MS
+  );
+  if (pruned.length !== pendingOutbound.length) {
+    pendingOutbound = pruned;
+    savePendingOutbound();
+  }
   for (const entry of [...pendingOutbound]) {
     if (entry.status === "sent") continue;
     if (!shouldRetryPendingOutboundMessage(entry, now)) continue;
@@ -287,10 +299,6 @@ function flushPendingOutbound(engine: any, now = Date.now()) {
         body: JSON.stringify(entry.payload),
       }).catch(() => {});
     } catch {}
-    if (entry.attempts >= 6) {
-      entry.status = "sent";
-      savePendingOutbound();
-    }
   }
 }
 
