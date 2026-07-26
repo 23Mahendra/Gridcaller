@@ -296,6 +296,17 @@ type StatusViewLog = {
   ts: number;
 };
 
+type ActionComposerMode = "contact" | "poll" | "event" | "schedule-call";
+
+type ActionComposerTarget =
+  | { kind: "direct"; peerId: string; peerName: string }
+  | { kind: "group"; groupId: string; groupName: string };
+
+type ActionComposerState = {
+  mode: ActionComposerMode;
+  target: ActionComposerTarget;
+};
+
 type Tab = "mesh" | "contacts" | "keypad" | "sms" | "groups" | "logs";
 
 type GridchatFilter = "all" | "unread" | "favourites";
@@ -597,6 +608,14 @@ export default function GridCaller({
   const [statusViewerPostId, setStatusViewerPostId] = useState<string | null>(null);
   const [statusCommentDraft, setStatusCommentDraft] = useState("");
   const [statusViewerUserId, setStatusViewerUserId] = useState<string | null>(null);
+  const [actionComposer, setActionComposer] = useState<ActionComposerState | null>(null);
+  const [actionComposerName, setActionComposerName] = useState("");
+  const [actionComposerNumber, setActionComposerNumber] = useState("");
+  const [actionComposerQuestion, setActionComposerQuestion] = useState("");
+  const [actionComposerOptions, setActionComposerOptions] = useState("Yes\nNo");
+  const [actionComposerTitle, setActionComposerTitle] = useState("");
+  const [actionComposerWhen, setActionComposerWhen] = useState("");
+  const [actionComposerPlace, setActionComposerPlace] = useState("");
   const [gridchatCreateMenuOpen, setGridchatCreateMenuOpen] = useState(false);
   const [gridchatMoreMenuOpen, setGridchatMoreMenuOpen] = useState(false);
   const [threadSearchOpen, setThreadSearchOpen] = useState(false);
@@ -697,7 +716,7 @@ export default function GridCaller({
   const [shareMsg, setShareMsg] = useState("");
   const [privacyMsg, setPrivacyMsg] = useState("");
   const [disasterState, setDisasterState] = useState(() => getDisasterModeState());
-  const [apkInfo, setApkInfo] = useState<{ name: string; url: string; size?: number } | null>(null);
+  const [apkInfo, setApkInfo] = useState<{ name: string; url: string; size?: number; verified?: boolean; error?: string } | null>(null);
   const [myCard, setMyCard] = useState<ProfileCard>(() => loadMyCard());
   const [cardInbox, setCardInbox] = useState<ProfileCard[]>(() => loadInbox());
   const [cardMsg, setCardMsg] = useState("");
@@ -2523,33 +2542,102 @@ export default function GridCaller({
     reader.readAsDataURL(file);
   };
 
+  const closeActionComposer = () => {
+    setActionComposer(null);
+  };
+
+  const openActionComposer = (mode: ActionComposerMode, target: ActionComposerTarget) => {
+    setDirectAttachMenuOpen(false);
+    setGroupAttachMenuOpen(false);
+    setDirectChatMenuOpen(false);
+    if (mode === "contact") {
+      setActionComposerName("");
+      setActionComposerNumber("");
+    } else if (mode === "poll") {
+      setActionComposerQuestion("");
+      setActionComposerOptions("Yes\nNo");
+    } else if (mode === "event") {
+      setActionComposerTitle("");
+      setActionComposerWhen(new Date().toLocaleString());
+      setActionComposerPlace("");
+    } else if (mode === "schedule-call") {
+      setActionComposerWhen(new Date().toLocaleString());
+    }
+    setActionComposer({ mode, target });
+  };
+
+  const dispatchComposerMessage = (payload: string) => {
+    if (!actionComposer) return;
+    if (actionComposer.target.kind === "direct") {
+      sendDirectQuickText(actionComposer.target.peerId, actionComposer.target.peerName, payload);
+      return;
+    }
+    sendGroupMessage(actionComposer.target.groupId, payload);
+  };
+
+  const submitActionComposer = () => {
+    if (!actionComposer) return;
+    if (actionComposer.mode === "contact") {
+      const contactName = String(actionComposerName || "").trim();
+      const contactNumber = String(actionComposerNumber || "").trim();
+      if (!contactName || !contactNumber) {
+        setErr("Add both contact name and handle/number");
+        return;
+      }
+      dispatchComposerMessage(`Contact shared\nName: ${contactName}\nID/Phone: ${contactNumber}`);
+      closeActionComposer();
+      return;
+    }
+    if (actionComposer.mode === "poll") {
+      const question = String(actionComposerQuestion || "").trim();
+      if (!question) {
+        setErr("Add a poll question");
+        return;
+      }
+      const options = String(actionComposerOptions || "")
+        .split(/\n|,/)
+        .map((x) => x.trim())
+        .filter(Boolean)
+        .slice(0, 6);
+      const lines = options.length ? options.map((op, i) => `${i + 1}. ${op}`).join("\n") : "1. Yes\n2. No";
+      dispatchComposerMessage(`Poll\n${question}\n${lines}`);
+      closeActionComposer();
+      return;
+    }
+    if (actionComposer.mode === "event") {
+      const title = String(actionComposerTitle || "").trim();
+      if (!title) {
+        setErr("Add an event title");
+        return;
+      }
+      const when = String(actionComposerWhen || "").trim();
+      const place = String(actionComposerPlace || "").trim();
+      dispatchComposerMessage(`Event\n${title}${when ? `\nWhen: ${when}` : ""}${place ? `\nWhere: ${place}` : ""}`);
+      closeActionComposer();
+      return;
+    }
+    const when = String(actionComposerWhen || "").trim();
+    if (!when || actionComposer.target.kind !== "direct") {
+      setErr("Add a schedule time");
+      return;
+    }
+    sendSms(actionComposer.target.peerId, actionComposer.target.peerName, `Scheduled call at ${when}`);
+    closeActionComposer();
+  };
+
   const sendGridchatContactCard = (groupId: string) => {
-    const contactName = String(prompt("Contact name") || "").trim();
-    if (!contactName) return;
-    const contactNumber = String(prompt("Contact number or handle") || "").trim();
-    if (!contactNumber) return;
-    sendGroupMessage(groupId, `Contact shared\nName: ${contactName}\nID/Phone: ${contactNumber}`);
+    const groupName = groupChats.find((g) => g.id === groupId)?.name || "Group";
+    openActionComposer("contact", { kind: "group", groupId, groupName });
   };
 
   const sendGridchatPoll = (groupId: string) => {
-    const question = String(prompt("Poll question") || "").trim();
-    if (!question) return;
-    const optionsRaw = String(prompt("Poll options (comma separated)", "Yes, No") || "").trim();
-    const options = optionsRaw
-      .split(",")
-      .map((x) => x.trim())
-      .filter(Boolean)
-      .slice(0, 6);
-    const lines = options.length ? options.map((op, i) => `${i + 1}. ${op}`).join("\n") : "1. Yes\n2. No";
-    sendGroupMessage(groupId, `Poll\n${question}\n${lines}`);
+    const groupName = groupChats.find((g) => g.id === groupId)?.name || "Group";
+    openActionComposer("poll", { kind: "group", groupId, groupName });
   };
 
   const sendGridchatEvent = (groupId: string) => {
-    const title = String(prompt("Event title") || "").trim();
-    if (!title) return;
-    const when = String(prompt("Date & time", new Date().toLocaleString()) || "").trim();
-    const place = String(prompt("Event place (optional)") || "").trim();
-    sendGroupMessage(groupId, `Event\n${title}${when ? `\nWhen: ${when}` : ""}${place ? `\nWhere: ${place}` : ""}`);
+    const groupName = groupChats.find((g) => g.id === groupId)?.name || "Group";
+    openActionComposer("event", { kind: "group", groupId, groupName });
   };
 
   const sendGridchatSticker = (groupId: string) => {
@@ -4042,32 +4130,15 @@ export default function GridCaller({
       return;
     }
     if (action === "contact") {
-      const contactName = String(prompt("Contact name") || "").trim();
-      if (!contactName) return;
-      const contactNumber = String(prompt("Contact number or handle") || "").trim();
-      if (!contactNumber) return;
-      sendDirectQuickText(peerId, peerName, `Contact shared\nName: ${contactName}\nID/Phone: ${contactNumber}`);
+      openActionComposer("contact", { kind: "direct", peerId, peerName });
       return;
     }
     if (action === "poll") {
-      const question = String(prompt("Poll question") || "").trim();
-      if (!question) return;
-      const optionsRaw = String(prompt("Poll options (comma separated)", "Yes, No") || "").trim();
-      const options = optionsRaw
-        .split(",")
-        .map((x) => x.trim())
-        .filter(Boolean)
-        .slice(0, 6);
-      const lines = options.length ? options.map((op, i) => `${i + 1}. ${op}`).join("\n") : "1. Yes\n2. No";
-      sendDirectQuickText(peerId, peerName, `Poll\n${question}\n${lines}`);
+      openActionComposer("poll", { kind: "direct", peerId, peerName });
       return;
     }
     if (action === "event") {
-      const title = String(prompt("Event title") || "").trim();
-      if (!title) return;
-      const when = String(prompt("Date & time", new Date().toLocaleString()) || "").trim();
-      const place = String(prompt("Event place (optional)") || "").trim();
-      sendDirectQuickText(peerId, peerName, `Event\n${title}${when ? `\nWhen: ${when}` : ""}${place ? `\nWhere: ${place}` : ""}`);
+      openActionComposer("event", { kind: "direct", peerId, peerName });
       return;
     }
     const stickers = ["😀", "🔥", "💚", "🎉", "👍", "🙏", "⚡", "🚀", "📶", "🛰️"];
@@ -4123,9 +4194,7 @@ export default function GridCaller({
       return;
     }
     if (action === "schedule-call") {
-      const when = String(prompt("Schedule call time", new Date().toLocaleString()) || "").trim();
-      if (!when) return;
-      sendSms(peerId, peerName, `Scheduled call at ${when}`);
+      openActionComposer("schedule-call", { kind: "direct", peerId, peerName });
       return;
     }
     if (action === "new-group-call") {
@@ -4609,6 +4678,87 @@ export default function GridCaller({
           </div>
         </div>
       </div>
+    );
+  };
+
+  const renderActionComposerOverlay = () => {
+    if (!actionComposer) return null;
+    const title =
+      actionComposer.mode === "contact"
+        ? "Share Contact"
+        : actionComposer.mode === "poll"
+          ? "Create Poll"
+          : actionComposer.mode === "event"
+            ? "Create Event"
+            : "Schedule Call";
+    const targetLabel =
+      actionComposer.target.kind === "direct"
+        ? actionComposer.target.peerName
+        : actionComposer.target.groupName;
+    return (
+      <ContactSheet onClose={closeActionComposer} title={title}>
+        <div style={{ fontSize: 12, color: tokens.label, marginBottom: 12 }}>
+          Send to {targetLabel}
+        </div>
+        {actionComposer.mode === "contact" ? (
+          <>
+            <ContactField label="Contact name" value={actionComposerName} onChange={setActionComposerName} placeholder="e.g. Relay medic" />
+            <ContactField label="Handle or number" value={actionComposerNumber} onChange={setActionComposerNumber} placeholder="e.g. relay22 or +91..." />
+          </>
+        ) : null}
+        {actionComposer.mode === "poll" ? (
+          <>
+            <ContactField label="Poll question" value={actionComposerQuestion} onChange={setActionComposerQuestion} placeholder="Ask the group something clear" />
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: tokens.label, marginBottom: 6 }}>Options</div>
+              <textarea
+                value={actionComposerOptions}
+                onChange={(e) => setActionComposerOptions(e.target.value)}
+                placeholder={"One option per line\nYes\nNo"}
+                rows={4}
+                style={{
+                  width: "100%",
+                  boxSizing: "border-box",
+                  border: `1px solid ${tokens.sep}`,
+                  background: tokens.inputBg,
+                  color: tokens.text,
+                  borderRadius: 12,
+                  padding: "12px 14px",
+                  fontSize: 15,
+                  outline: "none",
+                  resize: "vertical",
+                }}
+              />
+            </div>
+          </>
+        ) : null}
+        {actionComposer.mode === "event" ? (
+          <>
+            <ContactField label="Event title" value={actionComposerTitle} onChange={setActionComposerTitle} placeholder="e.g. Mesh drill" />
+            <ContactField label="When" value={actionComposerWhen} onChange={setActionComposerWhen} placeholder="Date & time" />
+            <ContactField label="Where" value={actionComposerPlace} onChange={setActionComposerPlace} placeholder="Optional place" />
+          </>
+        ) : null}
+        {actionComposer.mode === "schedule-call" ? (
+          <ContactField label="Call time" value={actionComposerWhen} onChange={setActionComposerWhen} placeholder="Date & time" />
+        ) : null}
+        <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+          <button
+            type="button"
+            onClick={closeActionComposer}
+            style={{ flex: 1, border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, borderRadius: 12, padding: "12px 14px", fontWeight: 700, cursor: "pointer" }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submitActionComposer}
+            style={{ flex: 1, border: "none", background: tokens.blue, color: "#fff", borderRadius: 12, padding: "12px 14px", fontWeight: 700, cursor: "pointer" }}
+          >
+            Send
+          </button>
+        </div>
+      </ContactSheet>
     );
   };
 
@@ -5568,6 +5718,7 @@ export default function GridCaller({
         </div>
         {renderChatProfileOverlay()}
         {renderStatusViewerOverlay()}
+        {renderActionComposerOverlay()}
       </Shell>
       </ThemeCtx.Provider>
     );
@@ -8267,6 +8418,7 @@ export default function GridCaller({
 
       {renderChatProfileOverlay()}
       {renderStatusViewerOverlay()}
+      {renderActionComposerOverlay()}
 
       {/* ═══ Hamburger menu: network people + map + settings ═══ */}
       {menuOpen && (
@@ -8418,7 +8570,11 @@ export default function GridCaller({
                         if (item.id === "settings") setSettingsName(myName);
                         if (item.id === "share") {
                           void getPrimaryApk().then((a) =>
-                            setApkInfo(a ? { name: a.file.name, url: a.url, size: a.file.size } : null)
+                            setApkInfo(
+                              a
+                                ? { name: a.file.name, url: a.url, size: a.file.size, verified: a.verified, error: a.error }
+                                : null
+                            )
                           );
                         }
                         if (item.id === "groupchat") {
@@ -8865,6 +9021,7 @@ export default function GridCaller({
                       <>
                         APK: <b style={{ color: tokens.text }}>{apkInfo.name}</b>
                         {apkInfo.size ? ` · ${Math.round(apkInfo.size / 1024)} KB` : ""}
+                        {!apkInfo.verified ? " · unverified" : ""}
                       </>
                     ) : (
                       <>No APK yet. PC: build APK → npm run apk:copy</>
@@ -8903,7 +9060,7 @@ export default function GridCaller({
                       try {
                         const r = await shareAppWifiLink();
                         setShareMsg(r.message);
-                        if (r.url) setApkInfo((a) => ({ name: a?.name || "GridCaller.apk", url: r.url!, size: a?.size }));
+                        if (r.url) setApkInfo((a) => ({ name: a?.name || "GridCaller.apk", url: r.url!, size: a?.size, verified: a?.verified, error: a?.error }));
                       } catch (e: any) {
                         setShareMsg(`❌ ${e?.message || "Wi‑Fi link failed"}`);
                       }
@@ -8954,7 +9111,7 @@ export default function GridCaller({
                       try {
                         const r = await downloadApkNow();
                         setShareMsg(r.ok ? r.message : `❌ ${r.message}`);
-                        if (r.url) setApkInfo((a) => ({ name: a?.name || "GridCaller.apk", url: r.url!, size: a?.size }));
+                        if (r.url) setApkInfo((a) => ({ name: a?.name || "GridCaller.apk", url: r.url!, size: a?.size, verified: a?.verified, error: a?.error }));
                       } catch (e: any) {
                         setShareMsg(`❌ ${e?.message || "Download failed"}`);
                       }
@@ -8976,16 +9133,16 @@ export default function GridCaller({
                   <button
                     type="button"
                     onClick={async () => {
-                      setShareMsg("Refreshing…");
+                        setShareMsg("Refreshing…");
                       try {
                         const apk = await getPrimaryApk();
-                        setApkInfo(apk ? { name: apk.file.name, url: apk.url, size: apk.file.size } : null);
+                        setApkInfo(apk ? { name: apk.file.name, url: apk.url, size: apk.file.size, verified: apk.verified, error: apk.error } : null);
                         const list = await listApkFiles();
                         const apks = list.filter((f) => f.isApk || f.name.endsWith(".apk"));
                         setShareMsg(
-                          apks.length
+                          apk?.verified && apks.length
                             ? `✅ ${apks.length} APK ready · ${apk?.url || ""}`
-                            : `No APK list — try direct: ${apk?.url || "hub /share/GridCaller.apk"}`
+                            : `❌ ${apk?.error || `No verified APK on hub yet · ${apk?.url || "hub /share/GridCaller.apk"}`}`
                         );
                       } catch (e: any) {
                         setShareMsg(`❌ ${e?.message || "Refresh failed"}`);
@@ -9020,14 +9177,21 @@ export default function GridCaller({
                     </div>
                   ) : null}
                   {apkInfo?.url ? (
-                    <a
-                      href={apkInfo.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ fontSize: 12, color: tokens.blue, wordBreak: "break-all" }}
-                    >
-                      {apkInfo.url}
-                    </a>
+                    <>
+                      <a
+                        href={apkInfo.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ fontSize: 12, color: tokens.blue, wordBreak: "break-all" }}
+                      >
+                        {apkInfo.url}
+                      </a>
+                      {!apkInfo.verified && apkInfo.error ? (
+                        <div style={{ fontSize: 12, color: tokens.orange, marginTop: 6, lineHeight: 1.4 }}>
+                          {apkInfo.error}
+                        </div>
+                      ) : null}
+                    </>
                   ) : null}
 
                   {(() => {

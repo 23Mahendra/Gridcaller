@@ -15,6 +15,7 @@ import { MeshEngine } from "./mesh";
 import { meshEconomy } from "./meshEconomy";
 import { deviceVault } from "./deviceVault";
 import { compressBytes, decompressBytes, formatBytes } from "./compress";
+import omniMesh from "./omniMeshEngine";
 import { ollamaEngine } from "./ollamaEngine";
 import {
   applyRentSplit,
@@ -110,12 +111,7 @@ type GunStoreLike = {
   once: (path: string) => Promise<any>;
 };
 
-type OmniMeshLike = {
-  send: (type: string, payload: any, opts?: { priority?: string; ttl?: number; to?: string }) => Promise<any>;
-};
-
 let gunStorePromise: Promise<GunStoreLike | null> | null = null;
-let omniMeshPromise: Promise<OmniMeshLike | null> | null = null;
 
 async function getGunStore(): Promise<GunStoreLike | null> {
   if (!gunStorePromise) {
@@ -124,15 +120,6 @@ async function getGunStore(): Promise<GunStoreLike | null> {
       .catch(() => null);
   }
   return gunStorePromise;
-}
-
-async function getOmniMesh(): Promise<OmniMeshLike | null> {
-  if (!omniMeshPromise) {
-    omniMeshPromise = import("./omniMeshEngine")
-      .then((mod) => mod.default as OmniMeshLike)
-      .catch(() => null);
-  }
-  return omniMeshPromise;
 }
 
 function uid(p = "x") {
@@ -338,8 +325,7 @@ class MeshRentCloud {
     })();
     void (async () => {
       try {
-        const omniMesh = await getOmniMesh();
-        if (omniMesh) void omniMesh.send("MESH_RENT_OFFER", offer, { priority: "presence", ttl: 8 });
+        void omniMesh.send("MESH_RENT_OFFER", offer, { priority: "presence", ttl: 8 });
       } catch {}
     })();
   }

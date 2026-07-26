@@ -9,6 +9,7 @@
     "build": "vite build",
     "test": "npm run test:node",
     "test:node": "tsx --test --test-force-exit tests/**/*.test.ts tests/**/*.test.mjs src/**/*.test.ts scripts/**/*.test.mjs",
+    "test:release": "npm run test:node && npm run build",
     "preview": "vite preview --host 0.0.0.0 --port 5173",
     "signal": "node server/hub.mjs",
     "hub": "node server/hub.mjs",

@@ -12,3 +12,5 @@ ios/build
 .vscode
 
 .fake
+.tmp-*.mjs
+*-test-output.txt

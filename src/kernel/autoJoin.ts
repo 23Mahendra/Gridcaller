@@ -543,13 +543,4 @@ export function stopFullAutoJoin() {
   helloTimer = null;
 }
 
-// Eager boot
-try {
-  if (typeof window !== "undefined") {
-    ensureHubDefaults();
-    unifyLocalIdentity();
-    setTimeout(() => {
-      void startFullAutoJoin();
-    }, 400);
-  }
-} catch {}
+// Auto-join is started explicitly from app bootstrap after consent/runtime setup.

@@ -19,6 +19,14 @@ export type ShareFile = {
   isApk: boolean;
 };
 
+export type PrimaryApkInfo = {
+  file: ShareFile;
+  url: string;
+  hub: string;
+  verified: boolean;
+  error?: string;
+};
+
 function hubBase(): string {
   ensureHubDefaults();
   let h = resolveHubHttp().replace(/\/$/, "");
@@ -116,28 +124,17 @@ export async function listApkFiles(hub?: string): Promise<ShareFile[]> {
     const files = await fetchShareList(hub);
     return files.filter((f) => f.isApk || f.name.toLowerCase().endsWith(".apk"));
   } catch {
-    // Fallback: synthetic entry so buttons still work with direct URL
-    const h = hubBase();
-    return [
-      {
-        name: "GridCaller.apk",
-        size: 0,
-        mtime: Date.now(),
-        url: "/share/GridCaller.apk",
-        isApk: true,
-      },
-    ];
+    return [];
   }
 }
 
 export async function getPrimaryApk(
   hub?: string
-): Promise<{ file: ShareFile; url: string; hub: string } | null> {
+) : Promise<PrimaryApkInfo | null> {
   const h = hub || hubBase();
   try {
     const apks = await listApkFiles(h);
     if (!apks.length) {
-      // Still return default URL
       const file: ShareFile = {
         name: "GridCaller.apk",
         size: 0,
@@ -145,12 +142,17 @@ export async function getPrimaryApk(
         url: "/share/GridCaller.apk",
         isApk: true,
       };
-      return { file, url: apkUrlFromHub(hubBase()), hub: hubBase() };
+      return {
+        file,
+        url: apkUrlFromHub(h),
+        hub: h,
+        verified: false,
+        error: "No APK found on the hub yet. Run build/copy on the PC hub first.",
+      };
     }
     const file = apks.find((f) => /gridcaller/i.test(f.name)) || apks[0];
-    const useHub = resolveHubHttp();
-    return { file, url: wifiDownloadUrl(file, useHub), hub: useHub };
-  } catch {
+    return { file, url: wifiDownloadUrl(file, h), hub: h, verified: true };
+  } catch (e: any) {
     const file: ShareFile = {
       name: "GridCaller.apk",
       size: 0,
@@ -158,7 +160,13 @@ export async function getPrimaryApk(
       url: "/share/GridCaller.apk",
       isApk: true,
     };
-    return { file, url: apkUrlFromHub(hubBase()), hub: hubBase() };
+    return {
+      file,
+      url: apkUrlFromHub(h),
+      hub: h,
+      verified: false,
+      error: e?.message || "Hub share list unavailable",
+    };
   }
 }
 
@@ -170,6 +178,7 @@ export async function shareAppViaSystem(): Promise<{ ok: boolean; mode: string; 
     const apk = await getPrimaryApk(hub);
     const url = apk?.url || apkUrlFromHub(hub);
     const text = appInviteText(hub, url);
+    const unverifiedNote = apk && !apk.verified ? " (hub file not verified yet)" : "";
 
     // Prefer native share with URL (always works on Capacitor)
     if (Capacitor.isNativePlatform()) {
@@ -193,13 +202,13 @@ export async function shareAppViaSystem(): Promise<{ ok: boolean; mode: string; 
         url,
         dialogTitle: "Share APK (Bluetooth / WhatsApp / Nearby)",
       });
-      return { ok: true, mode: "capacitor", message: `Share sheet open · ${url}` };
+      return { ok: true, mode: "capacitor", message: `Share sheet open${unverifiedNote} · ${url}` };
     }
 
     if (navigator.share) {
       try {
         await navigator.share({ title: "GridCaller APK", text, url });
-        return { ok: true, mode: "web-share", message: `Shared · ${url}` };
+        return { ok: true, mode: "web-share", message: `Shared${unverifiedNote} · ${url}` };
       } catch (e: any) {
         if (e?.name === "AbortError") return { ok: true, mode: "cancel", message: "Cancelled" };
       }
@@ -207,9 +216,9 @@ export async function shareAppViaSystem(): Promise<{ ok: boolean; mode: string; 
 
     try {
       await navigator.clipboard.writeText(url);
-      return { ok: true, mode: "clipboard", message: `Link copied: ${url}` };
+      return { ok: true, mode: "clipboard", message: `Link copied${unverifiedNote}: ${url}` };
     } catch {
-      return { ok: true, mode: "link", message: url };
+      return { ok: true, mode: "link", message: `${url}${unverifiedNote}` };
     }
   } catch (e: any) {
     if (e?.name === "AbortError") return { ok: true, mode: "cancel", message: "Cancelled" };

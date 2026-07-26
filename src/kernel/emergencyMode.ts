@@ -1,5 +1,6 @@
 import { bus } from "./bus.ts";
 import { S } from "./storage.ts";
+import softTowerHop from "./softTowerHopNet.ts";
 
 export type EmergencyModeSummary = {
   title: string;
@@ -208,17 +209,15 @@ export function sendEmergencyBroadcast(text: string, location?: { lat: number; l
 
   if (active) {
     const msg = String(item.text || "").trim();
-    void import("./softTowerHopNet.ts")
-      .then(({ default: softTowerHop }) => {
-        softTowerHop.sendMessage("", msg, "All reachable devices", {
-          emergency: true,
-          urgency: "critical",
-          lowBandwidth,
-          kind: "broadcast",
-          location,
-        });
-      })
-      .catch(() => {});
+    try {
+      softTowerHop.sendMessage("", msg, "All reachable devices", {
+        emergency: true,
+        urgency: "critical",
+        lowBandwidth,
+        kind: "broadcast",
+        location,
+      });
+    } catch {}
   }
   return item;
 }
@@ -235,17 +234,15 @@ export function sendSosBeacon(location?: { lat: number; lng: number } | null) {
   });
   if (!item) return null;
   S.set("gridcaller_disaster_last_beacon", Date.now());
-  void import("./softTowerHopNet.ts")
-    .then(({ default: softTowerHop }) => {
-      softTowerHop.sendMessage("", beaconText, "SOS beacon", {
-        emergency: true,
-        urgency: "critical",
-        lowBandwidth: true,
-        kind: "sos",
-        location: location || readLastLocation(),
-      });
-    })
-    .catch(() => {});
+  try {
+    softTowerHop.sendMessage("", beaconText, "SOS beacon", {
+      emergency: true,
+      urgency: "critical",
+      lowBandwidth: true,
+      kind: "sos",
+      location: location || readLastLocation(),
+    });
+  } catch {}
   return item;
 }
 

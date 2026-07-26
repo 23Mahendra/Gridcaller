@@ -20,6 +20,8 @@ import { bus } from "./bus";
 import { S } from "./storage";
 import { MeshEngine } from "./mesh";
 import { deviceVault } from "./deviceVault";
+import Gun from "gun/gun";
+import { gunPeersForMesh } from "./offlineMode";
 import { isOwnerUser } from "../accessPolicy";
 
 // ─── Types ───────────────────────────────────────────────────────
@@ -1168,13 +1170,11 @@ class GridNumberRegistry {
   private async publishDirectory(num: GridNumberRecord | null, serial: DeviceSerialRecord) {
     if (!num) return;
     try {
-      const { gunPeersForMesh } = await import("./offlineMode");
       const peers = gunPeersForMesh([
         "https://gun-manhattan.herokuapp.com/gun",
         "https://gunjs.herokuapp.com/gun",
       ]);
       if (!peers.length) return;
-      const Gun = (await import("gun/gun")).default;
       this.gun = Gun({ peers, localStorage: false, radisk: false, multicast: false });
       const payload = {
         number: num.number,
@@ -1204,14 +1204,12 @@ class GridNumberRegistry {
     const local = this.resolve(d);
     if (local) return { number: local.number, name: local.userName, nodeId: local.nodeId };
     try {
-      const { gunPeersForMesh } = await import("./offlineMode");
       const peers = gunPeersForMesh([
         "https://gun-manhattan.herokuapp.com/gun",
         "https://gunjs.herokuapp.com/gun",
       ]);
       if (!peers.length) return null;
       if (!this.gun) {
-        const Gun = (await import("gun/gun")).default;
         this.gun = Gun({
           peers,
           localStorage: false,
