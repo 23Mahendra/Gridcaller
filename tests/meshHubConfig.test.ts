@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resolveHubHttp, resolveMeshWsUrl } from "../src/kernel/meshHubConfig.ts";
+import { probeHub, resolveHubHttp, resolveMeshWsUrl } from "../src/kernel/meshHubConfig.ts";
 
-function withWindowAndStorage(hostname: string, store: Map<string, string>, fn: () => void) {
+async function withWindowAndStorage(hostname: string, store: Map<string, string>, fn: () => void | Promise<void>) {
   const prevWindow = (globalThis as any).window;
   const prevLocalStorage = (globalThis as any).localStorage;
 
@@ -21,7 +21,7 @@ function withWindowAndStorage(hostname: string, store: Map<string, string>, fn: 
   };
 
   try {
-    fn();
+    await fn();
   } finally {
     if (prevWindow === undefined) {
       delete (globalThis as any).window;
@@ -37,7 +37,7 @@ function withWindowAndStorage(hostname: string, store: Map<string, string>, fn: 
 }
 
 test("resolveHubHttp prefers the local hub when the app runs on localhost", () => {
-  withWindowAndStorage("localhost", new Map<string, string>(), () => {
+  return withWindowAndStorage("localhost", new Map<string, string>(), () => {
     assert.equal(resolveHubHttp(), "http://127.0.0.1:8765");
     assert.equal(resolveMeshWsUrl(), "ws://127.0.0.1:8765/mesh-ws");
   });
@@ -45,8 +45,33 @@ test("resolveHubHttp prefers the local hub when the app runs on localhost", () =
 
 test("resolveHubHttp ignores stale LAN hub values on localhost preview", () => {
   const store = new Map<string, string>([["gc_hub_http", "http://192.168.1.8:8765"]]);
-  withWindowAndStorage("localhost", store, () => {
+  return withWindowAndStorage("localhost", store, () => {
     assert.equal(resolveHubHttp(), "http://127.0.0.1:8765");
     assert.equal(resolveMeshWsUrl(), "ws://127.0.0.1:8765/mesh-ws");
   });
+});
+
+test("probeHub caches recent failures to avoid localhost retry spam", async () => {
+  const prevFetch = (globalThis as any).fetch;
+  let calls = 0;
+  (globalThis as any).fetch = async () => {
+    calls += 1;
+    throw new Error("offline");
+  };
+
+  try {
+    await withWindowAndStorage("localhost", new Map<string, string>(), async () => {
+      const first = await probeHub("http://127.0.0.1:8765");
+      const second = await probeHub("http://127.0.0.1:8765");
+      assert.equal(first.ok, false);
+      assert.equal(second.ok, false);
+      assert.equal(calls, 1);
+    });
+  } finally {
+    if (prevFetch === undefined) {
+      delete (globalThis as any).fetch;
+    } else {
+      (globalThis as any).fetch = prevFetch;
+    }
+  }
 });

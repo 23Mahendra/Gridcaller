@@ -41,6 +41,8 @@ export interface EnvConfig {
 }
 
 /** Hard local-only config — cloud keys always blank */
+const viteEnv = ((import.meta as any)?.env || {}) as Record<string, any>;
+
 export const env: EnvConfig = {
   openrouterKey: "",
   anthropicKey: "",
@@ -52,12 +54,12 @@ export const env: EnvConfig = {
   mistralKey: "",
   togetherKey: "",
   huggingfaceKey: "",
-  appName: import.meta.env.VITE_APP_NAME || "GridAlive Universal",
-  appPort: Number(import.meta.env.VITE_APP_PORT) || 3001,
-  defaultLang: import.meta.env.VITE_DEFAULT_LANG || "en",
-  defaultDarkMode: import.meta.env.VITE_DEFAULT_DARK_MODE !== "false",
+  appName: viteEnv.VITE_APP_NAME || "GridAlive Universal",
+  appPort: Number(viteEnv.VITE_APP_PORT) || 3001,
+  defaultLang: viteEnv.VITE_DEFAULT_LANG || "en",
+  defaultDarkMode: viteEnv.VITE_DEFAULT_DARK_MODE !== "false",
   apiBridgeBaseUrl: "",
-  ollamaBaseUrl: import.meta.env.VITE_OLLAMA_BASE_URL || "http://127.0.0.1:11434",
+  ollamaBaseUrl: viteEnv.VITE_OLLAMA_BASE_URL || "http://127.0.0.1:11434",
   meshAppId: "gridalive-mesh",
   meshRoomId: "gridalive-mesh",
   gunPeers: "", // no central gun relay required
@@ -77,7 +79,7 @@ export const env: EnvConfig = {
 };
 
 export const DEMO_MODE = false;
-export const IS_PRODUCTION = import.meta.env.PROD;
+export const IS_PRODUCTION = Boolean(viteEnv.PROD);
 /** App runs fully offline-capable — no cloud keys expected */
 export const LOCAL_ONLY = true;
 

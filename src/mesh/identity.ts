@@ -7,6 +7,31 @@ const HANDLE_KEY = "gc_mesh_handle";
 const DEVICE_KEY = "gc_device_label";
 const IMEI_KEY = "gc_device_imei";
 const PHONE_KEY = "user_phone";
+const DISPLAY_KEY = "gc_test_display_number";
+const META_KEY = "gc_device_identity_meta_v1";
+
+export type DeviceIdentitySource = "sim" | "imei" | "stored-phone" | "stored-imei" | "peer-id-fallback";
+
+export type DeviceIdentityMeta = {
+  source: DeviceIdentitySource;
+  locked: boolean;
+  nativeAvailable: boolean;
+  fetchedAt: number | null;
+  note: string;
+};
+
+export type DeviceIdentitySnapshot = {
+  peerId: string;
+  phone: string;
+  imei: string;
+  handle: string;
+  displayNumber: string;
+  source: DeviceIdentitySource;
+  locked: boolean;
+  nativeAvailable: boolean;
+  fetchedAt: number | null;
+  note: string;
+};
 
 function rid(prefix = "gc") {
   return `${prefix}_${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36).slice(-4)}`;
@@ -36,6 +61,25 @@ function writeStoredString(key: string, value: string) {
   storage.setItem(key, value);
 }
 
+function readStoredJson<T>(key: string): T | null {
+  const storage = safeStorage();
+  if (!storage) return null;
+  try {
+    const raw = storage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredJson(key: string, value: unknown) {
+  const storage = safeStorage();
+  if (!storage) return;
+  try {
+    storage.setItem(key, JSON.stringify(value));
+  } catch {}
+}
+
 function normalizeSeed(value: string): string {
   return String(value || "")
     .trim()
@@ -46,6 +90,16 @@ function normalizeSeed(value: string): string {
 
 function digitsOnly(value: string): string {
   return String(value || "").replace(/\D/g, "");
+}
+
+function formatDeviceDisplayNumber(raw: string): string {
+  const d = digitsOnly(raw);
+  if (d.length === 10) return `+91 ${d.slice(0, 5)} ${d.slice(5)}`;
+  if (d.length === 12 && d.startsWith("91")) return `+91 ${d.slice(2, 7)} ${d.slice(7)}`;
+  if (d.length === 11 && d.startsWith("0")) return formatDeviceDisplayNumber(d.slice(1));
+  if (d.length > 10 && d.startsWith("91")) return `+${d.slice(0, 2)} ${d.slice(2)}`;
+  if (d.length > 6) return `+${d}`;
+  return d;
 }
 
 function stableHashSeed(seed: string): string {
@@ -79,6 +133,129 @@ export function deriveStableMeshHandle(input?: { phone?: string; imei?: string; 
   return deriveNumericHandle(input);
 }
 
+function readDeviceIdentityMeta(): DeviceIdentityMeta {
+  const saved = readStoredJson<Partial<DeviceIdentityMeta>>(META_KEY);
+  return {
+    source:
+      saved?.source === "sim" ||
+      saved?.source === "imei" ||
+      saved?.source === "stored-phone" ||
+      saved?.source === "stored-imei"
+        ? saved.source
+        : "peer-id-fallback",
+    locked: saved?.locked !== false,
+    nativeAvailable: saved?.nativeAvailable === true,
+    fetchedAt: typeof saved?.fetchedAt === "number" ? saved.fetchedAt : null,
+    note: String(saved?.note || "Identity is locked to this local device."),
+  };
+}
+
+function writeDeviceIdentityMeta(meta: DeviceIdentityMeta) {
+  writeStoredJson(META_KEY, meta);
+}
+
+function buildIdentitySnapshot(peerId?: string): DeviceIdentitySnapshot {
+  const resolvedPeerId = String(peerId || readStoredString(ID_KEY) || getPeerId()).trim();
+  const phone = digitsOnly(readStoredString(PHONE_KEY));
+  const imei = digitsOnly(readStoredString(IMEI_KEY));
+  const handle = deriveStableMeshHandle({ phone, imei, peerId: resolvedPeerId });
+  const displayNumber = phone.length >= 10 ? formatDeviceDisplayNumber(phone) : handle;
+  const meta = readDeviceIdentityMeta();
+  return {
+    peerId: resolvedPeerId,
+    phone,
+    imei,
+    handle,
+    displayNumber,
+    source: meta.source,
+    locked: meta.locked,
+    nativeAvailable: meta.nativeAvailable,
+    fetchedAt: meta.fetchedAt,
+    note: meta.note,
+  };
+}
+
+function persistDeviceIdentity(input: {
+  peerId?: string;
+  phone?: string;
+  imei?: string;
+  source: DeviceIdentitySource;
+  nativeAvailable: boolean;
+  note: string;
+  fetchedAt?: number | null;
+}) {
+  const peerId = String(input.peerId || readStoredString(ID_KEY) || getPeerId()).trim();
+  const phone = digitsOnly(input.phone || readStoredString(PHONE_KEY));
+  const imei = digitsOnly(input.imei || readStoredString(IMEI_KEY));
+  if (peerId) writeStoredString(ID_KEY, peerId);
+  if (phone) writeStoredString(PHONE_KEY, phone);
+  if (imei) writeStoredString(IMEI_KEY, imei);
+  const handle = deriveStableMeshHandle({ phone, imei, peerId });
+  const displayNumber = phone.length >= 10 ? formatDeviceDisplayNumber(phone) : handle;
+  writeStoredString(HANDLE_KEY, handle);
+  writeStoredString("global_call_handle", handle);
+  writeStoredString(DISPLAY_KEY, displayNumber);
+  writeDeviceIdentityMeta({
+    source: input.source,
+    locked: true,
+    nativeAvailable: input.nativeAvailable,
+    fetchedAt: input.fetchedAt ?? Date.now(),
+    note: input.note,
+  });
+  return buildIdentitySnapshot(peerId);
+}
+
+async function tryReadNativeIdentity(): Promise<{
+  phone?: string;
+  imei?: string;
+  nativeAvailable: boolean;
+  note: string;
+}> {
+  const root = globalThis as typeof globalThis & {
+    Capacitor?: { Plugins?: Record<string, any> };
+    GridCallerNative?: { getDeviceIdentity?: () => Promise<any> | any };
+  };
+  const candidates = [
+    root.GridCallerNative?.getDeviceIdentity,
+    root.Capacitor?.Plugins?.MeshCall?.getDeviceIdentity,
+    root.Capacitor?.Plugins?.GridCallerIdentity?.getDeviceIdentity,
+  ].filter((fn): fn is (() => Promise<any> | any) => typeof fn === "function");
+
+  for (const getIdentity of candidates) {
+    try {
+      const data = await getIdentity.call(null);
+      const phone = digitsOnly(
+        data?.phoneNumber || data?.phone || data?.simNumber || data?.msisdn || data?.line1Number || ""
+      );
+      const imei = digitsOnly(data?.imei || data?.deviceImei || data?.deviceId || "");
+      if (phone || imei) {
+        return {
+          phone,
+          imei,
+          nativeAvailable: true,
+          note: phone
+            ? "Identity synced from the local device SIM number."
+            : "SIM number unavailable, so local device IMEI identity is locked.",
+        };
+      }
+      return {
+        nativeAvailable: true,
+        note: "Native device identity bridge is present, but it returned no SIM number or IMEI.",
+      };
+    } catch (error: any) {
+      return {
+        nativeAvailable: true,
+        note: error?.message || "Native device identity bridge failed.",
+      };
+    }
+  }
+
+  return {
+    nativeAvailable: false,
+    note: "This build has no native SIM/IMEI identity bridge, so only local stored identity is available.",
+  };
+}
+
 function deriveHandleFromPeerId(peerId: string): string {
   return deriveStableMeshHandle({ peerId });
 }
@@ -101,29 +278,20 @@ export function setDisplayName(name: string) {
 }
 
 export function getMeshHandle(): string {
-  const saved = readStoredString(HANDLE_KEY) || readStoredString("global_call_handle");
-  if (saved) {
-    const normalized = digitsOnly(saved).slice(-10);
-    if (normalized) {
-      writeStoredString(HANDLE_KEY, normalized);
-      writeStoredString("global_call_handle", normalized);
-      return normalized;
-    }
-  }
-  const peerId = getPeerId();
-  const phone = readStoredString(PHONE_KEY);
-  const imei = readStoredString(IMEI_KEY);
-  const derived = deriveStableMeshHandle({ phone, imei, peerId });
-  writeStoredString(HANDLE_KEY, derived);
-  writeStoredString("global_call_handle", derived);
-  return derived;
+  const snapshot = buildIdentitySnapshot();
+  writeStoredString(HANDLE_KEY, snapshot.handle);
+  writeStoredString("global_call_handle", snapshot.handle);
+  writeStoredString(DISPLAY_KEY, snapshot.displayNumber);
+  return snapshot.handle;
 }
 
 export function ensureMeshIdentity() {
   const peerId = getPeerId();
-  const phone = readStoredString(PHONE_KEY);
-  const imei = readStoredString(IMEI_KEY);
-  const handle = rememberDeviceIdentity({ phone, imei, peerId });
+  const handle = rememberDeviceIdentity({
+    phone: readStoredString(PHONE_KEY),
+    imei: readStoredString(IMEI_KEY),
+    peerId,
+  });
   const deviceLabel = readStoredString(DEVICE_KEY);
   if (!deviceLabel) {
     const fallback = `device-${peerId.split("_")[1] || peerId.slice(-4)}`;
@@ -133,24 +301,53 @@ export function ensureMeshIdentity() {
 }
 
 export function setMeshHandle(handle: string) {
-  const normalized = digitsOnly(String(handle || "").trim().replace(/^@/, "")).slice(-10);
-  if (!normalized) return getMeshHandle();
-  writeStoredString(HANDLE_KEY, normalized);
-  writeStoredString("global_call_handle", normalized);
-  return normalized;
+  return getMeshHandle();
 }
 
 export function rememberDeviceIdentity(input: { phone?: string; imei?: string; peerId?: string }) {
   const phone = String(input.phone || "").replace(/\D/g, "");
   const imei = String(input.imei || "").replace(/\D/g, "");
-  const peerId = String(input.peerId || readStoredString(ID_KEY) || "").trim();
-  if (phone) writeStoredString(PHONE_KEY, phone);
-  if (imei) writeStoredString(IMEI_KEY, imei);
-  if (peerId) writeStoredString(ID_KEY, peerId);
-  const derived = deriveStableMeshHandle({ phone, imei, peerId });
-  writeStoredString(HANDLE_KEY, derived);
-  writeStoredString("global_call_handle", derived);
-  return derived;
+  const snapshot = persistDeviceIdentity({
+    peerId: input.peerId,
+    phone,
+    imei,
+    source: phone ? "stored-phone" : imei ? "stored-imei" : "peer-id-fallback",
+    nativeAvailable: false,
+    note: phone
+      ? "Identity is locked to the locally stored SIM number."
+      : imei
+        ? "SIM number unavailable, so identity is locked to the locally stored IMEI."
+        : "No SIM/IMEI stored, so identity falls back to the local peer id hash.",
+  });
+  return snapshot.handle;
+}
+
+export async function syncLocalDeviceIdentity(input?: { phone?: string; imei?: string; peerId?: string }) {
+  const peerId = String(input?.peerId || readStoredString(ID_KEY) || getPeerId()).trim();
+  const native = await tryReadNativeIdentity();
+  const phone = digitsOnly(native.phone || input?.phone || readStoredString(PHONE_KEY));
+  const imei = digitsOnly(native.imei || input?.imei || readStoredString(IMEI_KEY));
+  return persistDeviceIdentity({
+    peerId,
+    phone,
+    imei,
+    source: phone ? (native.phone ? "sim" : "stored-phone") : imei ? (native.imei ? "imei" : "stored-imei") : "peer-id-fallback",
+    nativeAvailable: native.nativeAvailable,
+    note: native.note,
+    fetchedAt: Date.now(),
+  });
+}
+
+export function getLocalDeviceIdentity(): DeviceIdentitySnapshot {
+  return buildIdentitySnapshot();
+}
+
+export function getImmutableDisplayNumber() {
+  return buildIdentitySnapshot().displayNumber;
+}
+
+export function isIdentityDeviceLocked() {
+  return buildIdentitySnapshot().locked;
 }
 
 export function getRoom(): string {

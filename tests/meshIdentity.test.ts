@@ -25,7 +25,7 @@ test("ensureMeshIdentity creates a stable local peer id and handle", () => {
     const first = ensureMeshIdentity();
     assert.match(first.peerId, /^mesh_/);
     assert.equal(first.peerId, getPeerId());
-    assert.match(first.handle, /^mesh-/);
+    assert.match(first.handle, /^\d{10}$/);
     assert.equal(getMeshHandle(), first.handle);
 
     const second = ensureMeshIdentity();

@@ -25,6 +25,7 @@ import { gunPeersForMesh, useLocalMeshOnly } from "./offlineMode";
 import { MeshEngine } from "./mesh";
 import { endPeerConnection, tryBeginPeerConnection } from "./networkGuard";
 import { getWebRtcIceServers } from "./webrtcConfig";
+import { triggerHapticFeedback } from "./feedback";
 
 const SEA = (Gun as any).SEA;
 
@@ -636,8 +637,8 @@ class MeshCommsEngine {
     // 5. Play emergency beep
     this.playEmergencyBeep();
 
-    // 6. Vibrate
-    if ("vibrate" in navigator) navigator.vibrate([500, 200, 500, 200, 500]);
+    // 6. Vibrate through the shared feedback helper, gated by the user preference
+    triggerHapticFeedback([500, 200, 500, 200, 500]);
 
     bus.emit("mesh_comms:sos_sent", sos);
     return sos;

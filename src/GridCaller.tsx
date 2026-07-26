@@ -3,7 +3,7 @@
  * Synced with Mesh Comms + meshAppBridge for calls & messages.
  * Light + Dark themes (fixes dim dark-mode colors).
  */
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Phone, PhoneOff, PhoneIncoming, PhoneOutgoing, PhoneMissed,
   MessageCircle, MessageSquare, Search, Mic, MicOff, Volume2, ChevronLeft,
@@ -11,10 +11,11 @@ import {
   Delete, Plus, Star, StarOff, Ban, Pencil, Trash2, Download,
   Upload, UserPlus, X, Smartphone, Users, Menu, Map as MapIcon, Settings,
   Share2, Image as ImageIcon, IdCard, Wifi, Bluetooth, Shield, Sun, Moon, Power,
-  Network, Radio, Video, VideoOff, SwitchCamera,
+  Network, Radio, Video, VideoOff, SwitchCamera, Camera, BellOff, EllipsisVertical,
+  CalendarDays, Sparkles,
 } from "lucide-react";
 import { bus } from "./kernel/bus";
-import { S } from "./kernel/storage";
+import { removeStorageValue, S } from "./kernel/storage";
 import { C as liveTheme } from "./kernel/theme";
 import meshComms from "./kernel/meshCommsEngine";
 import { MeshEngine } from "./kernel/mesh";
@@ -55,7 +56,7 @@ import {
 } from "./kernel/callSession";
 import globalCall from "./kernel/globalCallEngine";
 import sovereignMesh from "./kernel/sovereignMesh";
-import gridNumberRegistry from "./kernel/gridNumberRegistry";
+import gridNumberRegistry, { type LocalCommLogEntry } from "./kernel/gridNumberRegistry";
 import meshAppBridge from "./kernel/meshAppBridge";
 import softTower from "./kernel/softTowerEngine";
 import sovereignCall from "./kernel/sovereignCall";
@@ -70,6 +71,7 @@ import freeRadio from "./kernel/radioMesh";
 import softTowerHop from "./kernel/softTowerHopNet";
 import freeMeshFabric from "./kernel/freeMeshFabric";
 import pstnBridge, { looksLikePhoneNumber } from "./kernel/pstnBridge";
+import { deviceVault } from "./kernel/deviceVault";
 import {
   connectBluetoothWithPermission,
   connectWifiWithPassword,
@@ -113,7 +115,14 @@ import {
   toggleDisasterBroadcast,
   toggleLowBandwidthMode,
 } from "./kernel/emergencyMode";
-import { getHubHttp, getMeshHandle, rememberDeviceIdentity } from "./mesh/identity";
+import {
+  getHubHttp,
+  getImmutableDisplayNumber,
+  getLocalDeviceIdentity,
+  getMeshHandle,
+  rememberDeviceIdentity,
+  syncLocalDeviceIdentity,
+} from "./mesh/identity";
 import { ghStatus } from "./github/ghClient";
 import { normalizeBridgeStatus, type MenuBridgeStatus } from "./kernel/menuStatus";
 import {
@@ -209,16 +218,6 @@ let T = makeTokens(false);
 
 export type CallType = "audio" | "video";
 
-type RecentsItem = {
-  id: string;
-  peerId: string;
-  name: string;
-  dir: "in" | "out" | "missed";
-  ts: number;
-  duration: number;
-  method?: string;
-};
-
 type MessageFolder = "inbox" | "sent" | "received" | "draft" | "outbox" | "deleted" | "trash";
 
 type SmsRow = {
@@ -229,9 +228,44 @@ type SmsRow = {
   ts: number;
   mine: boolean;
   folder: MessageFolder;
+  attachment?: GroupAttachment;
 };
 
-type Tab = "recents" | "contacts" | "keypad" | "sms";
+type GroupAttachmentKind = "image" | "audio" | "video" | "document" | "file" | "location";
+
+type GroupAttachment = {
+  kind: GroupAttachmentKind;
+  name: string;
+  mime?: string;
+  size?: number;
+  dataUrl?: string;
+  lat?: number;
+  lng?: number;
+};
+
+type GroupChat = {
+  id: string;
+  name: string;
+  members: string[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+type GroupMessage = {
+  id: string;
+  groupId: string;
+  fromId: string;
+  fromName: string;
+  text: string;
+  ts: number;
+  mine: boolean;
+  attachment?: GroupAttachment;
+  system?: boolean;
+};
+
+type Tab = "mesh" | "contacts" | "keypad" | "sms" | "groups" | "logs";
+
+type GridchatFilter = "all" | "unread" | "favourites";
 
 function initials(n: string) {
   const p = (n || "?").trim().split(/\s+/);
@@ -243,6 +277,41 @@ function hue(id: string) {
   let h = 0;
   for (let i = 0; i < id.length; i++) h = (h + id.charCodeAt(i) * 13) % palette.length;
   return palette[h];
+}
+
+function gridchatAlias(name: string, seed: string) {
+  const clean = String(name || "User").trim() || "User";
+  const suffix = ["Prime", "Link", "Node", "Wave", "Pulse", "Orbit", "Spark", "Core"];
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h + seed.charCodeAt(i) * 17) % suffix.length;
+  const base = clean.replace(/\s+/g, " ").slice(0, 22);
+  return `${base} ${suffix[h]}`;
+}
+
+function summarizeGroupAttachment(a?: GroupAttachment) {
+  if (!a) return "";
+  if (a.kind === "location") return "Shared location";
+  if (a.kind === "image") return "Photo";
+  if (a.kind === "audio") return "Audio";
+  if (a.kind === "video") return "Video";
+  if (a.kind === "document") return `Document: ${a.name}`;
+  return `File: ${a.name}`;
+}
+
+function compactActionBtn(tokens: any) {
+  return {
+    border: `1px solid ${tokens.sep}`,
+    background: tokens.fill,
+    color: tokens.text,
+    borderRadius: 10,
+    padding: "7px 10px",
+    fontSize: 12,
+    fontWeight: 700,
+    cursor: "pointer",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+  } as const;
 }
 
 function timeLabel(ts: number) {
@@ -269,23 +338,82 @@ function fullDateTime(ts: number) {
   });
 }
 
+type LogTopFilter = "all" | "calls" | "messages" | "blocked";
+type LogSourceFilter = "all" | "local-device" | "mesh-network";
+type CallDirectionFilter = "in" | "out" | "missed" | "blocked";
+type MessageDirectionFilter = "inbox" | "sent" | "blocked";
+
+const DEFAULT_CALL_LOG_FILTERS: CallDirectionFilter[] = ["in", "out", "missed", "blocked"];
+const DEFAULT_MESSAGE_LOG_FILTERS: MessageDirectionFilter[] = ["inbox", "sent", "blocked"];
+
+function logLooksLikeMeshId(value?: string) {
+  return /^user_|^node_|^gc_|^web/i.test(String(value || "").trim());
+}
+
+function classifyLogSource(row: LocalCommLogEntry): LogSourceFilter {
+  const method = String(row.method || "").toLowerCase();
+  const peerId = String(row.peerId || "").trim();
+  const peerNumber = String(row.peerNumber || "").trim();
+  if (
+    /mesh|gridcaller|webrtc|soft[- ]?tower|omni|walkie|bridge|sovereign|free[- ]?radio|network/.test(method) ||
+    logLooksLikeMeshId(peerId)
+  ) {
+    return "mesh-network";
+  }
+  if (
+    /pstn|tel|carrier|sim|cellular|sms-uri|device sms|phone call|text message/.test(method) ||
+    (!peerId && looksLikePhoneNumber(peerNumber))
+  ) {
+    return "local-device";
+  }
+  return row.kind === "message" ? (peerId ? "mesh-network" : "local-device") : looksLikePhoneNumber(peerId || peerNumber) ? "local-device" : "mesh-network";
+}
+
+function getCallDirectionFilter(row: LocalCommLogEntry): CallDirectionFilter {
+  if (row.direction === "blocked") return "blocked";
+  if (row.direction === "missed") return "missed";
+  if (row.direction === "in") return "in";
+  return "out";
+}
+
+function getMessageDirectionFilter(row: LocalCommLogEntry): MessageDirectionFilter {
+  if (row.direction === "blocked" || row.folder === "blocked" || row.kind === "block") return "blocked";
+  if (row.direction === "out" || row.folder === "sent" || row.folder === "outbox" || row.folder === "draft") return "sent";
+  return "inbox";
+}
+
+function sourceLabelForLog(row: LocalCommLogEntry) {
+  return classifyLogSource(row) === "mesh-network" ? "Mesh network" : "Local device";
+}
+
+function logDirectionCopy(row: LocalCommLogEntry) {
+  if (row.kind === "call") {
+    if (row.direction === "in") return "Incoming call";
+    if (row.direction === "out") return "Outgoing call";
+    if (row.direction === "missed") return "Missed call";
+    return "Blocked call";
+  }
+  if (row.kind === "block") return "Blocked contact";
+  if (row.direction === "out") return "Sent message";
+  if (row.direction === "blocked") return "Blocked message";
+  return "Inbox message";
+}
+
+function logIconForRow(row: LocalCommLogEntry, color: string) {
+  if (row.kind === "call") {
+    if (row.direction === "in") return <PhoneIncoming size={15} color={color} />;
+    if (row.direction === "out") return <PhoneOutgoing size={15} color={color} />;
+    if (row.direction === "missed") return <PhoneMissed size={15} color={color} />;
+    return <PhoneOff size={15} color={color} />;
+  }
+  if (row.kind === "block") return <Ban size={15} color={color} />;
+  return <MessageSquare size={15} color={color} />;
+}
+
 function fmt(sec: number) {
   const m = Math.floor(sec / 60);
   const s = sec % 60;
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-}
-
-function callLogGroupKey(peerId: string, name: string) {
-  const raw = String(peerId || name || "").trim();
-  return raw ? raw.toLowerCase() : "unknown";
-}
-
-function callLogDirectionLabel(dir: RecentsItem["dir"]) {
-  return dir === "missed" ? "Missed" : dir === "in" ? "Incoming" : "Outgoing";
-}
-
-function callLogDirMeta(dir: RecentsItem["dir"]) {
-  return dir === "missed" ? { label: "Missed", color: "#ff3b30" } : dir === "in" ? { label: "Incoming", color: "#34c759" } : { label: "Outgoing", color: "#007aff" };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -359,14 +487,37 @@ export default function GridCaller({
     }
   }, [appEnabled, myName]);
 
-  const [tab, setTab] = useState<Tab>("recents");
+  useEffect(() => {
+    deviceVault.ensure();
+    void contactsVault
+      .initLocalDb()
+      .then(() => {
+        setContacts(contactsVault.list());
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const refreshLogs = () => setLocalCommLog(gridNumberRegistry.getLocalCommLog(300));
+    refreshLogs();
+    const offLocal = bus.on("gridNumber:local_comm_log", refreshLogs);
+    const offSafety = bus.on("gridNumber:safety", refreshLogs);
+    return () => {
+      try { offLocal?.(); } catch {}
+      try { offSafety?.(); } catch {}
+    };
+  }, []);
+
+  const [tab, setTab] = useState<Tab>(() => {
+    const raw = String(S.get("gridcaller_active_tab", "groups") || "groups").trim().toLowerCase();
+    return raw === "mesh" || raw === "contacts" || raw === "keypad" || raw === "sms" || raw === "groups"
+      ? (raw as Tab)
+      : "groups";
+  });
   const [q, setQ] = useState("");
-  /** Call log filter: all | missed | incoming | outgoing | blocked */
-  const [callLogFilter, setCallLogFilter] = useState<"all" | "missed" | "in" | "out" | "blocked">("all");
   const [peers, setPeers] = useState<
     { id: string; name: string; online: boolean; distance?: number; handle?: string; phone?: string }[]
   >([]);
-  const [recents, setRecents] = useState<RecentsItem[]>(() => S.get("gridcaller_recents", []));
   const [sms, setSms] = useState<SmsRow[]>(() => S.get("gridcaller_sms", []));
   const [blocked, setBlocked] = useState<string[]>(() => S.get("gridcaller_blocked", []));
   const [dial, setDial] = useState("");
@@ -375,6 +526,77 @@ export default function GridCaller({
   const [composeOpen, setComposeOpen] = useState(false);
   const [messageFolder, setMessageFolder] = useState<MessageFolder>("inbox");
   const [composeTo, setComposeTo] = useState("");
+  const [groupChats, setGroupChats] = useState<GroupChat[]>(() => S.get("gridcaller_group_chats", []));
+  const [groupMessages, setGroupMessages] = useState<GroupMessage[]>(() => S.get("gridcaller_group_messages", []));
+  const [groupViewId, setGroupViewId] = useState<string | null>(null);
+  const [groupDraft, setGroupDraft] = useState("");
+  const [groupNameInput, setGroupNameInput] = useState("");
+  const [groupMembersInput, setGroupMembersInput] = useState("");
+  const [gridchatSearch, setGridchatSearch] = useState("");
+  const [gridchatFilter, setGridchatFilter] = useState<GridchatFilter>("all");
+  const [gridchatFavourites, setGridchatFavourites] = useState<string[]>(() => S.get("gridcaller_gridchat_favourites", []));
+  const [gridchatMuted, setGridchatMuted] = useState<string[]>(() => S.get("gridcaller_gridchat_muted", []));
+  const [gridchatLastSeen, setGridchatLastSeen] = useState<Record<string, number>>(() => S.get("gridcaller_gridchat_last_seen", {}));
+  const [gridchatMyStatusText, setGridchatMyStatusText] = useState<string>(() => String(S.get("gridcaller_my_status_text", "") || ""));
+  const [gridchatMyStatusAt, setGridchatMyStatusAt] = useState<number>(() => Number(S.get("gridcaller_my_status_at", 0) || 0));
+  const [gridchatStatusPrivacy, setGridchatStatusPrivacy] = useState<"everyone" | "contacts" | "nobody">(() => {
+    const raw = String(S.get("gridcaller_status_privacy", "everyone") || "everyone").toLowerCase();
+    return raw === "contacts" || raw === "nobody" ? raw : "everyone";
+  });
+  const [gridchatStatusAutoClearHours, setGridchatStatusAutoClearHours] = useState<number>(() => {
+    const raw = Number(S.get("gridcaller_status_auto_clear_h", 24) || 24);
+    return Number.isFinite(raw) && raw >= 0 ? raw : 24;
+  });
+  const [gridchatStatusRingColor, setGridchatStatusRingColor] = useState<"blue" | "green" | "orange" | "red">(() => {
+    const raw = String(S.get("gridcaller_status_ring_color", "blue") || "blue").toLowerCase();
+    return raw === "green" || raw === "orange" || raw === "red" ? raw : "blue";
+  });
+  const [gridchatStatusStealthMode, setGridchatStatusStealthMode] = useState<boolean>(() => !!S.get("gridcaller_status_stealth", false));
+  const [gridchatStatusArchive, setGridchatStatusArchive] = useState<{ text: string; at: number }[]>(() => {
+    const rows = S.get("gridcaller_status_archive", []);
+    return Array.isArray(rows) ? rows.filter((r) => r && typeof r.text === "string" && typeof r.at === "number").slice(0, 24) : [];
+  });
+  const [gridchatStatusSettingsOpen, setGridchatStatusSettingsOpen] = useState(false);
+  const [gridchatCreateMenuOpen, setGridchatCreateMenuOpen] = useState(false);
+  const [gridchatMoreMenuOpen, setGridchatMoreMenuOpen] = useState(false);
+  const [threadSearchOpen, setThreadSearchOpen] = useState(false);
+  const [threadSearchQuery, setThreadSearchQuery] = useState("");
+  const [groupSearchOpen, setGroupSearchOpen] = useState(false);
+  const [groupSearchQuery, setGroupSearchQuery] = useState("");
+  const [groupChatMenuOpen, setGroupChatMenuOpen] = useState(false);
+  const [chatProfileView, setChatProfileView] = useState<{ peerId: string; name: string; source: "direct" | "group"; groupId?: string } | null>(null);
+  const [chatProfileMetaVer, setChatProfileMetaVer] = useState(0);
+  const [starredMessageIds, setStarredMessageIds] = useState<string[]>(() => {
+    const rows = S.get("gridcaller_starred_messages", []);
+    return Array.isArray(rows) ? rows.map((x) => String(x || "")).filter(Boolean).slice(0, 3000) : [];
+  });
+  const [directSelectMode, setDirectSelectMode] = useState(false);
+  const [directSelectedMessageIds, setDirectSelectedMessageIds] = useState<string[]>([]);
+  const [groupSelectMode, setGroupSelectMode] = useState(false);
+  const [groupSelectedMessageIds, setGroupSelectedMessageIds] = useState<string[]>([]);
+  const [threadShowStarredOnly, setThreadShowStarredOnly] = useState(false);
+  const [groupShowStarredOnly, setGroupShowStarredOnly] = useState(false);
+  const [gridchatReportLog, setGridchatReportLog] = useState<{ peerId: string; name: string; source: "direct" | "group"; ts: number }[]>(() => {
+    const rows = S.get("gridcaller_report_log", []);
+    return Array.isArray(rows)
+      ? rows
+        .filter((r) => r && typeof r.peerId === "string" && typeof r.name === "string" && typeof r.ts === "number")
+        .slice(0, 500)
+      : [];
+  });
+  const [directChatMenuOpen, setDirectChatMenuOpen] = useState(false);
+  const [directAttachMenuOpen, setDirectAttachMenuOpen] = useState(false);
+  const directMediaInputRef = useRef<HTMLInputElement>(null);
+  const directDocumentInputRef = useRef<HTMLInputElement>(null);
+  const directCameraInputRef = useRef<HTMLInputElement>(null);
+  const directAudioInputRef = useRef<HTMLInputElement>(null);
+  const groupMediaInputRef = useRef<HTMLInputElement>(null);
+  const groupDocumentInputRef = useRef<HTMLInputElement>(null);
+  const groupCameraInputRef = useRef<HTMLInputElement>(null);
+  const groupAudioInputRef = useRef<HTMLInputElement>(null);
+  const [groupAttachMenuOpen, setGroupAttachMenuOpen] = useState(false);
+  const gridchatHeaderRef = useRef<HTMLDivElement>(null);
+  const gridchatCreatePanelRef = useRef<HTMLDivElement>(null);
   const [err, setErr] = useState("");
   const [callScope, setCallScope] = useState<"auto" | "local" | "global">(() => {
     const saved = String(S.get("gridcaller_scope", "auto") || "auto").trim().toLowerCase();
@@ -393,18 +615,11 @@ export default function GridCaller({
   const [groupCallSilent, setGroupCallSilent] = useState(false);
   const [groupCallSpeaker, setGroupCallSpeaker] = useState(true);
 
-  const [globalHandle, setGlobalHandle] = useState(() => {
-    const h = String(S.get("global_call_handle", "") || "").trim();
-    if (h) return h;
-    const meshHandle = getMeshHandle();
-    if (meshHandle) return meshHandle;
-    const ph = String(S.get("user_phone", "") || "").replace(/\D/g, "");
-    return ph.length >= 10 ? ph.slice(-10) : myName || "";
-  });
+  const [globalHandle, setGlobalHandle] = useState(() => getLocalDeviceIdentity().handle || getMeshHandle() || myName || "");
   const [bridgeStatus, setBridgeStatus] = useState<MenuBridgeStatus>({ ready: false, text: "Checking bridge…", detail: "" });
   const [globalPeers, setGlobalPeers] = useState<{ id: string; name: string; handle?: string; online: boolean }[]>([]);
   /** Number under title — always start from storage (user phone / handle) */
-  const [myGridDisplay, setMyGridDisplay] = useState(() => resolveMyPublicNumber());
+  const [myGridDisplay, setMyGridDisplay] = useState(() => getImmutableDisplayNumber() || resolveMyPublicNumber());
   const [mySerial, setMySerial] = useState("");
   const [lanUrl, setLanUrl] = useState("");
   /** Real hub status — not decorative */
@@ -417,9 +632,17 @@ export default function GridCaller({
 
   // Hamburger: network count + map + GridCaller settings
   const [menuOpen, setMenuOpen] = useState(false);
+  const [menuFullscreen, setMenuFullscreen] = useState(false);
   const [menuView, setMenuView] = useState<
-    "home" | "map" | "settings" | "radio" | "profile" | "tower" | "devices" | "share" | "privacy" | "emergency"
+    "home" | "map" | "settings" | "radio" | "profile" | "tower" | "devices" | "share" | "privacy" | "emergency" | "logs"
   >("home");
+  const [logFilter, setLogFilter] = useState<LogTopFilter>("all");
+  const [logFiltersOpen, setLogFiltersOpen] = useState(false);
+  const [callLogSourceFilter, setCallLogSourceFilter] = useState<LogSourceFilter>("all");
+  const [messageLogSourceFilter, setMessageLogSourceFilter] = useState<LogSourceFilter>("all");
+  const [callDirectionFilters, setCallDirectionFilters] = useState<CallDirectionFilter[]>(DEFAULT_CALL_LOG_FILTERS);
+  const [messageDirectionFilters, setMessageDirectionFilters] = useState<MessageDirectionFilter[]>(DEFAULT_MESSAGE_LOG_FILTERS);
+  const [localCommLog, setLocalCommLog] = useState<LocalCommLogEntry[]>(() => gridNumberRegistry.getLocalCommLog(300));
   const [towerTick, setTowerTick] = useState(0);
   const [hopDiagnostics, setHopDiagnostics] = useState(() => {
     const persisted = loadPersistedRuntimeDiagnostics();
@@ -442,8 +665,22 @@ export default function GridCaller({
   const [radioTick, setRadioTick] = useState(0);
   const [radioChannel, setRadioChannel] = useState(() => freeRadio.channelName);
   const [radioSecret, setRadioSecret] = useState(() => S.get("gc_radio_secret", "gridcaller-free") || "gridcaller-free");
+  const [radioChannels, setRadioChannels] = useState<string[]>(() =>
+    loadRadioChannelList(freeRadio.channelName || "grid-ch-1")
+  );
+  const [radioPanelTab, setRadioPanelTab] = useState<"channels" | "groups">("channels");
+  const [radioGroups, setRadioGroups] = useState<
+    { id: string; name: string; channels: string[]; createdAt: number; updatedAt: number }[]
+  >(() => loadRadioGroups(loadRadioChannelList(freeRadio.channelName || "grid-ch-1")));
+  const [radioGroupName, setRadioGroupName] = useState("");
+  const [radioGroupChannelInput, setRadioGroupChannelInput] = useState("");
+  const [selectedRadioGroupId, setSelectedRadioGroupId] = useState("");
   const [radioText, setRadioText] = useState("");
+  const [radioSideTab, setRadioSideTab] = useState<"radio" | "radar">("radio");
   const [pttOn, setPttOn] = useState(false);
+  const radarMotionRef = useRef<
+    Map<string, { lat: number; lng: number; at: number; speedMps: number; movedMeters: number; bearingDeg: number }>
+  >(new Map());
   const [meshMapPeers, setMeshMapPeers] = useState<
     {
       id: string;
@@ -526,24 +763,387 @@ export default function GridCaller({
     };
   }, [hubStatus.connected, autoMeshStatus?.trysteroOk, peers]);
   /** Testing: free custom ID + phone (limited device installs) */
-  const [settingsCallerId, setSettingsCallerId] = useState(
-    () => S.get("mesh_id") || S.get("ga_mesh_id") || MeshEngine.localId || ""
-  );
-  const [settingsPhone, setSettingsPhone] = useState(
-    () => S.get("user_phone", "") || softTower.getSimAlias?.() || user?.phone || ""
-  );
-  const [settingsDisplayNum, setSettingsDisplayNum] = useState(
-    () => S.get("gc_test_display_number", "") || ""
-  );
+  const [settingsCallerId, setSettingsCallerId] = useState(() => getLocalDeviceIdentity().peerId || S.get("mesh_id") || S.get("ga_mesh_id") || MeshEngine.localId || "");
+  const [settingsPhone, setSettingsPhone] = useState(() => getLocalDeviceIdentity().phone || S.get("user_phone", "") || softTower.getSimAlias?.() || user?.phone || "");
+  const [settingsDisplayNum, setSettingsDisplayNum] = useState(() => getLocalDeviceIdentity().displayNumber || getImmutableDisplayNumber() || "");
+  const [identityStatus, setIdentityStatus] = useState(() => getLocalDeviceIdentity());
+  const [identityBusy, setIdentityBusy] = useState(false);
   const [idSaveMsg, setIdSaveMsg] = useState("");
   const mapBoxRef = useRef<HTMLDivElement>(null);
   const mapObjRef = useRef<any>(null);
+
+  const rememberRadioChannel = (name: string) => {
+    const cleaned = sanitizeRadioChannel(name);
+    if (!cleaned) return;
+    setRadioChannels((prev) => {
+      const next = [cleaned, ...prev.filter((c) => c !== cleaned)].slice(0, 12);
+      S.set("gc_radio_channels", next);
+      return next;
+    });
+  };
+
+  const persistRadioGroups = (
+    updater: (prev: { id: string; name: string; channels: string[]; createdAt: number; updatedAt: number }[]) =>
+      { id: string; name: string; channels: string[]; createdAt: number; updatedAt: number }[]
+  ) => {
+    setRadioGroups((prev) => {
+      const next = updater(prev).slice(0, 30);
+      S.set("gc_radio_groups", next);
+      return next;
+    });
+  };
+
+  const createRadioGroup = () => {
+    const name = sanitizeRadioGroupName(radioGroupName);
+    if (!name) {
+      setErr("Group name is required");
+      return;
+    }
+    if (radioGroups.some((g) => g.name.toLowerCase() === name.toLowerCase())) {
+      setErr("Group already exists");
+      return;
+    }
+    const row = {
+      id: `rg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      name,
+      channels: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    persistRadioGroups((prev) => [row, ...prev]);
+    setSelectedRadioGroupId(row.id);
+    setRadioGroupName("");
+    setIdSaveMsg(`Group created: ${name}`);
+  };
+
+  const addChannelToGroup = (groupId: string, channelName: string) => {
+    const cleaned = sanitizeRadioChannel(channelName);
+    if (!cleaned) {
+      setErr("Enter a valid channel");
+      return;
+    }
+    persistRadioGroups((prev) =>
+      prev.map((g) => {
+        if (g.id !== groupId) return g;
+        if (g.channels.includes(cleaned)) return g;
+        return {
+          ...g,
+          channels: [...g.channels, cleaned].slice(0, 60),
+          updatedAt: Date.now(),
+        };
+      })
+    );
+    rememberRadioChannel(cleaned);
+    setRadioGroupChannelInput("");
+    setIdSaveMsg(`Added ${cleaned}`);
+  };
+
+  const removeChannelFromGroup = (groupId: string, channelName: string) => {
+    persistRadioGroups((prev) =>
+      prev.map((g) =>
+        g.id !== groupId
+          ? g
+          : {
+              ...g,
+              channels: g.channels.filter((c) => c !== channelName),
+              updatedAt: Date.now(),
+            }
+      )
+    );
+  };
+
+  const deleteRadioGroup = (groupId: string) => {
+    const deleting = radioGroups.find((g) => g.id === groupId);
+    persistRadioGroups((prev) => prev.filter((g) => g.id !== groupId));
+    if (deleting) setIdSaveMsg(`Deleted group: ${deleting.name}`);
+  };
+
+  const joinRadioChannel = (name: string, secret: string) => {
+    const cleaned = sanitizeRadioChannel(name);
+    if (!cleaned) {
+      setErr("Enter a valid channel name");
+      return;
+    }
+    setRadioChannel(cleaned);
+    rememberRadioChannel(cleaned);
+    void freeRadio.setChannel(cleaned, secret);
+    void freeRadio.enable(true);
+    freeRadio.setOperatorName(myName);
+    setIdSaveMsg(`Joined ${cleaned}`);
+  };
+
+  const openMenuFeature = (
+    view: "map" | "settings" | "radio" | "profile" | "tower" | "devices" | "share" | "privacy" | "emergency" | "logs"
+  ) => {
+    setMenuView(view);
+    setMenuFullscreen(true);
+    setMenuOpen(true);
+  };
+
+  useEffect(() => {
+    if (!radioGroups.length) {
+      setSelectedRadioGroupId("");
+      return;
+    }
+    if (!radioGroups.some((g) => g.id === selectedRadioGroupId)) {
+      setSelectedRadioGroupId(radioGroups[0].id);
+    }
+  }, [radioGroups, selectedRadioGroupId]);
 
   // Contacts vault (local memory — Truecaller-class)
   const [contacts, setContacts] = useState<GridContact[]>(() => contactsVault.list());
   const [contactView, setContactView] = useState<GridContact | null>(null);
   const [contactEdit, setContactEdit] = useState<Partial<GridContact> & { name: string } | null>(null);
   const [contactBusy, setContactBusy] = useState("");
+  const visibleLocalCommLog = useMemo(() => {
+    return localCommLog.filter((row) => {
+      const isBlocked = row.direction === "blocked" || row.kind === "block";
+      if (logFilter === "calls" && row.kind !== "call") return false;
+      if (logFilter === "messages" && row.kind !== "message") return false;
+      if (logFilter === "blocked" && !isBlocked) return false;
+
+      if (row.kind === "call") {
+        const source = classifyLogSource(row);
+        const callDir = getCallDirectionFilter(row);
+        return (callLogSourceFilter === "all" || source === callLogSourceFilter) && callDirectionFilters.includes(callDir);
+      }
+
+      if (row.kind === "message") {
+        const source = classifyLogSource(row);
+        const msgDir = getMessageDirectionFilter(row);
+        return (messageLogSourceFilter === "all" || source === messageLogSourceFilter) && messageDirectionFilters.includes(msgDir);
+      }
+
+      return true;
+    });
+  }, [callDirectionFilters, callLogSourceFilter, localCommLog, logFilter, messageDirectionFilters, messageLogSourceFilter]);
+
+  const latestLocalCommLog = useMemo(() => visibleLocalCommLog.slice().reverse(), [visibleLocalCommLog]);
+
+  const logStats = useMemo(() => {
+    const calls = localCommLog.filter((row) => row.kind === "call").length;
+    const messages = localCommLog.filter((row) => row.kind === "message").length;
+    const blocked = localCommLog.filter((row) => row.direction === "blocked" || row.kind === "block").length;
+    return { calls, messages, blocked };
+  }, [localCommLog]);
+
+  const callLogSourceStats = useMemo(() => {
+    const rows = localCommLog.filter((row) => row.kind === "call");
+    return {
+      all: rows.length,
+      "local-device": rows.filter((row) => classifyLogSource(row) === "local-device").length,
+      "mesh-network": rows.filter((row) => classifyLogSource(row) === "mesh-network").length,
+    } as const;
+  }, [localCommLog]);
+
+  const messageLogSourceStats = useMemo(() => {
+    const rows = localCommLog.filter((row) => row.kind === "message");
+    return {
+      all: rows.length,
+      "local-device": rows.filter((row) => classifyLogSource(row) === "local-device").length,
+      "mesh-network": rows.filter((row) => classifyLogSource(row) === "mesh-network").length,
+    } as const;
+  }, [localCommLog]);
+
+  const refreshLocalLogs = () => setLocalCommLog(gridNumberRegistry.getLocalCommLog(300));
+
+  const deleteLocalLogEntry = (id: string) => {
+    if (!id) return;
+    const ok = gridNumberRegistry.deleteLocalCommLogEntry(id);
+    if (!ok) return;
+    refreshLocalLogs();
+    setContactBusy("Log entry deleted");
+    setTimeout(() => setContactBusy(""), 1500);
+  };
+
+  const clearLocalLogs = () => {
+    if (!latestLocalCommLog.length) {
+      setContactBusy("No logs to clear");
+      setTimeout(() => setContactBusy(""), 1500);
+      return;
+    }
+    if (!confirm("Clear all local device logs?")) return;
+    const removed = gridNumberRegistry.clearLocalCommLog();
+    refreshLocalLogs();
+    setContactBusy(`Cleared ${removed} log${removed === 1 ? "" : "s"}`);
+    setTimeout(() => setContactBusy(""), 1800);
+  };
+
+  const toggleCallDirectionFilter = (value: CallDirectionFilter) => {
+    setCallDirectionFilters((prev) => {
+      const next = prev.includes(value) ? prev.filter((item) => item !== value) : [...prev, value];
+      return next.length ? next : DEFAULT_CALL_LOG_FILTERS;
+    });
+  };
+
+  const toggleMessageDirectionFilter = (value: MessageDirectionFilter) => {
+    setMessageDirectionFilters((prev) => {
+      const next = prev.includes(value) ? prev.filter((item) => item !== value) : [...prev, value];
+      return next.length ? next : DEFAULT_MESSAGE_LOG_FILTERS;
+    });
+  };
+
+  const selectAllLogFilters = () => {
+    setCallLogSourceFilter("all");
+    setMessageLogSourceFilter("all");
+    setCallDirectionFilters(DEFAULT_CALL_LOG_FILTERS);
+    setMessageDirectionFilters(DEFAULT_MESSAGE_LOG_FILTERS);
+  };
+
+  const renderFilterChip = (
+    active: boolean,
+    label: string,
+    onClick: () => void,
+    icon?: ReactNode
+  ) => (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        border: active ? "none" : `1px solid ${tokens.sep}`,
+        background: active ? tokens.blue : tokens.card,
+        color: active ? "#fff" : tokens.text,
+        borderRadius: 999,
+        padding: "7px 11px",
+        fontSize: 11,
+        fontWeight: 700,
+        cursor: "pointer",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+      }}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+
+  const renderLogFilterPanel = (compact = false) => (
+    <div
+      style={{
+        marginBottom: compact ? 10 : 12,
+        padding: compact ? 10 : 12,
+        borderRadius: 14,
+        border: `1px solid ${tokens.sep}`,
+        background: tokens.card,
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", marginBottom: 10 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 800, color: tokens.text }}>Filter logs</div>
+          <div style={{ fontSize: 11, color: tokens.label, marginTop: 2 }}>
+            Tick the items you want to see together.
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={selectAllLogFilters}
+          style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, borderRadius: 999, padding: "7px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+        >
+          Select all
+        </button>
+      </div>
+
+      <div style={{ fontSize: 11, fontWeight: 800, color: tokens.secondary, marginBottom: 8, letterSpacing: 0.4 }}>
+        CALL LOGS
+      </div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+        {([
+          { id: "all", label: `All ${callLogSourceStats.all}` },
+          { id: "local-device", label: `Local device ${callLogSourceStats["local-device"]}` },
+          { id: "mesh-network", label: `Mesh network ${callLogSourceStats["mesh-network"]}` },
+        ] as const).map((item) =>
+          renderFilterChip(callLogSourceFilter === item.id, item.label, () => setCallLogSourceFilter(item.id))
+        )}
+      </div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+        {([
+          { id: "in", label: "Incoming", icon: <PhoneIncoming size={13} /> },
+          { id: "out", label: "Outgoing", icon: <PhoneOutgoing size={13} /> },
+          { id: "missed", label: "Missed", icon: <PhoneMissed size={13} /> },
+          { id: "blocked", label: "Blocked", icon: <PhoneOff size={13} /> },
+        ] as const).map((item) =>
+          renderFilterChip(callDirectionFilters.includes(item.id), item.label, () => toggleCallDirectionFilter(item.id), item.icon)
+        )}
+      </div>
+
+      <div style={{ fontSize: 11, fontWeight: 800, color: tokens.secondary, marginBottom: 8, letterSpacing: 0.4 }}>
+        MESSAGE LOGS
+      </div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+        {([
+          { id: "all", label: `All ${messageLogSourceStats.all}` },
+          { id: "local-device", label: `Local device ${messageLogSourceStats["local-device"]}` },
+          { id: "mesh-network", label: `Mesh network ${messageLogSourceStats["mesh-network"]}` },
+        ] as const).map((item) =>
+          renderFilterChip(messageLogSourceFilter === item.id, item.label, () => setMessageLogSourceFilter(item.id))
+        )}
+      </div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {([
+          { id: "inbox", label: "Inbox", icon: <MessageSquare size={13} /> },
+          { id: "sent", label: "Sent", icon: <MessageCircle size={13} /> },
+          { id: "blocked", label: "Blocked", icon: <Ban size={13} /> },
+        ] as const).map((item) =>
+          renderFilterChip(messageDirectionFilters.includes(item.id), item.label, () => toggleMessageDirectionFilter(item.id), item.icon)
+        )}
+      </div>
+    </div>
+  );
+
+  const renderLogRow = (row: LocalCommLogEntry, compact = false) => {
+    const accent = row.direction === "blocked" ? tokens.red : classifyLogSource(row) === "mesh-network" ? tokens.green : tokens.blue;
+    return (
+      <div
+        key={row.id}
+        style={{
+          margin: compact ? "8px 12px 0" : "0 0 8px",
+          padding: 12,
+          borderRadius: 14,
+          background: tokens.card,
+          border: `1px solid ${tokens.sep}`,
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontSize: 14, fontWeight: 800, color: tokens.text, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                {logIconForRow(row, accent)}
+                <span>{row.peerName || row.peerNumber || row.peerId || "Unknown"}</span>
+              </span>
+              <span style={{ color: accent, fontSize: 11 }}>{logDirectionCopy(row)}</span>
+            </div>
+            <div style={{ fontSize: 11, color: tokens.label, marginTop: 3 }}>
+              {fullDateTime(row.ts)} {row.folder ? `· ${row.folder}` : ""} {row.method ? `· ${row.method}` : ""}
+            </div>
+            <div style={{ fontSize: 11, color: accent, marginTop: 5, fontWeight: 700 }}>{sourceLabelForLog(row)}</div>
+            {row.kind === "call" ? (
+              <div style={{ fontSize: 12, color: tokens.secondary, marginTop: 6, lineHeight: 1.45 }}>
+                {logDirectionCopy(row)}
+                {typeof row.durationSec === "number" && row.durationSec > 0 ? ` · ${row.durationSec}s talk time` : ""}
+              </div>
+            ) : null}
+            {row.textPreview ? <div style={{ fontSize: 13, color: tokens.text, marginTop: 8, lineHeight: 1.45 }}>{row.textPreview}</div> : null}
+            <div style={{ fontSize: 11, color: tokens.label, marginTop: 8, display: "flex", gap: 10, flexWrap: "wrap" }}>
+              {row.peerId ? <span>ID: {row.peerId}</span> : null}
+              {row.peerNumber ? <span>Number: {row.peerNumber}</span> : null}
+              {typeof row.durationSec === "number" && row.durationSec > 0 ? <span>Duration: {row.durationSec}s</span> : null}
+              {row.attachmentName ? <span>Attachment: {row.attachmentName}</span> : null}
+              {row.reason ? <span>Reason: {row.reason}</span> : null}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => deleteLocalLogEntry(row.id)}
+            style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, borderRadius: 10, width: 34, height: 34, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}
+            title="Delete this log entry"
+          >
+            <Trash2 size={15} />
+          </button>
+        </div>
+      </div>
+    );
+  };
   const [contactFilter, setContactFilter] = useState<"all" | "fav" | "spam">("all");
   const fileImportRef = useRef<HTMLInputElement>(null);
 
@@ -645,56 +1245,60 @@ export default function GridCaller({
     };
   }, []);
 
-  useEffect(() => S.set("gridcaller_recents", recents.slice(0, 80)), [recents]);
+  useEffect(() => {
+    removeStorageValue("gridcaller_recents");
+  }, []);
+
   useEffect(() => S.set("gridcaller_sms", sms.slice(0, 400)), [sms]);
+  useEffect(() => S.set("gridcaller_group_chats", groupChats.slice(0, 80)), [groupChats]);
+  useEffect(() => S.set("gridcaller_group_messages", groupMessages.slice(-1200)), [groupMessages]);
+  useEffect(() => S.set("gridcaller_active_tab", tab), [tab]);
+  useEffect(() => S.set("gridcaller_gridchat_favourites", gridchatFavourites.slice(0, 300)), [gridchatFavourites]);
+  useEffect(() => S.set("gridcaller_gridchat_muted", gridchatMuted.slice(0, 300)), [gridchatMuted]);
+  useEffect(() => S.set("gridcaller_gridchat_last_seen", gridchatLastSeen), [gridchatLastSeen]);
+  useEffect(() => S.set("gridcaller_my_status_text", gridchatMyStatusText.trim()), [gridchatMyStatusText]);
+  useEffect(() => S.set("gridcaller_my_status_at", gridchatMyStatusAt), [gridchatMyStatusAt]);
+  useEffect(() => S.set("gridcaller_status_privacy", gridchatStatusPrivacy), [gridchatStatusPrivacy]);
+  useEffect(() => S.set("gridcaller_status_auto_clear_h", gridchatStatusAutoClearHours), [gridchatStatusAutoClearHours]);
+  useEffect(() => S.set("gridcaller_status_ring_color", gridchatStatusRingColor), [gridchatStatusRingColor]);
+  useEffect(() => S.set("gridcaller_status_stealth", !!gridchatStatusStealthMode), [gridchatStatusStealthMode]);
+  useEffect(() => S.set("gridcaller_status_archive", gridchatStatusArchive.slice(0, 24)), [gridchatStatusArchive]);
+  useEffect(() => S.set("gridcaller_starred_messages", starredMessageIds.slice(0, 3000)), [starredMessageIds]);
+  useEffect(() => S.set("gridcaller_report_log", gridchatReportLog.slice(0, 500)), [gridchatReportLog]);
   useEffect(() => S.set("gridcaller_blocked", blocked), [blocked]);
+  useEffect(() => {
+    void deviceVault.put("gridcaller.sms", sms.slice(0, 400)).catch(() => {});
+  }, [sms]);
+  useEffect(() => {
+    void deviceVault.put("gridcaller.group_chats", groupChats.slice(0, 80)).catch(() => {});
+  }, [groupChats]);
+  useEffect(() => {
+    void deviceVault.put("gridcaller.group_messages", groupMessages.slice(-1200)).catch(() => {});
+  }, [groupMessages]);
+  useEffect(() => {
+    void deviceVault.put("gridcaller.blocked", blocked).catch(() => {});
+  }, [blocked]);
   useEffect(() => {
     S.set("gridcaller_scope", callScope);
   }, [callScope]);
 
-  // Keep local preview in sync when camera turns on mid-call
   useEffect(() => {
-    if (!videoOn || phase === "idle") return;
-    const el = localVideoRef.current;
-    const stream = localStream.current;
-    if (!el || !stream) return;
-    const vids = stream.getVideoTracks().filter((t) => t.readyState === "live");
-    if (!vids.length) return;
-    el.srcObject = new MediaStream(vids);
-    el.play().catch(() => {});
-  }, [videoOn, phase]);
+    if (!gridchatMyStatusText || !gridchatMyStatusAt || gridchatStatusAutoClearHours <= 0) return;
+    const ms = gridchatStatusAutoClearHours * 60 * 60 * 1000;
+    const expiresIn = gridchatMyStatusAt + ms - Date.now();
+    if (expiresIn <= 0) {
+      setGridchatMyStatusText("");
+      setGridchatMyStatusAt(0);
+      return;
+    }
+    const t = setTimeout(() => {
+      setGridchatMyStatusText("");
+      setGridchatMyStatusAt(0);
+    }, expiresIn);
+    return () => clearTimeout(t);
+  }, [gridchatMyStatusText, gridchatMyStatusAt, gridchatStatusAutoClearHours]);
 
-  // Contacts vault: live reload + mesh peer merge
-  useEffect(() => {
-    const reload = () => setContacts(contactsVault.list());
-    reload();
-    const off = bus.on("contacts:changed", reload);
-    return () => {
-      try {
-        off?.();
-      } catch {}
-    };
-  }, []);
-
-  useEffect(() => {
-    // Merge mesh peers into local contact memory when peer set changes (non-destructive)
-    const meshRows = [
-      ...peers.map((p) => ({ id: p.id, name: p.name, online: p.online })),
-      ...globalPeers.map((p) => ({ id: p.id, name: p.name, online: p.online })),
-    ];
-    if (!meshRows.length) return;
-    try {
-      const before = contactsVault.list().length;
-      const known = new Set(contactsVault.list().map((c) => c.peerId).filter(Boolean));
-      const fresh = meshRows.filter((p) => p.id && !known.has(p.id));
-      if (fresh.length) {
-        contactsVault.syncMeshPeers(fresh);
-        if (contactsVault.list().length !== before) setContacts(contactsVault.list());
-      }
-    } catch {}
-  }, [peers, globalPeers]);
-
-  // Init: sync GridCaller ↔ Mesh Comms ↔ meshAppBridge ↔ global call
+  // Init: sync GridCaller <-> Mesh Comms <-> meshAppBridge <-> global call
   useEffect(() => {
     try {
       // APK must point at PC LAN hub (not localhost)
@@ -705,7 +1309,7 @@ export default function GridCaller({
         localStorage.setItem("gc_signal_url", signal);
       } catch {}
 
-      // One identity + FULL auto-join (Wi‑Fi + BT + swarm) — no manual Connect
+      // One identity + FULL auto-join (Wi-Fi + BT + swarm) - no manual Connect
       unifyLocalIdentity();
       void startFullAutoJoin(myName);
       void startAutoMesh(myName).then((st) => setAutoMeshStatus(st));
@@ -748,7 +1352,9 @@ export default function GridCaller({
           globalCall.setHandle(savedHandle || testPhone.slice(-10));
         } catch {}
       }
-      // Do NOT seed header from gidIdentity.display / cell.display (stale auto IDs)
+      // Keep user-saved display intact instead of auto IDs.
+      void cell;
+
       // Free radio + soft-tower hop fabric: every phone is a cell tower
       try {
         enableFreeRadioMeshDefaults();
@@ -831,6 +1437,15 @@ export default function GridCaller({
 
     globalCall.onIncoming((from, accept, reject) => {
       if (blocked.includes(from.id)) {
+        try {
+          gridNumberRegistry.logCall({
+            dir: "blocked",
+            peerId: from.id,
+            peerName: from.name || from.handle || from.id,
+            method: "global-call",
+            reason: "blocked_incoming_call",
+          });
+        } catch {}
         reject();
         return;
       }
@@ -862,11 +1477,11 @@ export default function GridCaller({
         setCallPeer(null);
       }
       if (st === "failed" || st === "disconnected" || st === "closed") {
-        // soft end — hangup UI may already run
+        // soft end - hangup UI may already run
       }
     });
 
-    // Presence tick — MeshEngine peers + hub HTTP peers (real only)
+    // Presence tick - MeshEngine peers + hub HTTP peers (real only)
     const tick = async () => {
       try {
         const mapped: {
@@ -972,6 +1587,15 @@ export default function GridCaller({
     try {
       meshComms.listenForIncomingCalls?.((from, accept, reject) => {
         if (blocked.includes(from)) {
+          try {
+            gridNumberRegistry.logCall({
+              dir: "blocked",
+              peerId: from,
+              peerName: peers.find((p) => p.id === from)?.name || from.slice(0, 12),
+              method: "mesh-comms",
+              reason: "blocked_incoming_call",
+            });
+          } catch {}
           reject();
           return;
         }
@@ -1011,7 +1635,25 @@ export default function GridCaller({
       const from = msg.peerId || msg.from || "";
       if (from && (from === MeshEngine.localId || isSelfPeer(from))) return;
       const text = msg.message || msg.text || "";
-      if (!text) return;
+      const attachment = msg.attachment || msg.data?.attachment;
+      if (!text && !attachment) return;
+      if (from && blocked.includes(from)) {
+        try {
+          gridNumberRegistry.logMessage({
+            direction: "blocked",
+            folder: "blocked",
+            peerId: from,
+            peerName: msg.user || msg.fromName || "Peer",
+            text,
+            attachment,
+            method: "mesh-app-bridge",
+            reason: "blocked_incoming_message",
+            refId: msg.id || undefined,
+            ts: msg.timestamp || msg.ts || Date.now(),
+          });
+        } catch {}
+        return;
+      }
       const row: SmsRow = {
         id: msg.id || String(Date.now()),
         peerId: from || "mesh",
@@ -1020,15 +1662,101 @@ export default function GridCaller({
         ts: msg.timestamp || msg.ts || Date.now(),
         mine: false,
         folder: "inbox",
+        attachment,
       };
       setSms((p) => (p.some((x) => x.id === row.id || (x.mine && x.text === text && Date.now() - x.ts < 3000)) ? p : [...p, row]));
+      try {
+        gridNumberRegistry.logMessage({
+          direction: "in",
+          folder: "inbox",
+          peerId: row.peerId,
+          peerName: row.name,
+          text: row.text,
+          attachment: row.attachment,
+          method: "mesh-app-bridge",
+          refId: row.id,
+          ts: row.ts,
+        });
+      } catch {}
     });
 
     // Directed mesh SMS only (never treat own send as inbound)
     const offMesh = MeshEngine.onMessage((msg: any) => {
-      if (msg?.type === "GRIDCALLER_SMS" && msg.data?.text) {
+      if (msg?.type === "GRID_GROUP_SYNC" && msg.data?.group) {
+        const g = msg.data.group;
+        const members = normalizeGroupMembers(g.members || []);
+        if (!members.some((m) => isAddressedToMe(m))) return;
+        const row: GroupChat = {
+          id: String(g.id || ""),
+          name: String(g.name || "Group").slice(0, 40),
+          members,
+          createdAt: Number(g.createdAt || Date.now()),
+          updatedAt: Number(g.updatedAt || Date.now()),
+        };
+        if (!row.id) return;
+        setGroupChats((prev) => {
+          const i = prev.findIndex((x) => x.id === row.id);
+          if (i < 0) return [row, ...prev].slice(0, 80);
+          const next = prev.slice();
+          next[i] = { ...next[i], ...row };
+          return next;
+        });
+      }
+
+      if (msg?.type === "GRID_GROUP_MESSAGE" && msg.data?.groupId) {
         if (!msg.from || msg.from === MeshEngine.localId) return;
-        if (blocked.includes(msg.from)) return;
+        const members = normalizeGroupMembers(msg.data.members || []);
+        if (members.length && !members.some((m: string) => isAddressedToMe(m))) return;
+        const row: GroupMessage = {
+          id: String(msg.data.id || `${msg.time || Date.now()}_${msg.from}`),
+          groupId: String(msg.data.groupId),
+          fromId: String(msg.from),
+          fromName: String(msg.data.fromName || msg.fromName || msg.from),
+          text: String(msg.data.text || ""),
+          ts: Number(msg.data.ts || msg.time || Date.now()),
+          mine: false,
+          attachment: msg.data.attachment || undefined,
+          system: !!msg.data.system,
+        };
+        setGroupMessages((prev) => (prev.some((x) => x.id === row.id) ? prev : [...prev, row].slice(-1200)));
+      }
+
+      if (msg?.type === "GRID_GROUP_CALL_INVITE" && msg.data?.groupId) {
+        if (!msg.from || msg.from === MeshEngine.localId) return;
+        const members = normalizeGroupMembers(msg.data.members || []);
+        if (!members.some((m: string) => isAddressedToMe(m))) return;
+        const sys: GroupMessage = {
+          id: `sys_${msg.time || Date.now()}_${msg.from}`,
+          groupId: String(msg.data.groupId),
+          fromId: String(msg.from),
+          fromName: String(msg.data.fromName || msg.fromName || msg.from),
+          text: `${msg.data.mode === "video" ? "Video" : "Voice"} call invite`,
+          ts: Number(msg.time || Date.now()),
+          mine: false,
+          system: true,
+        };
+        setGroupMessages((prev) => [...prev, sys].slice(-1200));
+      }
+
+      if (msg?.type === "GRIDCALLER_SMS" && (msg.data?.text || msg.data?.attachment)) {
+        if (!msg.from || msg.from === MeshEngine.localId) return;
+        if (blocked.includes(msg.from)) {
+          try {
+            gridNumberRegistry.logMessage({
+              direction: "blocked",
+              folder: "blocked",
+              peerId: msg.from,
+              peerName: msg.fromName || msg.data?.fromName || msg.from,
+              text: String(msg.data.text || ""),
+              attachment: msg.data.attachment || undefined,
+              method: "mesh-engine",
+              reason: "blocked_incoming_message",
+              refId: msg.data.id || msg.time || undefined,
+              ts: msg.time || Date.now(),
+            });
+          } catch {}
+          return;
+        }
         // If targeted, only accept when we are the recipient
         const to = msg.data?.to;
         if (to) {
@@ -1046,16 +1774,30 @@ export default function GridCaller({
           id: msg.data.id || msg.time || String(Date.now()),
           peerId: msg.from,
           name: msg.fromName || msg.data.fromName || msg.from,
-          text: msg.data.text,
+          text: String(msg.data.text || ""),
           ts: msg.time || Date.now(),
           mine: false,
           folder: "inbox",
+          attachment: msg.data.attachment || undefined,
         };
         setSms((p) =>
           p.some((x) => x.id === row.id || (x.mine && x.text === row.text && Date.now() - x.ts < 4000))
             ? p
             : [...p, row]
         );
+        try {
+          gridNumberRegistry.logMessage({
+            direction: "in",
+            folder: "inbox",
+            peerId: row.peerId,
+            peerName: row.name,
+            text: row.text,
+            attachment: row.attachment,
+            method: "mesh-engine",
+            refId: row.id,
+            ts: row.ts,
+          });
+        } catch {}
       }
     });
 
@@ -1128,7 +1870,21 @@ export default function GridCaller({
       softTowerHop.start(myName);
     } catch {}
     const offMsg = softTowerHop.onHopMessage((m) => {
-      if (blocked.includes(m.from)) return;
+      if (blocked.includes(m.from)) {
+        try {
+          gridNumberRegistry.logMessage({
+            direction: "blocked",
+            folder: "blocked",
+            peerId: m.from,
+            peerName: m.fromName || m.from,
+            text: m.text,
+            method: "soft-tower-hop",
+            reason: "blocked_incoming_message",
+            refId: m.id,
+          });
+        } catch {}
+        return;
+      }
       const row: SmsRow = {
         id: m.id,
         peerId: m.from,
@@ -1139,11 +1895,36 @@ export default function GridCaller({
         folder: "inbox",
       };
       setSms((p) => (p.some((x) => x.id === row.id) ? p : [...p, row]));
+      try {
+        gridNumberRegistry.logMessage({
+          direction: "in",
+          folder: "inbox",
+          peerId: row.peerId,
+          peerName: row.name,
+          text: row.text,
+          method: "soft-tower-hop",
+          refId: row.id,
+          ts: row.ts,
+        });
+      } catch {}
       setContactBusy(`Hop msg · ${m.hops} hops · ${m.fromName}`);
       setTimeout(() => setContactBusy(""), 2500);
     });
     const offCall = softTowerHop.onHopCallSignal((sig) => {
-      if (!sig || blocked.includes(sig.from)) return;
+      if (!sig) return;
+      if (blocked.includes(sig.from)) {
+        try {
+          gridNumberRegistry.logCall({
+            dir: "blocked",
+            peerId: sig.from,
+            peerName: sig.fromName || sig.from,
+            method: "soft-tower-hop",
+            reason: "blocked_incoming_call",
+            refId: sig.callId,
+          });
+        } catch {}
+        return;
+      }
       // Feed into local call path when invite arrives via hop fabric
       if (sig.action === "invite" || sig.type === "MESH_CALL_INVITE") {
         setCallPeer({ id: sig.from, name: sig.fromName || sig.from });
@@ -1333,6 +2114,38 @@ export default function GridCaller({
     };
   }, [myName, blocked, myGridDisplay]);
 
+  // Track movement speed/heading between peer location updates for radar UI.
+  useEffect(() => {
+    const now = Date.now();
+    const next = new Map(radarMotionRef.current);
+    const alive = new Set<string>();
+    for (const p of meshMapPeers) {
+      alive.add(p.id);
+      const prev = next.get(p.id);
+      let speedMps = 0;
+      let movedMeters = 0;
+      let bearingDeg = 0;
+      if (prev) {
+        movedMeters = calcDistanceMeters(prev, p);
+        const dt = Math.max(1, now - prev.at);
+        speedMps = (movedMeters * 1000) / dt;
+        bearingDeg = calcBearingDeg(prev, p);
+      }
+      next.set(p.id, {
+        lat: p.lat,
+        lng: p.lng,
+        at: now,
+        speedMps,
+        movedMeters,
+        bearingDeg,
+      });
+    }
+    for (const id of Array.from(next.keys())) {
+      if (!alive.has(id)) next.delete(id);
+    }
+    radarMotionRef.current = next;
+  }, [meshMapPeers]);
+
   // Leaflet map when menu map view open
   useEffect(() => {
     if (!menuOpen || menuView !== "map" || !mapBoxRef.current) return;
@@ -1408,109 +2221,53 @@ export default function GridCaller({
     return onlineCount;
   }, [peers, globalPeers, towerTick]);
 
-  const pushRecent = (item: RecentsItem) => {
-    setRecents((p) => [item, ...p].slice(0, 80));
+  const refreshIdentityUi = (snapshot = getLocalDeviceIdentity()) => {
+    setIdentityStatus(snapshot);
+    setGlobalHandle(snapshot.handle);
+    setMyGridDisplay(snapshot.displayNumber || resolveMyPublicNumber());
+    setSettingsPhone(snapshot.phone);
+    setSettingsDisplayNum(snapshot.displayNumber);
+    setSettingsCallerId(snapshot.peerId || S.get("mesh_id") || S.get("ga_mesh_id") || MeshEngine.localId || "");
   };
 
-  /**
-   * Save handle / number → storage + main header under GridCaller (always).
-   */
-  const applyHandleSave = (raw: string): { ok: boolean; display?: string; error?: string } => {
-    const h = String(raw || "").trim();
-    if (h.length < 2) return { ok: false, error: "Handle needs at least 2 characters" };
-    const digits = h.replace(/\D/g, "");
-    const looksPhone = digits.length >= 8 && digits.length <= 15;
-
-    if (looksPhone) {
-      S.set("user_phone", digits);
-      setSettingsPhone(digits);
-      const derived = rememberDeviceIdentity({ phone: digits, peerId: S.get("mesh_id", "") || S.get("gc_peer_id", "") || undefined });
-      S.set("global_call_handle", derived);
-      setGlobalHandle(derived);
-      const display = formatTestPhone(digits);
-      S.set("gc_test_display_number", display);
-      setMyGridDisplay(display);
-      setSettingsDisplayNum(display);
+  const syncIdentityFromDevice = async () => {
+    setIdentityBusy(true);
+    try {
+      const peerId = String(S.get("mesh_id", "") || S.get("ga_mesh_id", "") || S.get("gc_peer_id", "") || identityStatus.peerId || "").trim();
+      const snapshot = await syncLocalDeviceIdentity({ peerId });
+      if (peerId) {
+        S.set("mesh_id", peerId);
+        S.set("ga_mesh_id", peerId);
+        S.set("omni_node_id", peerId);
+      }
+      refreshIdentityUi(snapshot);
       try {
-        softTower.bindSimAlias(digits);
+        if (snapshot.phone) softTower.bindSimAlias(snapshot.phone);
       } catch {}
       try {
-        globalCall.setHandle?.(derived);
+        globalCall.setHandle?.(snapshot.handle);
       } catch {}
-    } else {
-      S.set("global_call_handle", h);
-      setGlobalHandle(h);
-      S.set("gc_test_display_number", h);
-      setMyGridDisplay(h);
-      setSettingsDisplayNum(h);
       try {
-        globalCall.setHandle?.(h);
+        meshComms.startPresence?.(myName, "user");
       } catch {}
+      setIdSaveMsg(snapshot.note);
+      setTimeout(() => setIdSaveMsg(""), 3200);
+      return { ok: true, display: snapshot.displayNumber, note: snapshot.note };
+    } catch (error: any) {
+      const message = error?.message || "Could not sync local device identity";
+      setIdSaveMsg(message);
+      setTimeout(() => setIdSaveMsg(""), 3200);
+      return { ok: false, error: message };
+    } finally {
+      setIdentityBusy(false);
     }
-
-    try {
-      meshComms.startPresence?.(myName, "user");
-    } catch {}
-    try {
-      softTowerHop.start(myName);
-    } catch {}
-
-    const shown = resolveMyPublicNumber();
-    setMyGridDisplay(shown);
-    return { ok: true, display: shown };
   };
 
-  /** Profile Save: phone field is the number shown on home */
+  /** Profile Save: only local profile/name is editable. Identity is device-locked. */
   const applyProfileSave = () => {
     const n = settingsName.trim() || "Me";
-    const id = settingsCallerId.trim().replace(/\s+/g, "_");
-    if (!id || id.length < 3) {
-      setIdSaveMsg("ID needs at least 3 characters");
-      return;
-    }
-    const phoneDigits = String(settingsPhone || "").replace(/\D/g, "");
     S.set("user_name", n);
     S.set("mesh_name", n);
-    S.set("mesh_id", id);
-    S.set("ga_mesh_id", id);
-    S.set("omni_node_id", id);
-    try {
-      (MeshEngine as any).localId = id;
-    } catch {}
-
-    if (phoneDigits.length >= 8) {
-      S.set("user_phone", phoneDigits);
-      const derived = rememberDeviceIdentity({ phone: phoneDigits, peerId: id });
-      S.set("global_call_handle", derived);
-      setGlobalHandle(derived);
-      const display = formatTestPhone(phoneDigits);
-      S.set("gc_test_display_number", display);
-      setMyGridDisplay(display);
-      setSettingsDisplayNum(display);
-      try {
-        softTower.bindSimAlias(phoneDigits);
-      } catch {}
-      try {
-        globalCall.setHandle?.(derived);
-      } catch {}
-    } else {
-      S.set("user_phone", "");
-      const disp = settingsDisplayNum.trim() || globalHandle.trim();
-      if (disp) {
-        const d = disp.replace(/\D/g, "");
-        if (d.length >= 8) {
-          applyHandleSave(d);
-        } else {
-          S.set("gc_test_display_number", disp);
-          setMyGridDisplay(disp);
-          S.set("global_call_handle", disp);
-          setGlobalHandle(disp);
-        }
-      } else {
-        S.set("gc_test_display_number", "");
-        setMyGridDisplay("");
-      }
-    }
 
     try {
       MeshEngine.setName?.(n);
@@ -1519,47 +2276,10 @@ export default function GridCaller({
       meshComms.startPresence?.(n, "user");
     } catch {}
 
-    const shown = resolveMyPublicNumber();
-    setMyGridDisplay(shown);
-    setIdSaveMsg(`Saved · home shows ${shown || "—"}`);
+    const shown = getImmutableDisplayNumber() || resolveMyPublicNumber();
+    refreshIdentityUi();
+    setIdSaveMsg(`Saved · device identity stays ${shown || "—"}`);
     setTimeout(() => setIdSaveMsg(""), 3000);
-  };
-
-  const clearCallLogs = () => {
-    if (recents.length === 0) {
-      setContactBusy("No call logs to clear");
-      setTimeout(() => setContactBusy(""), 1500);
-      return;
-    }
-    if (!confirm(`Clear all ${recents.length} call log(s)?`)) return;
-    setRecents([]);
-    S.set("gridcaller_recents", []);
-    setContactBusy("All call logs cleared");
-    setTimeout(() => setContactBusy(""), 2000);
-  };
-
-  const deleteCallLog = (id: string) => {
-    if (!id) return;
-    if (!confirm("Delete this call log?")) return;
-    setRecents((p) => {
-      const next = p.filter((r) => r.id !== id);
-      S.set("gridcaller_recents", next);
-      return next;
-    });
-    setContactBusy("Call log deleted");
-    setTimeout(() => setContactBusy(""), 1500);
-  };
-
-  const deleteCallLogGroup = (peerId: string) => {
-    if (!peerId) return;
-    if (!confirm("Delete this call log group?")) return;
-    setRecents((p) => {
-      const next = p.filter((r) => r.peerId !== peerId);
-      S.set("gridcaller_recents", next);
-      return next;
-    });
-    setContactBusy("Call log group deleted");
-    setTimeout(() => setContactBusy(""), 1500);
   };
 
   const clearAllMessages = () => {
@@ -1621,6 +2341,215 @@ export default function GridCaller({
     });
     setContactBusy(folder === "trash" ? "Message moved to trash" : "Message deleted");
     setTimeout(() => setContactBusy(""), 1500);
+  };
+
+  const parseGroupMemberTokens = (raw: string) =>
+    Array.from(new Set(raw.split(/[,\n]/).map((x) => x.trim()).filter(Boolean))).slice(0, 63);
+
+  const createGroupChat = () => {
+    const name = String(groupNameInput || "").trim();
+    if (!name) {
+      setErr("Group name required");
+      return;
+    }
+    const members = normalizeGroupMembers(parseGroupMemberTokens(groupMembersInput));
+    if (members.length < 2) {
+      setErr("Add at least one member ID/number/handle");
+      return;
+    }
+    const row: GroupChat = {
+      id: `grp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      name: name.slice(0, 40),
+      members,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    setGroupChats((prev) => [row, ...prev.filter((g) => g.id !== row.id)].slice(0, 80));
+    setGroupViewId(row.id);
+    setGroupNameInput("");
+    setGroupMembersInput("");
+    setContactBusy(`Group created: ${row.name}`);
+    setTimeout(() => setContactBusy(""), 1800);
+    try {
+      MeshEngine.broadcast("GRID_GROUP_SYNC", { group: row });
+    } catch {}
+  };
+
+  const sendGroupMessage = (
+    groupId: string,
+    text: string,
+    attachment?: GroupAttachment,
+    system = false
+  ) => {
+    const g = groupChats.find((x) => x.id === groupId);
+    if (!g) return;
+    const body = String(text || "").trim();
+    if (!body && !attachment) return;
+    const row: GroupMessage = {
+      id: `gmsg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      groupId,
+      fromId: MeshEngine.localId,
+      fromName: myName,
+      text: body,
+      ts: Date.now(),
+      mine: true,
+      attachment,
+      system,
+    };
+    setGroupMessages((prev) => [...prev, row].slice(-1200));
+    setGroupDraft("");
+    try {
+      MeshEngine.broadcast("GRID_GROUP_MESSAGE", {
+        id: row.id,
+        groupId,
+        fromName: myName,
+        text: row.text,
+        ts: row.ts,
+        members: g.members,
+        attachment: row.attachment,
+        system,
+      });
+    } catch {}
+  };
+
+  const shareGroupLocation = (groupId: string) => {
+    if (!myGps) {
+      setErr("Location not ready yet");
+      return;
+    }
+    sendGroupMessage(groupId, `Shared location: ${myGps.lat.toFixed(5)}, ${myGps.lng.toFixed(5)}`, {
+      kind: "location",
+      name: "Live location",
+      lat: myGps.lat,
+      lng: myGps.lng,
+    });
+  };
+
+  const shareGroupFile = (groupId: string, file: File) => {
+    const maxBytes = 2.5 * 1024 * 1024;
+    if (file.size > maxBytes) {
+      setErr("File too large. Max 2.5MB for mesh share.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result || "");
+      if (!dataUrl) return;
+      const mime = file.type || "application/octet-stream";
+      const kind: GroupAttachmentKind = mime.startsWith("image/")
+        ? "image"
+        : mime.startsWith("audio/")
+          ? "audio"
+          : mime.startsWith("video/")
+            ? "video"
+            : /pdf|word|excel|sheet|text|json|xml|zip/.test(mime)
+              ? "document"
+              : "file";
+      sendGroupMessage(groupId, `Shared ${file.name}`, {
+        kind,
+        name: file.name,
+        mime,
+        size: file.size,
+        dataUrl,
+      });
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const sendGridchatContactCard = (groupId: string) => {
+    const contactName = String(prompt("Contact name") || "").trim();
+    if (!contactName) return;
+    const contactNumber = String(prompt("Contact number or handle") || "").trim();
+    if (!contactNumber) return;
+    sendGroupMessage(groupId, `Contact shared\nName: ${contactName}\nID/Phone: ${contactNumber}`);
+  };
+
+  const sendGridchatPoll = (groupId: string) => {
+    const question = String(prompt("Poll question") || "").trim();
+    if (!question) return;
+    const optionsRaw = String(prompt("Poll options (comma separated)", "Yes, No") || "").trim();
+    const options = optionsRaw
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .slice(0, 6);
+    const lines = options.length ? options.map((op, i) => `${i + 1}. ${op}`).join("\n") : "1. Yes\n2. No";
+    sendGroupMessage(groupId, `Poll\n${question}\n${lines}`);
+  };
+
+  const sendGridchatEvent = (groupId: string) => {
+    const title = String(prompt("Event title") || "").trim();
+    if (!title) return;
+    const when = String(prompt("Date & time", new Date().toLocaleString()) || "").trim();
+    const place = String(prompt("Event place (optional)") || "").trim();
+    sendGroupMessage(groupId, `Event\n${title}${when ? `\nWhen: ${when}` : ""}${place ? `\nWhere: ${place}` : ""}`);
+  };
+
+  const sendGridchatSticker = (groupId: string) => {
+    const stickers = ["😀", "🔥", "💚", "🎉", "👍", "🙏", "⚡", "🚀", "📶", "🛰️"];
+    const pick = stickers[Math.floor(Math.random() * stickers.length)] || "😀";
+    sendGroupMessage(groupId, `Sticker ${pick}`);
+  };
+
+  const runGridchatAttachAction = (groupId: string, action: "document" | "photos" | "camera" | "audio" | "contact" | "poll" | "event" | "sticker") => {
+    setGroupAttachMenuOpen(false);
+    if (action === "document") {
+      groupDocumentInputRef.current?.click();
+      return;
+    }
+    if (action === "photos") {
+      groupMediaInputRef.current?.click();
+      return;
+    }
+    if (action === "camera") {
+      groupCameraInputRef.current?.click();
+      return;
+    }
+    if (action === "audio") {
+      groupAudioInputRef.current?.click();
+      return;
+    }
+    if (action === "contact") {
+      sendGridchatContactCard(groupId);
+      return;
+    }
+    if (action === "poll") {
+      sendGridchatPoll(groupId);
+      return;
+    }
+    if (action === "event") {
+      sendGridchatEvent(groupId);
+      return;
+    }
+    sendGridchatSticker(groupId);
+  };
+
+  const startGroupCall = async (groupId: string, mode: "audio" | "video") => {
+    const g = groupChats.find((x) => x.id === groupId);
+    if (!g) return;
+    const targets = g.members.filter((m) => !isAddressedToMe(m) && !blocked.includes(m));
+    if (!targets.length) {
+      setErr("No valid members to call");
+      return;
+    }
+    const primary = targets[0];
+    await placeCall(primary, primary);
+    if (mode === "video") {
+      setTimeout(() => {
+        void toggleVideoCall().catch(() => {});
+      }, 900);
+    }
+    const note = `${mode === "video" ? "Video" : "Voice"} group call started by ${myName}`;
+    sendGroupMessage(groupId, note, undefined, true);
+    try {
+      MeshEngine.broadcast("GRID_GROUP_CALL_INVITE", {
+        groupId,
+        mode,
+        fromName: myName,
+        members: g.members,
+        ts: Date.now(),
+      });
+    } catch {}
   };
 
   /** Resolve handle / phone / id → mesh peer id (critical for handshake calls) */
@@ -1760,8 +2689,20 @@ export default function GridCaller({
             text: bodyText || r.message || "SMS",
             ts: Date.now(),
             mine: true,
+            folder: "sent",
           },
         ]);
+        try {
+          gridNumberRegistry.logMessage({
+            direction: "out",
+            folder: "sent",
+            peerNumber: n,
+            peerName: n,
+            text: bodyText || r.message || "SMS",
+            method: r.provider || r.path || "pstn-sms",
+            refId: id,
+          });
+        } catch {}
         setContactBusy(
           r.path === "pstn" && !r.dryRun
             ? `SMS sent via network → ${r.to}`
@@ -1786,6 +2727,9 @@ export default function GridCaller({
     if (!peerId) return;
     setBlocked((b) => (b.includes(peerId) ? b : [...b, peerId]));
     try {
+      gridNumberRegistry.logBlock({ peerId, peerName: name, action: "blocked", reason: "user_blocked_contact" });
+    } catch {}
+    try {
       contactsVault.upsert({
         name: name || peerId.slice(0, 12),
         peerId,
@@ -1803,6 +2747,9 @@ export default function GridCaller({
 
   const unblockCaller = (peerId: string) => {
     setBlocked((b) => b.filter((x) => x !== peerId));
+    try {
+      gridNumberRegistry.logBlock({ peerId, action: "unblocked", reason: "user_unblocked_contact" });
+    } catch {}
     setContactBusy("Unblocked");
     setTimeout(() => setContactBusy(""), 2000);
   };
@@ -1839,6 +2786,15 @@ export default function GridCaller({
 
   const placeCall = async (peerId: string, name: string) => {
     if (blocked.includes(peerId)) {
+      try {
+        gridNumberRegistry.logCall({
+          dir: "blocked",
+          peerId,
+          peerName: name,
+          method: "gridcaller",
+          reason: "user_blocked_contact",
+        });
+      } catch {}
       setErr("This contact is blocked");
       return;
     }
@@ -1890,24 +2846,25 @@ export default function GridCaller({
           setCallMethod(
             r.dryRun
               ? r.path === "tel"
-                ? "OS dialer opened (no Twilio). For free mesh: other phone must run GridCaller + appear ONLINE."
-                : `PSTN dry-run → ${r.to}`
-              : `PSTN ringing ${r.to} · ${r.provider}`
+                ? "Phone call · OS dialer opened (no Twilio). For free mesh: other phone must run GridCaller + appear ONLINE."
+                : `Phone call · PSTN dry-run → ${r.to}`
+              : `Phone call · PSTN ringing ${r.to} · ${r.provider}`
           );
           if (r.path === "pstn" && !r.dryRun) {
             setPhase("active");
             startedAt.current = Date.now();
           }
-          pushRecent({
-            id: `r_${Date.now()}`,
-            peerId: dialTo,
-            name: name || dialTo,
-            dir: "out",
-            ts: Date.now(),
-            duration: 0,
-            method: r.provider || "pstn",
-          });
           if (r.path === "tel" || r.dryRun) {
+            try {
+              gridNumberRegistry.logCall({
+                dir: "out",
+                peerId: dialTo,
+                peerNumber: dialTo,
+                peerName: name || dialTo,
+                method: r.path === "tel" ? "phone call · tel" : `phone call · ${r.provider || r.path || "pstn-dry-run"}`,
+                reason: r.dryRun ? "dry-run" : "opened-os-dialer",
+              });
+            } catch {}
             setTimeout(() => {
               setPhase("idle");
               setCallPeer(null);
@@ -1952,13 +2909,6 @@ export default function GridCaller({
         pcRef.current = sc.pc;
         setCallMethod("Connected");
         setErr("");
-        gridNumberRegistry.logCall({
-          dir: "out",
-          peerNumber: sc.virtualNumber || peerId,
-          peerName: sc.toName || name,
-          peerId: sc.toId || peerId,
-          method: "gridalive",
-        });
         setTimeout(() => {
           if (pcRef.current?.connectionState === "connected") {
             setPhase("active");
@@ -2188,6 +3138,15 @@ export default function GridCaller({
     }
   };
 
+  const startDirectHeaderCall = async (peerId: string, name: string, mode: "audio" | "video") => {
+    await placeCall(peerId, name || peerId);
+    if (mode === "video") {
+      setTimeout(() => {
+        void toggleVideoCall().catch(() => {});
+      }, 900);
+    }
+  };
+
   // Call signaling: kernel/callSession (always-on). UI synced via onCallUi.
   useEffect(() => {
     startCallSession();
@@ -2206,21 +3165,12 @@ export default function GridCaller({
       globalCall.hangup();
     } catch {}
     if (peer) {
-      let dir: RecentsItem["dir"] = "out";
+      let dir: "in" | "out" | "missed" = "out";
       if (reason === "missed" || reason === "reject" || reason === "no-answer" || (ph === "incoming" && dur === 0))
         dir = "missed";
       else if (ph === "incoming" || isIncoming) dir = "in";
       else if (ph === "outgoing" && dur === 0) dir = "out";
       else if (ph === "active") dir = isIncoming ? "in" : "out";
-      pushRecent({
-        id: String(Date.now()),
-        peerId: peer.id,
-        name: peer.name,
-        dir,
-        ts: Date.now(),
-        duration: dur,
-        method: callMethod || reason,
-      });
       try {
         gridNumberRegistry.logCall({
           dir: dir === "missed" ? "missed" : dir === "in" ? "in" : "out",
@@ -2247,9 +3197,9 @@ export default function GridCaller({
     });
   };
 
-  const sendSms = (peerId: string, name: string, text: string) => {
+  const sendSms = (peerId: string, name: string, text: string, attachment?: GroupAttachment) => {
     const t = text.trim();
-    if (!t) return;
+    if (!t && !attachment) return;
     void (async () => {
       // Resolve handle/phone → mesh id (same as call)
       let toId = peerId.trim();
@@ -2261,13 +3211,42 @@ export default function GridCaller({
           toName = name || hit.name;
         }
       } catch {}
+      if (blocked.includes(toId) || blocked.includes(peerId)) {
+        try {
+          gridNumberRegistry.logMessage({
+            direction: "blocked",
+            folder: "blocked",
+            peerId: toId || peerId,
+            peerName: toName || name,
+            text: t,
+            attachment,
+            method: "gridcaller-mesh-sms",
+            reason: "user_blocked_contact",
+          });
+        } catch {}
+        setErr("This contact is blocked");
+        return;
+      }
       if (isSelfPeer(toId) || isSelfPeer(peerId)) {
         setErr("Cannot message yourself — dial the other number (9503154355 ↔ 9284048967)");
         return;
       }
       const id = `sms_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-      const row: SmsRow = { id, peerId: toId, name: toName, text: t, ts: Date.now(), mine: true, folder: "sent" };
+      const row: SmsRow = { id, peerId: toId, name: toName, text: t, ts: Date.now(), mine: true, folder: "sent", attachment };
       setSms((p) => [...p, row]);
+      try {
+        gridNumberRegistry.logMessage({
+          direction: "out",
+          folder: "sent",
+          peerId: row.peerId,
+          peerName: row.name,
+          text: row.text,
+          attachment: row.attachment,
+          method: "gridcaller-mesh-sms",
+          refId: row.id,
+          ts: row.ts,
+        });
+      } catch {}
       // Single directed path only — no walkie flood (that was self-echo)
       try {
         MeshEngine.broadcast("GRIDCALLER_SMS", {
@@ -2275,6 +3254,7 @@ export default function GridCaller({
           text: t,
           fromName: myName,
           to: toId,
+          attachment,
           handle: S.get("global_call_handle", "") || "",
           phone: S.get("user_phone", "") || "",
         });
@@ -2286,70 +3266,6 @@ export default function GridCaller({
   };
 
   const blockedPeersSet = useMemo(() => new Set(blocked), [blocked]);
-
-  const callLogCounts = useMemo(() => {
-    let missed = 0;
-    let incoming = 0;
-    let outgoing = 0;
-    let blockedCount = 0;
-    for (const r of recents) {
-      if (r.dir === "missed") missed++;
-      else if (r.dir === "in") incoming++;
-      else outgoing++;
-      const isBlockedLog = blockedPeersSet.has(r.peerId) || contacts.some((c) => c.peerId === r.peerId && c.spam);
-      if (isBlockedLog) blockedCount++;
-    }
-    return { all: recents.length, missed, incoming, outgoing, blocked: blockedCount };
-  }, [recents, blockedPeersSet, contacts]);
-
-  const groupedCallLogs = useMemo(() => {
-    const qq = q.trim().toLowerCase();
-    const byKey = new Map<string, { key: string; peerId: string; name: string; entries: RecentsItem[] }>();
-
-    for (const entry of recents) {
-      const key = callLogGroupKey(entry.peerId, entry.name);
-      const existing = byKey.get(key);
-      if (existing) existing.entries.push(entry);
-      else byKey.set(key, { key, peerId: entry.peerId, name: entry.name, entries: [entry] });
-    }
-
-    const groups = Array.from(byKey.values())
-      .map((group) => {
-        const sortedEntries = [...group.entries].sort((a, b) => b.ts - a.ts);
-        const blocked = blockedPeersSet.has(group.peerId) || contacts.some((c) => c.peerId === group.peerId && c.spam);
-        const missedCount = sortedEntries.filter((e) => e.dir === "missed").length;
-        const incomingCount = sortedEntries.filter((e) => e.dir === "in").length;
-        const outgoingCount = sortedEntries.filter((e) => e.dir !== "missed" && e.dir !== "in").length;
-        const lastEntry = sortedEntries[0];
-        return {
-          key: group.key,
-          peerId: group.peerId,
-          name: group.name,
-          displayName: group.name || group.peerId,
-          entries: sortedEntries,
-          missedCount,
-          incomingCount,
-          outgoingCount,
-          totalCount: sortedEntries.length,
-          blocked,
-          lastEntry,
-        };
-      })
-      .sort((a, b) => (b.lastEntry?.ts || 0) - (a.lastEntry?.ts || 0));
-
-    return groups.filter((group) => {
-      if (callLogFilter === "missed" && group.missedCount === 0) return false;
-      if (callLogFilter === "in" && group.incomingCount === 0) return false;
-      if (callLogFilter === "out" && group.outgoingCount === 0) return false;
-      if (callLogFilter === "blocked" && !group.blocked) return false;
-
-      if (!qq) return true;
-      const hay = `${group.displayName} ${group.peerId} ${group.entries.map((e) => e.method).join(" ")} ${group.entries
-        .map((e) => callLogDirectionLabel(e.dir))
-        .join(" ")}`.toLowerCase();
-      return hay.includes(qq) || (qq === "miss" && group.missedCount > 0) || (qq === "in" && group.incomingCount > 0) || (qq === "out" && group.outgoingCount > 0);
-    });
-  }, [recents, q, callLogFilter, blockedPeersSet, contacts]);
 
   const filteredPeers = useMemo(() => {
     const qq = q.trim().toLowerCase();
@@ -2451,8 +3367,7 @@ export default function GridCaller({
     if (res.ok) {
       setContactBusy(`Imported ${res.count} contact${res.count === 1 ? "" : "s"} from device`);
     } else {
-      setContactBusy(res.error || "Device import unavailable");
-      if (res.error && !/cancel/i.test(res.error)) setErr(res.error);
+      setContactBusy(res.error || "Import cancelled");
     }
     setTimeout(() => setContactBusy(""), 3500);
   };
@@ -2517,6 +3432,889 @@ export default function GridCaller({
     if (!thread) return [];
     return sms.filter((m) => m.peerId === thread && folderMatches(m, messageFolder)).sort((a, b) => a.ts - b.ts);
   }, [sms, thread, messageFolder]);
+
+  const activeGroup = useMemo(() => groupChats.find((g) => g.id === groupViewId) || null, [groupChats, groupViewId]);
+  const activeGroupMsgs = useMemo(
+    () => (groupViewId ? groupMessages.filter((m) => m.groupId === groupViewId).sort((a, b) => a.ts - b.ts) : []),
+    [groupMessages, groupViewId]
+  );
+  const visibleGroupMsgs = useMemo(() => {
+    let rows = activeGroupMsgs;
+    if (groupShowStarredOnly) rows = rows.filter((m) => starredMessageIds.includes(m.id));
+    const qx = groupSearchQuery.trim().toLowerCase();
+    if (qx) rows = rows.filter((m) => `${m.fromName} ${m.text} ${m.attachment?.name || ""}`.toLowerCase().includes(qx));
+    return rows;
+  }, [activeGroupMsgs, groupSearchQuery, groupShowStarredOnly, starredMessageIds]);
+
+  const gridchatItems = useMemo(() => {
+    const peerNameById = new Map<string, { name: string; online: boolean }>();
+    for (const p of [...peers, ...globalPeers]) {
+      const prev = peerNameById.get(p.id);
+      if (!prev) peerNameById.set(p.id, { name: p.name || p.id, online: !!p.online });
+      else if (p.online) peerNameById.set(p.id, { name: prev.name || p.name || p.id, online: true });
+    }
+
+    const directLatest = new Map<string, SmsRow>();
+    const directUnread = new Map<string, number>();
+    for (const row of sms) {
+      if (row.folder === "trash" || row.folder === "deleted") continue;
+      const key = `d:${row.peerId}`;
+      const prev = directLatest.get(row.peerId);
+      if (!prev || row.ts > prev.ts) directLatest.set(row.peerId, row);
+      if (!row.mine && row.ts > Number(gridchatLastSeen[key] || 0)) {
+        directUnread.set(row.peerId, (directUnread.get(row.peerId) || 0) + 1);
+      }
+    }
+
+    const groupLatest = new Map<string, GroupMessage>();
+    const groupUnread = new Map<string, number>();
+    for (const row of groupMessages) {
+      const key = `g:${row.groupId}`;
+      const prev = groupLatest.get(row.groupId);
+      if (!prev || row.ts > prev.ts) groupLatest.set(row.groupId, row);
+      if (!row.mine && row.ts > Number(gridchatLastSeen[key] || 0)) {
+        groupUnread.set(row.groupId, (groupUnread.get(row.groupId) || 0) + 1);
+      }
+    }
+
+    const out: {
+      id: string;
+      kind: "group" | "direct";
+      name: string;
+      alias: string;
+      preview: string;
+      ts: number;
+      unread: number;
+      favourite: boolean;
+      muted: boolean;
+      online: boolean;
+      peerId?: string;
+      groupId?: string;
+      memberInfo: string;
+      mediaIcon: "text" | "photo" | "audio" | "video" | "doc" | "location";
+    }[] = [];
+
+    for (const g of groupChats) {
+      const last = groupLatest.get(g.id);
+      const preview = last?.text?.trim() || summarizeGroupAttachment(last?.attachment) || "Group created";
+      let mediaIcon: "text" | "photo" | "audio" | "video" | "doc" | "location" = "text";
+      if (last?.attachment?.kind === "image") mediaIcon = "photo";
+      else if (last?.attachment?.kind === "audio") mediaIcon = "audio";
+      else if (last?.attachment?.kind === "video") mediaIcon = "video";
+      else if (last?.attachment?.kind === "location") mediaIcon = "location";
+      else if (last?.attachment) mediaIcon = "doc";
+      const unread = groupUnread.get(g.id) || 0;
+      const rowId = `g:${g.id}`;
+      out.push({
+        id: rowId,
+        kind: "group",
+        name: g.name,
+        alias: gridchatAlias(g.name, g.id),
+        preview,
+        ts: Math.max(last?.ts || 0, g.updatedAt || g.createdAt || 0),
+        unread,
+        favourite: gridchatFavourites.includes(rowId),
+        muted: gridchatMuted.includes(rowId),
+        online: g.members.some((m) => peerNameById.get(m)?.online),
+        groupId: g.id,
+        memberInfo: `${g.members.length} members`,
+        mediaIcon,
+      });
+    }
+
+    const knownDirectIds = new Set<string>([...directLatest.keys(), ...peerNameById.keys()]);
+    for (const pid of knownDirectIds) {
+      const last = directLatest.get(pid);
+      const fallback = peerNameById.get(pid);
+      const name = last?.name || fallback?.name || pid;
+      const preview = last?.text?.trim() || "Tap to start Gridchat";
+      const rowId = `d:${pid}`;
+      out.push({
+        id: rowId,
+        kind: "direct",
+        name,
+        alias: gridchatAlias(name, pid),
+        preview,
+        ts: last?.ts || 0,
+        unread: directUnread.get(pid) || 0,
+        favourite: gridchatFavourites.includes(rowId),
+        muted: gridchatMuted.includes(rowId),
+        online: !!fallback?.online,
+        peerId: pid,
+        memberInfo: fallback?.online ? "online on mesh" : "offline",
+        mediaIcon: "text",
+      });
+    }
+
+    const qx = gridchatSearch.trim().toLowerCase();
+    return out
+      .filter((row) => {
+        if (gridchatFilter === "unread" && row.unread === 0) return false;
+        if (gridchatFilter === "favourites" && !row.favourite) return false;
+        if (!qx) return true;
+        const hay = `${row.alias} ${row.name} ${row.preview}`.toLowerCase();
+        return hay.includes(qx);
+      })
+      .sort((a, b) => {
+        const fav = Number(b.favourite) - Number(a.favourite);
+        if (fav) return fav;
+        if (b.ts !== a.ts) return b.ts - a.ts;
+        return a.alias.localeCompare(b.alias);
+      });
+  }, [groupChats, groupMessages, globalPeers, gridchatFavourites, gridchatFilter, gridchatLastSeen, gridchatMuted, gridchatSearch, peers, sms]);
+
+  const gridchatUnreadTotal = useMemo(() => gridchatItems.reduce((acc, row) => acc + row.unread, 0), [gridchatItems]);
+
+  const gridchatStatusUsers = useMemo(() => {
+    const activityById = new Map<string, number>();
+    for (const m of sms) {
+      const prev = activityById.get(m.peerId) || 0;
+      if (m.ts > prev) activityById.set(m.peerId, m.ts);
+    }
+    for (const gm of groupMessages) {
+      if (!gm.fromId) continue;
+      const prev = activityById.get(gm.fromId) || 0;
+      if (gm.ts > prev) activityById.set(gm.fromId, gm.ts);
+    }
+
+    const byId = new Map<string, { id: string; name: string; alias: string; online: boolean; lastTs: number }>();
+    for (const p of [...peers, ...globalPeers]) {
+      const id = String(p.id || "").trim();
+      if (!id) continue;
+      const prev = byId.get(id);
+      const name = p.name || id;
+      const alias = gridchatAlias(name, id);
+      const lastTs = activityById.get(id) || Number(gridchatLastSeen[`d:${id}`] || 0);
+      if (!prev) {
+        byId.set(id, { id, name, alias, online: !!p.online, lastTs });
+      } else {
+        byId.set(id, {
+          id,
+          name: prev.name || name,
+          alias: prev.alias || alias,
+          online: prev.online || !!p.online,
+          lastTs: Math.max(prev.lastTs, lastTs),
+        });
+      }
+    }
+
+    return Array.from(byId.values())
+      .sort((a, b) => {
+        const on = Number(b.online) - Number(a.online);
+        if (on) return on;
+        if (b.lastTs !== a.lastTs) return b.lastTs - a.lastTs;
+        return a.alias.localeCompare(b.alias);
+      })
+      .slice(0, 30);
+  }, [globalPeers, gridchatLastSeen, groupMessages, peers, sms]);
+
+  const toggleGridchatFavourite = (rowId: string) => {
+    setGridchatFavourites((prev) => (prev.includes(rowId) ? prev.filter((id) => id !== rowId) : [rowId, ...prev].slice(0, 300)));
+  };
+
+  const toggleGridchatMuted = (rowId: string) => {
+    setGridchatMuted((prev) => (prev.includes(rowId) ? prev.filter((id) => id !== rowId) : [rowId, ...prev].slice(0, 300)));
+  };
+
+  const setMyGridchatStatus = () => {
+    const current = String(gridchatMyStatusText || "").trim();
+    const next = String(prompt("Set your status", current || "Available on mesh") || "").trim();
+    if (!next) return;
+    setGridchatMyStatusText(next.slice(0, 120));
+    setGridchatMyStatusAt(Date.now());
+    setGridchatStatusSettingsOpen(false);
+    setContactBusy("Status updated");
+    setTimeout(() => setContactBusy(""), 1500);
+  };
+
+  const clearMyGridchatStatus = () => {
+    setGridchatMyStatusText("");
+    setGridchatMyStatusAt(0);
+    setGridchatStatusSettingsOpen(false);
+  };
+
+  const setGridchatPrivacySetting = () => {
+    const current = gridchatStatusPrivacy;
+    const next = String(prompt("Status privacy: everyone / contacts / nobody", current) || "").trim().toLowerCase();
+    if (next === "everyone" || next === "contacts" || next === "nobody") {
+      setGridchatStatusPrivacy(next);
+      setGridchatStatusSettingsOpen(false);
+      return;
+    }
+    setErr("Use: everyone, contacts, or nobody");
+  };
+
+  const applyGridchatStatusTemplate = () => {
+    const templates = [
+      "Available on mesh",
+      "In call, text me",
+      "Patrol mode active",
+      "Low battery, async only",
+      "Signal weak, keep brief",
+      "On route, will reply",
+    ];
+    const choose = String(prompt(`Status template:\n${templates.join("\n")}`, templates[0]) || "").trim();
+    if (!choose) return;
+    setGridchatMyStatusText(choose.slice(0, 120));
+    setGridchatMyStatusAt(Date.now());
+    setGridchatStatusSettingsOpen(false);
+    setContactBusy("Template applied");
+    setTimeout(() => setContactBusy(""), 1200);
+  };
+
+  const setGridchatStatusAutoClear = () => {
+    const current = gridchatStatusAutoClearHours;
+    const raw = String(prompt("Auto-clear status (hours): 0, 4, 8, 12, 24, 48", String(current)) || "").trim();
+    const next = Number(raw);
+    if (!Number.isFinite(next) || next < 0 || next > 168) {
+      setErr("Use 0-168 hours");
+      return;
+    }
+    setGridchatStatusAutoClearHours(Math.floor(next));
+    setGridchatStatusSettingsOpen(false);
+  };
+
+  const setGridchatStatusRing = () => {
+    const current = gridchatStatusRingColor;
+    const next = String(prompt("Status ring color: blue / green / orange / red", current) || "").trim().toLowerCase();
+    if (next === "blue" || next === "green" || next === "orange" || next === "red") {
+      setGridchatStatusRingColor(next);
+      setGridchatStatusSettingsOpen(false);
+      return;
+    }
+    setErr("Use: blue, green, orange, red");
+  };
+
+  const toggleGridchatStatusStealth = () => {
+    setGridchatStatusStealthMode((prev) => !prev);
+    setGridchatStatusSettingsOpen(false);
+  };
+
+  const archiveMyGridchatStatus = () => {
+    const text = String(gridchatMyStatusText || "").trim();
+    if (!text) {
+      setErr("No status to archive");
+      return;
+    }
+    setGridchatStatusArchive((prev) => [{ text: text.slice(0, 120), at: gridchatMyStatusAt || Date.now() }, ...prev].slice(0, 24));
+    setGridchatStatusSettingsOpen(false);
+  };
+
+  const restoreLastArchivedGridchatStatus = () => {
+    const last = gridchatStatusArchive[0];
+    if (!last) {
+      setErr("Archive empty");
+      return;
+    }
+    setGridchatMyStatusText(String(last.text || "").slice(0, 120));
+    setGridchatMyStatusAt(Date.now());
+    setGridchatStatusSettingsOpen(false);
+  };
+
+  const copyMyGridchatStatusLine = () => {
+    const line = `${myName || "Me"} status: ${gridchatMyStatusText || "Available on mesh"}`;
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(line).then(
+        () => {
+          setContactBusy("Status line copied");
+          setTimeout(() => setContactBusy(""), 1200);
+        },
+        () => {
+          setErr("Copy failed");
+        },
+      );
+    } else {
+      setErr("Clipboard unavailable");
+    }
+    setGridchatStatusSettingsOpen(false);
+  };
+
+  const sendDirectQuickText = (peerId: string, peerName: string, text: string) => {
+    const body = String(text || "").trim();
+    if (!body) return;
+    sendSms(peerId, peerName, body);
+    setSmsDraft("");
+    setDirectAttachMenuOpen(false);
+  };
+
+  const shareDirectFile = (peerId: string, peerName: string, file: File) => {
+    if (!file) return;
+    const maxBytes = 2.5 * 1024 * 1024;
+    if (file.size > maxBytes) {
+      setErr("File too large. Max 2.5MB for mesh share.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result || "");
+      if (!dataUrl) return;
+      const mime = file.type || "application/octet-stream";
+      const kind: GroupAttachmentKind = mime.startsWith("image/")
+        ? "image"
+        : mime.startsWith("audio/")
+          ? "audio"
+          : mime.startsWith("video/")
+            ? "video"
+            : /pdf|word|excel|sheet|text|json|xml|zip/.test(mime)
+              ? "document"
+              : "file";
+      sendSms(peerId, peerName, `Shared ${file.name}`, {
+        kind,
+        name: file.name,
+        mime,
+        size: file.size,
+        dataUrl,
+      });
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const runDirectAttachAction = (peerId: string, peerName: string, action: "document" | "photos" | "camera" | "audio" | "contact" | "poll" | "event" | "sticker") => {
+    if (action === "document") {
+      setDirectAttachMenuOpen(false);
+      directDocumentInputRef.current?.click();
+      return;
+    }
+    if (action === "photos") {
+      setDirectAttachMenuOpen(false);
+      directMediaInputRef.current?.click();
+      return;
+    }
+    if (action === "camera") {
+      setDirectAttachMenuOpen(false);
+      directCameraInputRef.current?.click();
+      return;
+    }
+    if (action === "audio") {
+      setDirectAttachMenuOpen(false);
+      directAudioInputRef.current?.click();
+      return;
+    }
+    if (action === "contact") {
+      const contactName = String(prompt("Contact name") || "").trim();
+      if (!contactName) return;
+      const contactNumber = String(prompt("Contact number or handle") || "").trim();
+      if (!contactNumber) return;
+      sendDirectQuickText(peerId, peerName, `Contact shared\nName: ${contactName}\nID/Phone: ${contactNumber}`);
+      return;
+    }
+    if (action === "poll") {
+      const question = String(prompt("Poll question") || "").trim();
+      if (!question) return;
+      const optionsRaw = String(prompt("Poll options (comma separated)", "Yes, No") || "").trim();
+      const options = optionsRaw
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean)
+        .slice(0, 6);
+      const lines = options.length ? options.map((op, i) => `${i + 1}. ${op}`).join("\n") : "1. Yes\n2. No";
+      sendDirectQuickText(peerId, peerName, `Poll\n${question}\n${lines}`);
+      return;
+    }
+    if (action === "event") {
+      const title = String(prompt("Event title") || "").trim();
+      if (!title) return;
+      const when = String(prompt("Date & time", new Date().toLocaleString()) || "").trim();
+      const place = String(prompt("Event place (optional)") || "").trim();
+      sendDirectQuickText(peerId, peerName, `Event\n${title}${when ? `\nWhen: ${when}` : ""}${place ? `\nWhere: ${place}` : ""}`);
+      return;
+    }
+    const stickers = ["😀", "🔥", "💚", "🎉", "👍", "🙏", "⚡", "🚀", "📶", "🛰️"];
+    const pick = stickers[Math.floor(Math.random() * stickers.length)] || "😀";
+    sendDirectQuickText(peerId, peerName, `Sticker ${pick}`);
+  };
+
+  const runDirectChatMenuAction = (action: string, peerId: string, peerName: string) => {
+    setDirectChatMenuOpen(false);
+    if (action === "contact-info") {
+      openChatProfile(peerId, peerName, "direct");
+      return;
+    }
+    if (action === "business-details") {
+      openChatProfile(peerId, peerName, "direct");
+      return;
+    }
+    if (action === "search") {
+      setThreadSearchOpen(true);
+      return;
+    }
+    if (action === "select-messages") {
+      setDirectSelectMode(true);
+      setDirectSelectedMessageIds([]);
+      return;
+    }
+    if (action === "mute-notifications") {
+      toggleGridchatMuted(`d:${peerId}`);
+      return;
+    }
+    if (action === "add-favourites") {
+      toggleGridchatFavourite(`d:${peerId}`);
+      return;
+    }
+    if (action === "add-to-list") {
+      contactsVault.upsert({
+        name: peerName,
+        peerId,
+        phones: [],
+        source: "mesh",
+      });
+      refreshContacts();
+      setContactBusy(`${peerName} added to contacts list`);
+      setTimeout(() => setContactBusy(""), 2000);
+      return;
+    }
+    if (action === "close-chat") {
+      setThread(null);
+      return;
+    }
+    if (action === "send-call-link") {
+      sendSms(peerId, peerName, `Join call: mesh://${MeshEngine.localId}/${Date.now().toString(36)}`);
+      return;
+    }
+    if (action === "schedule-call") {
+      const when = String(prompt("Schedule call time", new Date().toLocaleString()) || "").trim();
+      if (!when) return;
+      sendSms(peerId, peerName, `Scheduled call at ${when}`);
+      return;
+    }
+    if (action === "new-group-call") {
+      setGroupSelection((prev) => (prev.includes(peerId) ? prev : [...prev, peerId]));
+      setGroupCallOpen(true);
+      return;
+    }
+    if (action === "report") {
+      setGridchatReportLog((prev) => [{ peerId, name: peerName, source: "direct", ts: Date.now() }, ...prev].slice(0, 500));
+      setContactBusy(`${peerName} reported`);
+      setTimeout(() => setContactBusy(""), 1500);
+      return;
+    }
+    if (action === "block") {
+      blockCaller(peerId, peerName);
+      setThread(null);
+      return;
+    }
+    if (action === "clear-chat") {
+      deleteMessageThread(peerId);
+      return;
+    }
+    if (action === "delete-chat") {
+      moveSmsThreadToFolder(peerId, "deleted");
+      setThread(null);
+    }
+  };
+
+  const toggleStarMessage = (messageId: string) => {
+    const id = String(messageId || "");
+    if (!id) return;
+    setStarredMessageIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [id, ...prev].slice(0, 3000)));
+  };
+
+  const toggleDirectMessageSelection = (messageId: string) => {
+    const id = String(messageId || "");
+    if (!id) return;
+    setDirectSelectedMessageIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const toggleGroupMessageSelection = (messageId: string) => {
+    const id = String(messageId || "");
+    if (!id) return;
+    setGroupSelectedMessageIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const deleteSelectedDirectMessages = () => {
+    if (!directSelectedMessageIds.length) return;
+    setSms((prev) => prev.filter((m) => !directSelectedMessageIds.includes(m.id)));
+    setDirectSelectedMessageIds([]);
+    setDirectSelectMode(false);
+  };
+
+  const deleteSelectedGroupMessages = () => {
+    if (!groupSelectedMessageIds.length) return;
+    setGroupMessages((prev) => prev.filter((m) => !groupSelectedMessageIds.includes(m.id)));
+    setGroupSelectedMessageIds([]);
+    setGroupSelectMode(false);
+  };
+
+  const runGroupChatMenuAction = (action: string, groupId: string, groupName: string) => {
+    setGroupChatMenuOpen(false);
+    if (action === "group-info") {
+      openChatProfile(groupId, groupName, "group", groupId);
+      return;
+    }
+    if (action === "search") {
+      setGroupSearchOpen(true);
+      return;
+    }
+    if (action === "select-messages") {
+      setGroupSelectMode(true);
+      setGroupSelectedMessageIds([]);
+      return;
+    }
+    if (action === "mute") {
+      toggleGridchatMuted(`g:${groupId}`);
+      return;
+    }
+    if (action === "favourite") {
+      toggleGridchatFavourite(`g:${groupId}`);
+      return;
+    }
+    if (action === "share-invite") {
+      sendGroupMessage(groupId, `Join group: mesh-group://${groupId}`);
+      return;
+    }
+    if (action === "clear-chat") {
+      setGroupMessages((prev) => prev.filter((m) => m.groupId !== groupId));
+      return;
+    }
+    if (action === "exit-group") {
+      const me = MeshEngine.localId;
+      setGroupChats((prev) => prev.map((g) => {
+        if (g.id !== groupId) return g;
+        return { ...g, members: g.members.filter((m) => m !== me), updatedAt: Date.now() };
+      }));
+      setGroupViewId(null);
+      return;
+    }
+    if (action === "close") {
+      setGroupViewId(null);
+    }
+  };
+
+  const openChatProfile = (peerId: string, name: string, source: "direct" | "group", groupId?: string) => {
+    const id = String(peerId || "").trim();
+    if (!id) return;
+    setDirectChatMenuOpen(false);
+    setGroupChatMenuOpen(false);
+    setDirectAttachMenuOpen(false);
+    setGroupAttachMenuOpen(false);
+    setChatProfileView({ peerId: id, name: String(name || id), source, groupId });
+  };
+
+  const renderChatProfileOverlay = () => {
+    if (!chatProfileView) return null;
+    const peerId = chatProfileView.peerId;
+    const peerName = chatProfileView.name;
+    const source = chatProfileView.source;
+    const inGroupId = chatProfileView.groupId;
+    const knownContact = contacts.find((c) => c.peerId === peerId || (Array.isArray(c.phones) && c.phones.some((p) => String(p || "").trim() === peerId)));
+    const displayId = String(knownContact?.phones?.[0] || peerId);
+    const aboutText = String(knownContact?.notes || `Reachable on mesh as ${peerName}`).trim();
+    const peerMedia = (source === "group" && inGroupId
+      ? groupMessages.filter((m) => m.groupId === inGroupId && (m.fromId === peerId || m.fromName === peerName) && !!m.attachment?.dataUrl)
+      : sms.filter((m) => m.peerId === peerId && !!m.attachment?.dataUrl)
+    ).slice(-24);
+    const previewMedia = peerMedia
+      .filter((m) => m.attachment?.kind === "image" || m.attachment?.kind === "video")
+      .slice(-2);
+    const routingKey = source === "group" && inGroupId && peerId === inGroupId ? `g:${inGroupId}` : `d:${peerId}`;
+    const isFav = gridchatFavourites.includes(routingKey);
+    const isMuted = gridchatMuted.includes(routingKey);
+    const disappearHours = Number(S.get(`gridcaller_disappear_h_${peerId}`, 0) || 0);
+    const privacyOn = !!S.get(`gridcaller_adv_priv_${peerId}`, false);
+    const reportCount = gridchatReportLog.filter((x) => x.peerId === peerId).length;
+
+    return (
+      <div
+        className="gc-overlay"
+        style={{
+          position: "absolute",
+          inset: 0,
+          zIndex: 650,
+          background: tokens.bg,
+          color: tokens.text,
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderBottom: `1px solid ${tokens.sep}`, background: tokens.bar }}>
+          <button type="button" onClick={() => setChatProfileView(null)} style={{ border: "none", background: "transparent", color: tokens.text, cursor: "pointer", display: "grid", placeItems: "center" }}>
+            <X size={20} />
+          </button>
+          <div style={{ fontSize: 22, fontWeight: 700 }}>Contact info</div>
+        </div>
+
+        <div className="gc-scroll" style={{ flex: 1, overflowY: "auto", padding: "16px 14px 26px" }}>
+          <div style={{ textAlign: "center", marginBottom: 14 }}>
+            <div style={{ width: 118, height: 118, borderRadius: 999, margin: "0 auto 10px", background: hue(peerId), color: "#fff", display: "grid", placeItems: "center", fontSize: 32, fontWeight: 800 }}>
+              {initials(peerName)}
+            </div>
+            <div style={{ fontSize: 20, fontWeight: 700, lineHeight: 1.1 }}>{displayId}</div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 8, marginBottom: 16 }}>
+            {[
+              {
+                id: "voice",
+                label: "Voice",
+                icon: <Phone size={18} />,
+                onTap: async () => {
+                  setChatProfileView(null);
+                  await placeCall(peerId, peerName);
+                },
+              },
+              {
+                id: "video",
+                label: "Video",
+                icon: <Video size={18} />,
+                onTap: async () => {
+                  setChatProfileView(null);
+                  await startDirectHeaderCall(peerId, peerName, "video");
+                },
+              },
+              {
+                id: "add",
+                label: "Add",
+                icon: <UserPlus size={18} />,
+                onTap: () => {
+                  contactsVault.upsert({ name: peerName, peerId, phones: knownContact?.phones || [], source: "mesh" });
+                  refreshContacts();
+                  setContactBusy(`${peerName} added to contacts`);
+                  setTimeout(() => setContactBusy(""), 1400);
+                },
+              },
+              {
+                id: "search",
+                label: "Search",
+                icon: <Search size={18} />,
+                onTap: () => {
+                  if (source === "group" && inGroupId) {
+                    setGroupSearchOpen(true);
+                    setGroupSearchQuery(peerName);
+                  } else {
+                    setThreadSearchOpen(true);
+                    setThreadSearchQuery(peerName);
+                  }
+                  setChatProfileView(null);
+                },
+              },
+            ].map((btn) => (
+              <button
+                key={btn.id}
+                type="button"
+                onClick={() => void btn.onTap()}
+                style={{ border: "none", background: "transparent", color: tokens.text, cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}
+              >
+                <span style={{ width: 52, height: 52, borderRadius: 999, border: `1px solid ${tokens.sep}`, background: tokens.fill, display: "grid", placeItems: "center" }}>
+                  {btn.icon}
+                </span>
+                <span style={{ fontSize: 12, fontWeight: 700 }}>{btn.label}</span>
+              </button>
+            ))}
+          </div>
+
+          <div style={{ fontSize: 13, color: tokens.label, marginBottom: 4, fontWeight: 700 }}>About</div>
+          <div style={{ fontSize: 16, fontWeight: 500, marginBottom: 16 }}>{aboutText}</div>
+
+          <div style={{ borderTop: `1px solid ${tokens.sep}`, paddingTop: 12, marginBottom: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 10 }}>
+              <div style={{ fontSize: 17, fontWeight: 700 }}>Media, links and docs</div>
+              <div style={{ fontSize: 22, fontWeight: 700 }}>{peerMedia.length}</div>
+            </div>
+            {previewMedia.length ? (
+              <div style={{ display: "flex", gap: 8 }}>
+                {previewMedia.map((m) => (
+                  <div key={m.id} style={{ width: 170, height: 122, borderRadius: 12, overflow: "hidden", border: `1px solid ${tokens.sep}`, background: tokens.fill }}>
+                    {m.attachment?.kind === "video" ? (
+                      <video src={m.attachment?.dataUrl} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    ) : (
+                      <img src={m.attachment?.dataUrl} alt={m.attachment?.name || "media"} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ fontSize: 13, color: tokens.label }}>No media shared yet</div>
+            )}
+          </div>
+
+          {[
+            { id: "star", title: "Starred messages", subtitle: source === "group" ? "Open starred in this group" : "Open starred in this chat", danger: false },
+            { id: "notif", title: "Notification settings", subtitle: isMuted ? "Muted" : "On", danger: false },
+            { id: "disappear", title: "Disappearing messages", subtitle: disappearHours > 0 ? `${disappearHours}h` : "Off", danger: false },
+            { id: "privacy", title: "Advanced chat privacy", subtitle: privacyOn ? "On" : "Off", danger: false },
+            { id: "encryption", title: "Encryption", subtitle: "Messages are end-to-end encrypted. Click to verify.", danger: false },
+            { id: "fav", title: "Add to favourites", subtitle: isFav ? "Already favourite" : "Tap to favourite", danger: false },
+            { id: "list", title: "Add to list", subtitle: "Save in contacts list", danger: false },
+            { id: "clear", title: "Clear chat", subtitle: "", danger: true },
+            { id: "block", title: `Block ${displayId}`, subtitle: "", danger: true },
+            { id: "report", title: `Report ${displayId}`, subtitle: reportCount ? `Reported ${reportCount} time(s)` : "", danger: true },
+            { id: "delete", title: "Delete chat", subtitle: "", danger: true },
+          ].map((row) => (
+            <button
+              key={row.id}
+              type="button"
+              onClick={() => {
+                if (row.id === "star") {
+                  if (source === "group") {
+                    setGroupShowStarredOnly(true);
+                  } else {
+                    setThreadShowStarredOnly(true);
+                  }
+                  setChatProfileView(null);
+                  return;
+                }
+                if (row.id === "notif") {
+                  toggleGridchatMuted(routingKey);
+                  return;
+                }
+                if (row.id === "disappear") {
+                  const raw = String(prompt("Disappearing messages hours (0, 24, 72, 168)", String(disappearHours || 0)) || "").trim();
+                  const next = Number(raw);
+                  if (!Number.isFinite(next) || next < 0 || next > 168) {
+                    setErr("Use 0-168 hours");
+                    return;
+                  }
+                  S.set(`gridcaller_disappear_h_${peerId}`, Math.floor(next));
+                  setChatProfileMetaVer((v) => v + 1);
+                  return;
+                }
+                if (row.id === "privacy") {
+                  S.set(`gridcaller_adv_priv_${peerId}`, !privacyOn);
+                  setChatProfileMetaVer((v) => v + 1);
+                  return;
+                }
+                if (row.id === "encryption") {
+                  setContactBusy("Encryption verified on mesh channel");
+                  setTimeout(() => setContactBusy(""), 1400);
+                  return;
+                }
+                if (row.id === "fav") {
+                  toggleGridchatFavourite(routingKey);
+                  return;
+                }
+                if (row.id === "list") {
+                  contactsVault.upsert({ name: peerName, peerId, phones: knownContact?.phones || [], source: "mesh" });
+                  refreshContacts();
+                  return;
+                }
+                if (row.id === "clear") {
+                  if (source === "group" && inGroupId) {
+                    setGroupMessages((prev) => prev.filter((m) => !(m.groupId === inGroupId && m.fromId === peerId)));
+                  } else {
+                    deleteMessageThread(peerId);
+                  }
+                  setChatProfileView(null);
+                  return;
+                }
+                if (row.id === "block") {
+                  blockCaller(peerId, peerName);
+                  setChatProfileView(null);
+                  return;
+                }
+                if (row.id === "report") {
+                  setGridchatReportLog((prev) => [{ peerId, name: peerName, source, ts: Date.now() }, ...prev].slice(0, 500));
+                  setContactBusy(`${peerName} reported`);
+                  setTimeout(() => setContactBusy(""), 1400);
+                  return;
+                }
+                if (source === "group" && inGroupId) {
+                  setGroupMessages((prev) => prev.filter((m) => !(m.groupId === inGroupId && m.fromId === peerId)));
+                } else {
+                  moveSmsThreadToFolder(peerId, "deleted");
+                }
+                setChatProfileView(null);
+              }}
+              style={{
+                width: "100%",
+                border: "none",
+                borderTop: `1px solid ${tokens.sep}`,
+                background: "transparent",
+                color: row.danger ? tokens.red : tokens.text,
+                textAlign: "left",
+                padding: "12px 2px",
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+                cursor: "pointer",
+              }}
+            >
+              <span style={{ fontSize: 16, fontWeight: 600 }}>{row.title}</span>
+              {row.subtitle ? <span style={{ fontSize: 13, color: tokens.label }}>{row.subtitle}</span> : null}
+            </button>
+          ))}
+          <div style={{ display: "none" }}>{chatProfileMetaVer}</div>
+        </div>
+      </div>
+    );
+  };
+
+  const openGridchatRow = (row: { kind: "group" | "direct"; groupId?: string; peerId?: string; id: string }) => {
+    setGridchatLastSeen((prev) => ({ ...prev, [row.id]: Date.now() }));
+    if (row.kind === "group" && row.groupId) {
+      setGroupViewId(row.groupId);
+      setTab("groups");
+      return;
+    }
+    if (row.kind === "direct" && row.peerId) {
+      const match = peers.find((p) => p.id === row.peerId) || globalPeers.find((p) => p.id === row.peerId);
+      setComposeTo(match?.id || row.peerId);
+      setThread(row.peerId);
+      setTab("sms");
+    }
+  };
+
+  const openGridchatCreatePanel = () => {
+    setGroupViewId(null);
+    setGroupNameInput("");
+    setGroupMembersInput("");
+    setGridchatCreateMenuOpen(false);
+    setGridchatMoreMenuOpen(false);
+    window.setTimeout(() => {
+      try {
+        gridchatCreatePanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      } catch {}
+    }, 0);
+  };
+
+  useEffect(() => {
+    if (!groupViewId) return;
+    setGridchatLastSeen((prev) => ({ ...prev, [`g:${groupViewId}`]: Date.now() }));
+    setChatProfileView(null);
+    setGroupSelectMode(false);
+    setGroupSelectedMessageIds([]);
+    setGroupShowStarredOnly(false);
+  }, [groupViewId]);
+
+  useEffect(() => {
+    if (!thread) return;
+    setGridchatLastSeen((prev) => ({ ...prev, [`d:${thread}`]: Date.now() }));
+    setChatProfileView(null);
+    setDirectSelectMode(false);
+    setDirectSelectedMessageIds([]);
+    setThreadShowStarredOnly(false);
+  }, [thread]);
+
+  useEffect(() => {
+    setDirectChatMenuOpen(false);
+    setDirectAttachMenuOpen(false);
+    setThreadSearchOpen(false);
+    setThreadSearchQuery("");
+    setGridchatCreateMenuOpen(false);
+    setGridchatMoreMenuOpen(false);
+  }, [thread]);
+
+  useEffect(() => {
+    setGroupChatMenuOpen(false);
+    setGroupAttachMenuOpen(false);
+    setGroupSearchOpen(false);
+    setGroupSearchQuery("");
+  }, [groupViewId]);
+
+  useEffect(() => {
+    const closeHeaderMenus = (event: MouseEvent | TouchEvent) => {
+      if (!gridchatHeaderRef.current) return;
+      const target = event.target as Node | null;
+      if (target && gridchatHeaderRef.current.contains(target)) return;
+      setGridchatCreateMenuOpen(false);
+      setGridchatMoreMenuOpen(false);
+    };
+    document.addEventListener("mousedown", closeHeaderMenus);
+    document.addEventListener("touchstart", closeHeaderMenus);
+    return () => {
+      document.removeEventListener("mousedown", closeHeaderMenus);
+      document.removeEventListener("touchstart", closeHeaderMenus);
+    };
+  }, []);
 
   if (groupCallOpen) {
     return (
@@ -2859,51 +4657,236 @@ export default function GridCaller({
 
   // ═══════════ SMS THREAD ═══════════
   if (thread) {
-    const name = peers.find((p) => p.id === thread)?.name || recents.find((r) => r.peerId === thread)?.name || sms.find((m) => m.peerId === thread)?.name || thread.slice(0, 10);
+    const name = peers.find((p) => p.id === thread)?.name || sms.find((m) => m.peerId === thread)?.name || thread.slice(0, 10);
+    const directPeerOnline = !!(peers.find((p) => p.id === thread)?.online || globalPeers.find((p) => p.id === thread)?.online);
+    const directStatusText = directPeerOnline ? "online" : "last seen recently";
+    const threadSearch = threadSearchQuery.trim().toLowerCase();
+    const threadBaseMsgs = threadShowStarredOnly ? threadMsgs.filter((m) => starredMessageIds.includes(m.id)) : threadMsgs;
+    const visibleThreadMsgs = threadSearch
+      ? threadBaseMsgs.filter((m) => (`${m.text} ${m.attachment?.name || ""}`.toLowerCase().includes(threadSearch)))
+      : threadBaseMsgs;
     return (
       <ThemeCtx.Provider value={tokens}>
       <Shell>
-        <NavBar
-          title={name}
-          left={<Back onClick={() => setThread(null)} />}
-          right={
-            <div style={{ display: "flex", gap: 6 }}>
-              {threadMsgs.length > 0 && (
-                <button
-                  type="button"
-                  title="Clear conversation"
-                  onClick={() => deleteMessageThread(thread)}
-                  style={{
-                    border: `1px solid ${tokens.red}55`,
-                    background: `${tokens.red}14`,
-                    color: tokens.red,
-                    borderRadius: 10,
-                    padding: "6px 10px",
-                    fontSize: 12,
-                    fontWeight: 700,
-                    cursor: "pointer",
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 4,
-                  }}
-                >
-                  <Trash2 size={14} /> Clear chat
-                </button>
-              )}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            padding: "10px 12px",
+            background: tokens.bar,
+            borderBottom: `1px solid ${tokens.sep}`,
+            flexShrink: 0,
+          }}
+        >
+          <Back onClick={() => setThread(null)} />
+          <button
+            type="button"
+            onClick={() => openChatProfile(thread, name, "direct")}
+            style={{
+              width: 34,
+              height: 34,
+              borderRadius: 17,
+              background: hue(thread),
+              color: "#fff",
+              display: "grid",
+              placeItems: "center",
+              fontSize: 12,
+              fontWeight: 800,
+              flexShrink: 0,
+              border: "none",
+              cursor: "pointer",
+            }}
+            title="Open contact info"
+          >
+            {initials(name)}
+          </button>
+          <button
+            type="button"
+            onClick={() => openChatProfile(thread, name, "direct")}
+            style={{ minWidth: 0, flex: 1, border: "none", background: "transparent", textAlign: "left", cursor: "pointer", padding: 0 }}
+            title="Open contact info"
+          >
+            <div style={{ fontSize: 18, fontWeight: 700, color: tokens.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</div>
+            <div style={{ fontSize: 11, color: directPeerOnline ? tokens.green : tokens.label, fontWeight: 700 }}>{directStatusText}</div>
+          </button>
+          <div style={{ position: "relative", display: "flex", alignItems: "center", gap: 2 }}>
+            <button
+              type="button"
+              title="Video call"
+              onClick={() => void startDirectHeaderCall(thread, name, "video")}
+              style={{ border: "none", background: "transparent", color: tokens.text, width: 32, height: 32, borderRadius: 999, display: "grid", placeItems: "center", cursor: "pointer" }}
+            >
+              <Video size={18} />
+            </button>
+            <button
+              type="button"
+              title="Voice call"
+              onClick={() => void startDirectHeaderCall(thread, name, "audio")}
+              style={{ border: "none", background: "transparent", color: tokens.text, width: 32, height: 32, borderRadius: 999, display: "grid", placeItems: "center", cursor: "pointer" }}
+            >
+              <Phone size={18} />
+            </button>
+            <button
+              type="button"
+              title="Search"
+              onClick={() => {
+                setDirectChatMenuOpen(false);
+                setThreadSearchOpen((v) => !v);
+              }}
+              style={{ border: "none", background: "transparent", color: tokens.text, width: 32, height: 32, borderRadius: 999, display: "grid", placeItems: "center", cursor: "pointer" }}
+            >
+              <Search size={18} />
+            </button>
+            <button
+              type="button"
+              title="More"
+              onClick={() => setDirectChatMenuOpen((v) => !v)}
+              style={{ border: "none", background: "transparent", color: tokens.text, width: 32, height: 32, borderRadius: 999, display: "grid", placeItems: "center", cursor: "pointer" }}
+            >
+              <EllipsisVertical size={18} />
+            </button>
+            {directChatMenuOpen && (
+              <div
+                style={{
+                  position: "absolute",
+                  right: 0,
+                  top: 38,
+                  width: "min(84vw, 230px)",
+                  borderRadius: 12,
+                  border: `1px solid ${tokens.sep}`,
+                  background: tokens.card,
+                  boxShadow: tokens.shadow,
+                  zIndex: 7,
+                  overflow: "hidden",
+                }}
+              >
+                {[
+                  { id: "contact-info", label: "Contact info" },
+                  { id: "business-details", label: "Business details" },
+                  { id: "search", label: "Search" },
+                  { id: "select-messages", label: "Select messages" },
+                  { id: "mute-notifications", label: "Mute notifications" },
+                  { id: "add-favourites", label: "Add to favourites" },
+                  { id: "add-to-list", label: "Add to list" },
+                  { id: "close-chat", label: "Close chat" },
+                  { id: "send-call-link", label: "Send call link" },
+                  { id: "schedule-call", label: "Schedule call" },
+                  { id: "new-group-call", label: "New group call" },
+                  { id: "report", label: "Report" },
+                  { id: "block", label: "Block" },
+                  { id: "clear-chat", label: "Clear chat" },
+                  { id: "delete-chat", label: "Delete chat" },
+                ].map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => runDirectChatMenuAction(item.id, thread, name)}
+                    style={{
+                      width: "100%",
+                      border: "none",
+                      borderBottom: `1px solid ${tokens.sep}`,
+                      background: tokens.card,
+                      color: item.id === "block" || item.id === "delete-chat" ? tokens.red : tokens.text,
+                      textAlign: "left",
+                      padding: "10px 12px",
+                      fontSize: 13,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+        {threadSearchOpen && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: `1px solid ${tokens.sep}`, background: tokens.fill }}>
+            <Search size={14} color={tokens.label} />
+            <input
+              value={threadSearchQuery}
+              onChange={(e) => setThreadSearchQuery(e.target.value)}
+              placeholder="Search in this chat"
+              style={{ flex: 1, border: "none", background: "transparent", color: tokens.text, outline: "none", fontSize: 13 }}
+            />
+            <button
+              type="button"
+              onClick={() => {
+                setThreadSearchQuery("");
+                setThreadSearchOpen(false);
+              }}
+              style={{ border: "none", background: "transparent", color: tokens.blue, fontWeight: 700, cursor: "pointer" }}
+            >
+              Close
+            </button>
+          </div>
+        )}
+        {threadShowStarredOnly && (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 12px", borderBottom: `1px solid ${tokens.sep}`, background: tokens.fill }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: tokens.text }}>Showing starred messages</div>
+            <button
+              type="button"
+              onClick={() => setThreadShowStarredOnly(false)}
+              style={{ border: "none", background: "transparent", color: tokens.blue, fontWeight: 700, cursor: "pointer" }}
+            >
+              Show all
+            </button>
+          </div>
+        )}
+        {directSelectMode && (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 12px", borderBottom: `1px solid ${tokens.sep}`, background: tokens.fill }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: tokens.text }}>{directSelectedMessageIds.length} selected</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                type="button"
+                onClick={() => {
+                  setDirectSelectMode(false);
+                  setDirectSelectedMessageIds([]);
+                }}
+                style={{ border: "none", background: "transparent", color: tokens.label, fontWeight: 700, cursor: "pointer" }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={deleteSelectedDirectMessages}
+                style={{ border: "none", background: "transparent", color: tokens.red, fontWeight: 700, cursor: "pointer" }}
+              >
+                Delete
+              </button>
             </div>
-          }
-        />
+          </div>
+        )}
         {contactBusy ? (
           <div style={{ padding: "6px 16px", fontSize: 12, color: tokens.green, fontWeight: 600 }}>{contactBusy}</div>
         ) : null}
-        <div className="gc-scroll" style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "12px 16px 8px" }}>
+        <div
+          className="gc-scroll"
+          style={{
+            flex: 1,
+            minHeight: 0,
+            overflowY: "auto",
+            overflowX: "hidden",
+            padding: "12px 16px 10px",
+            backgroundColor: tokens.dark ? "#0e0e10" : "#efeae2",
+            backgroundImage:
+              "radial-gradient(rgba(0,0,0,0.035) 1px, transparent 1px), radial-gradient(rgba(0,0,0,0.02) 1px, transparent 1px)",
+            backgroundSize: "22px 22px, 44px 44px",
+            backgroundPosition: "0 0, 11px 11px",
+          }}
+        >
 
-          {threadMsgs.length === 0 && (
+          {visibleThreadMsgs.length === 0 && (
             <div style={{ textAlign: "center", color: tokens.label, fontSize: 13, padding: 20 }}>
-              No messages yet — type below to compose
+              {threadSearch ? "No matching messages" : "No messages yet — type below to compose"}
             </div>
           )}
-          {threadMsgs.map((m) => (
+          {visibleThreadMsgs.map((m) => {
+            const isStarred = starredMessageIds.includes(m.id);
+            const isSelected = directSelectedMessageIds.includes(m.id);
+            return (
             <div key={m.id} style={{ display: "flex", justifyContent: m.mine ? "flex-end" : "flex-start", marginBottom: 8, alignItems: "flex-end", gap: 6 }}>
               {!m.mine && (
                 <button
@@ -2927,20 +4910,48 @@ export default function GridCaller({
                 </button>
               )}
               <div
+                onClick={() => {
+                  if (directSelectMode) toggleDirectMessageSelection(m.id);
+                }}
                 style={{
                   maxWidth: "72%",
-                  background: m.mine ? tokens.blue : tokens.card,
-                  color: m.mine ? "#fff" : tokens.text,
+                  background: m.mine ? (tokens.dark ? "#144d37" : "#dcf8c6") : tokens.card,
+                  color: m.mine ? (tokens.dark ? "#e8fff4" : "#111") : tokens.text,
                   borderRadius: 18,
                   padding: "10px 14px",
                   fontSize: 16,
                   lineHeight: 1.35,
                   boxShadow: tokens.shadow,
-                  border: m.mine ? "none" : `1px solid ${tokens.sep}`,
+                  border: directSelectMode && isSelected ? `2px solid ${tokens.blue}` : m.mine ? "none" : `1px solid ${tokens.sep}`,
                   position: "relative",
+                  cursor: directSelectMode ? "pointer" : "default",
                 }}
               >
-                {m.text}
+                {m.text ? <div>{m.text}</div> : null}
+                {m.attachment?.kind === "location" && m.attachment.lat != null && m.attachment.lng != null ? (
+                  <div style={{ fontSize: 12, marginTop: 4 }}>
+                    Location: {m.attachment.lat.toFixed(5)}, {m.attachment.lng.toFixed(5)}
+                  </div>
+                ) : null}
+                {m.attachment?.dataUrl ? (
+                  <div style={{ marginTop: 6 }}>
+                    {m.attachment.kind === "image" ? (
+                      <img src={m.attachment.dataUrl} alt={m.attachment.name} style={{ maxWidth: "100%", borderRadius: 10 }} />
+                    ) : m.attachment.kind === "audio" ? (
+                      <audio controls src={m.attachment.dataUrl} style={{ width: "100%" }} />
+                    ) : m.attachment.kind === "video" ? (
+                      <video controls src={m.attachment.dataUrl} style={{ width: "100%", borderRadius: 10 }} />
+                    ) : (
+                      <a
+                        href={m.attachment.dataUrl}
+                        download={m.attachment.name}
+                        style={{ color: m.mine ? "#fff" : tokens.blue, fontWeight: 700 }}
+                      >
+                        Download {m.attachment.name}
+                      </a>
+                    )}
+                  </div>
+                ) : null}
                 <div
                   style={{
                     fontSize: 11,
@@ -2953,84 +4964,235 @@ export default function GridCaller({
                   }}
                 >
                   <span>{fullDateTime(m.ts)}</span>
-                  {m.mine && (
+                  <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                     <button
                       type="button"
-                      title="Delete message"
-                      onClick={() => deleteSmsMessage(m.id)}
-                      style={{
-                        border: "none",
-                        background: "rgba(0,0,0,0.15)",
-                        color: "#fff",
-                        borderRadius: 10,
-                        padding: "2px 6px",
-                        cursor: "pointer",
-                        display: "inline-flex",
-                        alignItems: "center",
-                      }}
+                      title={isStarred ? "Unstar" : "Star"}
+                      onClick={() => toggleStarMessage(m.id)}
+                      style={{ border: "none", background: "rgba(0,0,0,0.15)", color: isStarred ? "#ffd54a" : "#fff", borderRadius: 10, padding: "2px 6px", cursor: "pointer", display: "inline-flex", alignItems: "center" }}
                     >
-                      <Trash2 size={12} />
+                      {isStarred ? <Star size={12} fill="#ffd54a" color="#ffd54a" /> : <StarOff size={12} />}
                     </button>
-                  )}
+                    {directSelectMode ? (
+                      <button
+                        type="button"
+                        title={isSelected ? "Unselect" : "Select"}
+                        onClick={() => toggleDirectMessageSelection(m.id)}
+                        style={{ border: "none", background: "rgba(0,0,0,0.15)", color: "#fff", borderRadius: 10, padding: "2px 6px", cursor: "pointer", display: "inline-flex", alignItems: "center" }}
+                      >
+                        {isSelected ? <CheckCircle2 size={12} /> : <Circle size={12} />}
+                      </button>
+                    ) : null}
+                    {m.mine && (
+                      <button
+                        type="button"
+                        title="Delete message"
+                        onClick={() => deleteSmsMessage(m.id)}
+                        style={{
+                          border: "none",
+                          background: "rgba(0,0,0,0.15)",
+                          color: "#fff",
+                          borderRadius: 10,
+                          padding: "2px 6px",
+                          cursor: "pointer",
+                          display: "inline-flex",
+                          alignItems: "center",
+                        }}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
               {m.mine ? null : null}
             </div>
-          ))}
+          );})}
         </div>
         <div
           style={{
-            display: "flex",
-            gap: 8,
             padding: "10px 12px 16px",
-            background: tokens.bar,
+            background: tokens.dark ? "#1b1b1f" : "#f0f2f5",
             backdropFilter: tokens.blur,
             borderTop: `0.5px solid ${tokens.sep}`,
+            position: "relative",
           }}
         >
-          <input
-            value={smsDraft}
-            onChange={(e) => setSmsDraft(e.target.value)}
-            placeholder="Type a message…"
-            style={{
-              flex: 1,
-              border: `1px solid ${tokens.sep}`,
-              background: tokens.inputBg,
-              color: tokens.text,
-              borderRadius: 18,
-              padding: "10px 14px",
-              fontSize: 16,
-              outline: "none",
-              boxShadow: tokens.shadow,
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
+          {directAttachMenuOpen && (
+            <div
+              style={{
+                position: "absolute",
+                left: 12,
+                bottom: 64,
+                width: "min(92vw, 280px)",
+                borderRadius: 14,
+                border: `1px solid ${tokens.sep}`,
+                background: tokens.card,
+                boxShadow: tokens.shadow,
+                zIndex: 4,
+                overflow: "hidden",
+              }}
+            >
+              {[
+                { id: "document" as const, label: "Document", icon: <Download size={16} color={tokens.blue} /> },
+                { id: "photos" as const, label: "Photos & videos", icon: <ImageIcon size={16} color={tokens.green} /> },
+                { id: "camera" as const, label: "Camera", icon: <Camera size={16} color={tokens.red} /> },
+                { id: "audio" as const, label: "Audio", icon: <Mic size={16} color={tokens.orange} /> },
+                { id: "contact" as const, label: "Contact", icon: <IdCard size={16} color={tokens.blue} /> },
+                { id: "poll" as const, label: "Poll", icon: <CheckCircle2 size={16} color={tokens.green} /> },
+                { id: "event" as const, label: "Event", icon: <CalendarDays size={16} color={tokens.orange} /> },
+                { id: "sticker" as const, label: "Sticker", icon: <Sparkles size={16} color={tokens.red} /> },
+              ].map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => runDirectAttachAction(thread, name, item.id)}
+                  style={{
+                    width: "100%",
+                    border: "none",
+                    borderBottom: `1px solid ${tokens.sep}`,
+                    background: tokens.card,
+                    color: tokens.text,
+                    padding: "11px 12px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    textAlign: "left",
+                  }}
+                >
+                  {item.icon}
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button
+              type="button"
+              onClick={() => {
+                setDirectChatMenuOpen(false);
+                setDirectAttachMenuOpen((v) => !v);
+              }}
+              style={{
+                width: 40,
+                height: 40,
+                borderRadius: 999,
+                border: "none",
+                background: tokens.dark ? "#38383d" : "#ffffff",
+                color: tokens.text,
+                display: "grid",
+                placeItems: "center",
+                cursor: "pointer",
+                flexShrink: 0,
+              }}
+              title="Attach"
+            >
+              <Plus size={16} />
+            </button>
+            <input
+              value={smsDraft}
+              onChange={(e) => setSmsDraft(e.target.value)}
+              placeholder="Type a message..."
+              style={{
+                flex: 1,
+                border: `1px solid ${tokens.sep}`,
+                background: tokens.dark ? "#2f2f32" : "#ffffff",
+                color: tokens.text,
+                borderRadius: 999,
+                padding: "10px 14px",
+                fontSize: 16,
+                outline: "none",
+                boxShadow: "none",
+              }}
+              onFocus={() => {
+                setDirectAttachMenuOpen(false);
+                setDirectChatMenuOpen(false);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  sendSms(thread, name, smsDraft);
+                  setSmsDraft("");
+                }
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => {
+                if (!smsDraft.trim()) {
+                  setErr("Type a message or use + to attach");
+                  return;
+                }
                 sendSms(thread, name, smsDraft);
                 setSmsDraft("");
-              }
+              }}
+              style={{
+                width: 40,
+                height: 40,
+                borderRadius: 999,
+                border: "none",
+                background: tokens.blue,
+                color: "#fff",
+                fontWeight: 700,
+                cursor: "pointer",
+                fontSize: 16,
+                flexShrink: 0,
+              }}
+              title={smsDraft.trim() ? "Send" : "Voice"}
+            >
+              {smsDraft.trim() ? "↑" : <Mic size={16} />}
+            </button>
+          </div>
+
+          <input
+            ref={directMediaInputRef}
+            type="file"
+            accept="image/*,video/*"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) shareDirectFile(thread, name, f);
+              e.target.value = "";
             }}
           />
-          <button
-            type="button"
-            onClick={() => {
-              sendSms(thread, name, smsDraft);
-              setSmsDraft("");
+          <input
+            ref={directDocumentInputRef}
+            type="file"
+            accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.json,.xml"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) shareDirectFile(thread, name, f);
+              e.target.value = "";
             }}
-            style={{
-              width: 40,
-              height: 40,
-              borderRadius: 20,
-              border: "none",
-              background: tokens.blue,
-              color: "#fff",
-              fontWeight: 700,
-              cursor: "pointer",
-              fontSize: 16,
+          />
+          <input
+            ref={directCameraInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) shareDirectFile(thread, name, f);
+              e.target.value = "";
             }}
-          >
-            ↑
-          </button>
+          />
+          <input
+            ref={directAudioInputRef}
+            type="file"
+            accept="audio/*"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) shareDirectFile(thread, name, f);
+              e.target.value = "";
+            }}
+          />
         </div>
+        {renderChatProfileOverlay()}
       </Shell>
       </ThemeCtx.Provider>
     );
@@ -3148,6 +5310,7 @@ export default function GridCaller({
               title="Menu"
               onClick={() => {
                 setMenuView("home");
+                setMenuFullscreen(false);
                 setMenuOpen(true);
               }}
               style={{
@@ -3286,10 +5449,12 @@ export default function GridCaller({
         <div style={{ display: "flex", gap: 0, marginBottom: 0 }}>
           {(
             [
-              { id: "recents" as Tab, label: "Recents" },
+              { id: "mesh" as Tab, label: "Mesh" },
               { id: "contacts" as Tab, label: "Contacts" },
               { id: "keypad" as Tab, label: "Keypad" },
               { id: "sms" as Tab, label: "Messages" },
+              { id: "groups" as Tab, label: "Gridchat" },
+              { id: "logs" as Tab, label: "Log" },
             ] as const
           ).map((t) => (
             <button
@@ -3313,18 +5478,14 @@ export default function GridCaller({
         </div>
       </div>
 
-      {(tab === "recents" || tab === "contacts") && (
+      {tab === "contacts" && (
         <div style={{ padding: "10px 16px 6px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, background: tokens.fill, borderRadius: 10, padding: "8px 12px" }}>
             <Search size={15} color={tokens.label} />
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder={
-                tab === "recents"
-                  ? "Search name, number, or ID"
-                  : "Search contacts"
-              }
+              placeholder="Search contacts"
               style={{ flex: 1, border: "none", background: "transparent", outline: "none", fontSize: 16, color: tokens.text }}
             />
             {q.trim() ? (
@@ -3341,6 +5502,64 @@ export default function GridCaller({
         </div>
       )}
 
+      {tab === "logs" && (
+        <div style={{ padding: "10px 16px 6px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+              <button
+                type="button"
+                onClick={() => setLogFiltersOpen((prev) => !prev)}
+                style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, borderRadius: 12, width: 38, height: 38, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}
+                title={logFiltersOpen ? "Hide log filters" : "Show log filters"}
+              >
+                <Menu size={18} />
+              </button>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 18, fontWeight: 800, color: tokens.text }}>Local Device Logs</div>
+                <div style={{ fontSize: 12, color: tokens.label }}>Calls, inbox, sent, blocked and private device history</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                onClick={refreshLocalLogs}
+                style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, borderRadius: 999, padding: "8px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+              >
+                Refresh
+              </button>
+              <button
+                type="button"
+                onClick={clearLocalLogs}
+                style={{ border: `1px solid ${tokens.red}55`, background: `${tokens.red}12`, color: tokens.red, borderRadius: 999, padding: "8px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+              >
+                Clear log
+              </button>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+            {[
+              { id: "all" as const, label: `All ${localCommLog.length}` },
+              { id: "calls" as const, label: `Calls ${logStats.calls}` },
+              { id: "messages" as const, label: `Messages ${logStats.messages}` },
+              { id: "blocked" as const, label: `Blocked ${logStats.blocked}` },
+            ].map((item) => {
+              const active = logFilter === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setLogFilter(item.id)}
+                  style={{ border: active ? "none" : `1px solid ${tokens.sep}`, background: active ? tokens.blue : tokens.card, color: active ? "#fff" : tokens.text, borderRadius: 999, padding: "6px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                >
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
+          {logFiltersOpen ? renderLogFilterPanel(true) : null}
+        </div>
+      )}
+
       {err && (
         <div style={{ margin: "8px 16px", padding: 12, borderRadius: 12, background: "#FF3B3014", color: T.red, fontSize: 13 }}>
           {err}{" "}
@@ -3351,8 +5570,8 @@ export default function GridCaller({
       )}
 
       <div className="gc-scroll" style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", paddingBottom: 16, WebkitOverflowScrolling: "touch" as any }}>
-        {/* LIVE mesh peers — detailed cards + mesh group calling */}
-        {peers.filter((p) => p.online && !isSelfPeer(p.id)).length > 0 && (
+        {/* LIVE mesh peers — dedicated Mesh tab */}
+        {tab === "mesh" && peers.filter((p) => p.online && !isSelfPeer(p.id)).length > 0 && (
           <div style={{ margin: "8px 12px 4px", padding: 12, borderRadius: 14, background: tokens.card, border: `1px solid ${tokens.sep}` }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: meshPeersCollapsed ? 0 : 8 }}>
               <div style={{ fontSize: 12, fontWeight: 800, color: tokens.green }}>
@@ -3475,270 +5694,23 @@ export default function GridCaller({
               })}
           </div>
         )}
-        {tab === "recents" && (
-          <>
-            <div
-              style={{
-                padding: "8px 12px",
-                display: "flex",
-                gap: 8,
-                alignItems: "center",
-                flexWrap: "wrap",
-              }}
-            >
-              <span style={{ flex: 1, minWidth: 100, fontSize: 13, color: tokens.label, fontWeight: 700 }}>
-                Call logs ({groupedCallLogs.length}
-                {groupedCallLogs.length !== recents.length ? ` of ${recents.length}` : ""})
-              </span>
-              <button
-                type="button"
-                onClick={clearCallLogs}
-                disabled={recents.length === 0}
-                style={{
-                  ...contactChipStyle(tokens),
-                  opacity: recents.length === 0 ? 0.45 : 1,
-                  border: `1px solid ${tokens.red}55`,
-                  color: tokens.red,
-                  background: `${tokens.red}12`,
-                  fontWeight: 700,
-                }}
-              >
-                <Trash2 size={14} /> Clear all
-              </button>
-            </div>
-
-            {/* Type filter: All / Missed / Incoming / Outgoing */}
-            <div
-              style={{
-                padding: "0 12px 10px",
-                display: "flex",
-                gap: 6,
-                flexWrap: "wrap",
-              }}
-            >
-              {(
-                [
-                  { id: "all" as const, label: "All", count: callLogCounts.all, color: tokens.blue },
-                  { id: "missed" as const, label: "Missed", count: callLogCounts.missed, color: tokens.red },
-                  { id: "in" as const, label: "Incoming", count: callLogCounts.incoming, color: tokens.green },
-                  { id: "out" as const, label: "Outgoing", count: callLogCounts.outgoing, color: tokens.blue },
-                  { id: "blocked" as const, label: "Blocked", count: callLogCounts.blocked, color: tokens.orange },
-                ] as const
-              ).map((f) => {
-                const active = callLogFilter === f.id;
-                return (
-                  <button
-                    key={f.id}
-                    type="button"
-                    onClick={() => setCallLogFilter(f.id)}
-                    style={{
-                      border: active ? "none" : `1px solid ${tokens.sep}`,
-                      background: active ? f.color : tokens.card,
-                      color: active ? "#fff" : tokens.text,
-                      borderRadius: 16,
-                      padding: "7px 12px",
-                      fontSize: 12,
-                      fontWeight: 700,
-                      cursor: "pointer",
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: 5,
-                    }}
-                  >
-                    {f.id === "missed" ? (
-                      <PhoneMissed size={13} />
-                    ) : f.id === "in" ? (
-                      <PhoneIncoming size={13} />
-                    ) : f.id === "out" ? (
-                      <PhoneOutgoing size={13} />
-                    ) : null}
-                    {f.label}
-                    <span style={{ opacity: active ? 0.9 : 0.65, fontWeight: 600 }}>{f.count}</span>
-                  </button>
-                );
-              })}
-            </div>
-
-            {contactBusy ? (
-              <div style={{ padding: "0 16px 8px", fontSize: 12, color: tokens.green, fontWeight: 600 }}>{contactBusy}</div>
-            ) : null}
+        {tab === "mesh" && peers.filter((p) => p.online && !isSelfPeer(p.id)).length === 0 && (
           <CardList>
-            {groupedCallLogs.length === 0 && (
-              <EmptyState
-                title={
-                  recents.length === 0
-                    ? "No call logs yet"
-                    : callLogFilter !== "all" || q.trim()
-                      ? "No matching logs"
-                      : "No call logs yet"
-                }
-                body={
-                  recents.length === 0
-                    ? "Incoming, outgoing, and missed calls appear here after you place or receive a call."
-                    : "Try another filter or search by name, number, or ID."
-                }
-              />
-            )}
-            {groupedCallLogs.map((group) => {
-              const latest = group.lastEntry;
-              const Icon = latest?.dir === "missed" ? PhoneMissed : latest?.dir === "in" ? PhoneIncoming : PhoneOutgoing;
-              const isMobile = looksLikePhoneNumber(group.peerId);
-              const meta = callLogDirMeta(latest?.dir || "out");
-              const dirColor = latest?.dir === "missed" ? tokens.red : latest?.dir === "in" ? tokens.green : tokens.blue;
-              const dirBg = latest?.dir === "missed" ? `${tokens.red}18` : latest?.dir === "in" ? `${tokens.green}18` : `${tokens.blue}18`;
-              return (
-                <div
-                  key={group.key}
-                  style={{
-                    borderBottom: `0.5px solid ${tokens.sep}`,
-                    background: tokens.card,
-                    padding: "12px 14px",
-                  }}
-                >
-                  <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-                    <div
-                      style={{
-                        width: 44,
-                        height: 44,
-                        borderRadius: 22,
-                        background: dirBg,
-                        color: dirColor,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        fontWeight: 600,
-                        fontSize: 15,
-                        flexShrink: 0,
-                        border: `1px solid ${dirColor}33`,
-                      }}
-                    >
-                      <Icon size={20} strokeWidth={2.25} />
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
-                        <div style={{ fontSize: 15, fontWeight: 700, color: latest?.dir === "missed" ? tokens.red : tokens.text }}>
-                          {group.displayName || group.peerId}
-                        </div>
-                        {group.blocked ? (
-                          <span style={{ fontSize: 11, fontWeight: 700, color: tokens.orange }}>Blocked</span>
-                        ) : null}
-                      </div>
-                      <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 6 }}>
-                        <span style={{ fontSize: 11, fontWeight: 700, color: dirColor, background: dirBg, borderRadius: 999, padding: "3px 8px" }}>
-                          {meta.label}
-                        </span>
-                        <span style={{ fontSize: 11, fontWeight: 600, color: tokens.label }}>
-                          {group.totalCount} call{group.totalCount === 1 ? "" : "s"}
-                        </span>
-                        <span style={{ fontSize: 11, fontWeight: 600, color: tokens.label }}>
-                          {group.missedCount > 0 ? `${group.missedCount} missed` : ""}
-                          {group.missedCount > 0 && (group.incomingCount > 0 || group.outgoingCount > 0) ? " · " : ""}
-                          {group.incomingCount > 0 ? `${group.incomingCount} incoming` : ""}
-                          {group.incomingCount > 0 && group.outgoingCount > 0 ? " · " : ""}
-                          {group.outgoingCount > 0 ? `${group.outgoingCount} outgoing` : ""}
-                        </span>
-                      </div>
-                      <div style={{ fontSize: 12, color: tokens.secondary, marginTop: 6, fontWeight: 600 }}>
-                        {latest ? fullDateTime(latest.ts) : "—"}
-                      </div>
-                      <div style={{ fontSize: 11, color: tokens.label, marginTop: 2, wordBreak: "break-all" }}>
-                        {group.peerId || "Unknown"}
-                      </div>
-                    </div>
-                  </div>
-                  <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-                    <button
-                      type="button"
-                      onClick={() => deleteCallLogGroup(group.peerId)}
-                      style={{
-                        border: `1px solid ${tokens.red}55`,
-                        background: `${tokens.red}12`,
-                        color: tokens.red,
-                        borderRadius: 10,
-                        padding: "10px 8px",
-                        fontWeight: 700,
-                        fontSize: 13,
-                        cursor: "pointer",
-                        display: "inline-flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        gap: 6,
-                      }}
-                    >
-                      <Trash2 size={15} /> Delete
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => (isMobile ? void callAnyMobile(group.peerId, group.displayName) : callMeshNetwork(group.peerId, group.displayName))}
-                      style={{
-                        flex: 1,
-                        minWidth: 72,
-                        border: "none",
-                        background: `${tokens.green}22`,
-                        color: tokens.green,
-                        borderRadius: 10,
-                        padding: "10px 8px",
-                        fontWeight: 700,
-                        fontSize: 13,
-                        cursor: "pointer",
-                        display: "inline-flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        gap: 6,
-                      }}
-                    >
-                      <Phone size={15} /> Call
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => (isMobile ? void msgAnyMobile(group.peerId) : msgMeshNetwork(group.peerId, group.displayName))}
-                      style={{
-                        flex: 1,
-                        minWidth: 72,
-                        border: "none",
-                        background: `${tokens.blue}18`,
-                        color: tokens.blue,
-                        borderRadius: 10,
-                        padding: "10px 8px",
-                        fontWeight: 700,
-                        fontSize: 13,
-                        cursor: "pointer",
-                        display: "inline-flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        gap: 6,
-                      }}
-                    >
-                      <MessageCircle size={15} /> Msg
-                    </button>
-                  </div>
-                  <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
-                    {group.entries.slice(0, 4).map((entry) => {
-                      const entryIcon = entry.dir === "missed" ? PhoneMissed : entry.dir === "in" ? PhoneIncoming : PhoneOutgoing;
-                      const entryMeta = callLogDirMeta(entry.dir);
-                      return (
-                        <div key={entry.id} style={{ padding: "8px 10px", borderRadius: 10, background: `${tokens.fill}`, border: `1px solid ${tokens.sep}` }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: entry.dir === "missed" ? tokens.red : entry.dir === "in" ? tokens.green : tokens.blue }}>
-                            <entryIcon size={12} />
-                            {entryMeta.label}
-                          </div>
-                          <div style={{ fontSize: 12, color: tokens.label, marginTop: 3 }}>
-                            {fullDateTime(entry.ts)}
-                            {entry.duration > 0 ? ` · ${fmt(entry.duration)}` : entry.dir === "missed" ? " · No answer" : " · Not connected"}
-                            {entry.method ? ` · ${entry.method}` : ""}
-                          </div>
-                        </div>
-                      );
-                    })}
-                    {group.entries.length > 4 ? <div style={{ fontSize: 11, color: tokens.label }}>+ {group.entries.length - 4} more entries</div> : null}
-                  </div>
-                </div>
-              );
-            })}
+            <EmptyState
+              title="No online mesh peers"
+              body="When nearby or linked peers come online, they will appear here."
+            />
           </CardList>
-          </>
         )}
-
+        {tab === "logs" && (
+          <CardList>
+            {latestLocalCommLog.length === 0 ? (
+              <EmptyState title="No local logs yet" body="Calls, inbox, sent, missed, and blocked actions will appear here on this device only." />
+            ) : (
+              latestLocalCommLog.map((row) => renderLogRow(row, true))
+            )}
+          </CardList>
+        )}
         {tab === "contacts" && (
           <>
             {/* Toolbar — Truecaller-style actions */}
@@ -3773,7 +5745,7 @@ export default function GridCaller({
               <input
                 ref={fileImportRef}
                 type="file"
-                accept="application/json,.json"
+                accept="application/json,.json,.csv,.vcf,.vcard,text/csv,text/vcard"
                 style={{ display: "none" }}
                 onChange={(e) => {
                   const f = e.target.files?.[0];
@@ -4383,8 +6355,9 @@ export default function GridCaller({
           </ContactSheet>
         )}
 
-        {tab === "sms" && (
+        {(tab === "sms" || tab === "groups") && (
           <>
+            <div style={{ display: tab === "sms" ? "block" : "none" }}>
             <div style={{ padding: "10px 16px 0", display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button
                 type="button"
@@ -4706,7 +6679,7 @@ export default function GridCaller({
                           whiteSpace: "nowrap",
                         }}
                       >
-                        {t.text}
+                        {t.text || summarizeGroupAttachment(t.attachment) || "Attachment"}
                       </div>
                       <div style={{ fontSize: 11, color: tokens.label, marginTop: 3 }}>{fullDateTime(t.ts)}</div>
                     </div>
@@ -4779,9 +6752,1141 @@ export default function GridCaller({
                 </div>
               ))}
             </CardList>
+            </div>
+
+            <div style={{ display: tab === "groups" ? "block" : "none" }}>
+              <div
+                style={{
+                  margin: "10px 12px 0",
+                  padding: 12,
+                  borderRadius: 12,
+                  background: tokens.card,
+                  border: `1px solid ${tokens.sep}`,
+                }}
+              >
+                <div ref={gridchatHeaderRef} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, position: "relative" }}>
+                  <div style={{ fontSize: 24, fontWeight: 800, color: tokens.text }}>Gridchat</div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setGridchatMoreMenuOpen(false);
+                        setGridchatCreateMenuOpen((v) => !v);
+                      }}
+                      style={{
+                        border: `1px solid ${tokens.sep}`,
+                        background: tokens.fill,
+                        color: tokens.text,
+                        width: 34,
+                        height: 34,
+                        borderRadius: 10,
+                        display: "grid",
+                        placeItems: "center",
+                        cursor: "pointer",
+                      }}
+                      title="New group"
+                    >
+                      <Plus size={16} />
+                    </button>
+                    {gridchatCreateMenuOpen && (
+                      <div
+                        style={{
+                          position: "absolute",
+                          right: 44,
+                          top: 38,
+                          width: "min(86vw, 220px)",
+                          border: `1px solid ${tokens.sep}`,
+                          background: tokens.card,
+                          borderRadius: 10,
+                          boxShadow: tokens.shadow,
+                          zIndex: 9,
+                          overflow: "hidden",
+                        }}
+                      >
+                        {[
+                          { id: "new-group", label: "New group chat" },
+                          { id: "new-direct", label: "New direct message" },
+                          { id: "new-broadcast", label: "New broadcast" },
+                        ].map((item) => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => {
+                              if (item.id === "new-group") {
+                                openGridchatCreatePanel();
+                                return;
+                              }
+                              setGridchatCreateMenuOpen(false);
+                              setGridchatMoreMenuOpen(false);
+                              setTab("sms");
+                              setThread(null);
+                              setComposeTo("");
+                              setComposeOpen(true);
+                            }}
+                            style={{
+                              width: "100%",
+                              border: "none",
+                              borderBottom: `1px solid ${tokens.sep}`,
+                              background: tokens.card,
+                              color: tokens.text,
+                              textAlign: "left",
+                              padding: "10px 12px",
+                              fontSize: 13,
+                              fontWeight: 700,
+                              cursor: "pointer",
+                            }}
+                          >
+                            {item.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setGridchatCreateMenuOpen(false);
+                        setGridchatMoreMenuOpen((v) => !v);
+                      }}
+                      style={{
+                        border: `1px solid ${tokens.sep}`,
+                        background: tokens.fill,
+                        color: tokens.text,
+                        width: 34,
+                        height: 34,
+                        borderRadius: 10,
+                        display: "grid",
+                        placeItems: "center",
+                        cursor: "pointer",
+                      }}
+                      title="More"
+                    >
+                      <EllipsisVertical size={16} />
+                    </button>
+                    {gridchatMoreMenuOpen && (
+                      <div
+                        style={{
+                          position: "absolute",
+                          right: 0,
+                          top: 38,
+                          width: "min(86vw, 230px)",
+                          border: `1px solid ${tokens.sep}`,
+                          background: tokens.card,
+                          borderRadius: 10,
+                          boxShadow: tokens.shadow,
+                          zIndex: 9,
+                          overflow: "hidden",
+                        }}
+                      >
+                        {[
+                          { id: "new-group", label: "Create group" },
+                          { id: "status", label: "Status settings" },
+                          { id: "mark-read", label: "Mark all as read" },
+                          { id: "logs", label: "Open local logs" },
+                          { id: "menu", label: "Open main menu" },
+                        ].map((item) => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => {
+                              setGridchatMoreMenuOpen(false);
+                              if (item.id === "new-group") {
+                                openGridchatCreatePanel();
+                                return;
+                              }
+                              if (item.id === "status") {
+                                setGridchatStatusSettingsOpen(true);
+                                return;
+                              }
+                              if (item.id === "mark-read") {
+                                const now = Date.now();
+                                setGridchatLastSeen((prev) => {
+                                  const next = { ...prev };
+                                  for (const row of gridchatItems) next[row.id] = now;
+                                  return next;
+                                });
+                                return;
+                              }
+                              if (item.id === "logs") {
+                                setTab("logs");
+                                return;
+                              }
+                              setMenuView("home");
+                              setMenuFullscreen(false);
+                              setMenuOpen(true);
+                            }}
+                            style={{
+                              width: "100%",
+                              border: "none",
+                              borderBottom: `1px solid ${tokens.sep}`,
+                              background: tokens.card,
+                              color: tokens.text,
+                              textAlign: "left",
+                              padding: "10px 12px",
+                              fontSize: 13,
+                              fontWeight: 700,
+                              cursor: "pointer",
+                            }}
+                          >
+                            {item.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 8, background: tokens.fill, borderRadius: 12, padding: "8px 10px" }}>
+                  <Search size={15} color={tokens.label} />
+                  <input
+                    value={gridchatSearch}
+                    onChange={(e) => setGridchatSearch(e.target.value)}
+                    placeholder="Search or start a new Gridchat"
+                    style={{ flex: 1, border: "none", background: "transparent", outline: "none", color: tokens.text, fontSize: 14 }}
+                  />
+                </div>
+
+                <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                  {[
+                    { id: "all" as GridchatFilter, label: "All" },
+                    { id: "unread" as GridchatFilter, label: `Unread ${gridchatUnreadTotal}` },
+                    { id: "favourites" as GridchatFilter, label: `Favourites ${gridchatFavourites.length}` },
+                  ].map((chip) => {
+                    const active = gridchatFilter === chip.id;
+                    return (
+                      <button
+                        key={chip.id}
+                        type="button"
+                        onClick={() => setGridchatFilter(chip.id)}
+                        style={{
+                          border: active ? "none" : `1px solid ${tokens.sep}`,
+                          background: active ? `${tokens.green}30` : tokens.card,
+                          color: active ? "#053318" : tokens.text,
+                          borderRadius: 999,
+                          padding: "6px 12px",
+                          fontSize: 12,
+                          fontWeight: 700,
+                          cursor: "pointer",
+                        }}
+                      >
+                        {chip.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div style={{ marginTop: 10, position: "relative" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                    <div style={{ fontSize: 12, color: tokens.label, fontWeight: 700 }}>Status</div>
+                    <button
+                      type="button"
+                      onClick={() => setGridchatStatusSettingsOpen((v) => !v)}
+                      style={{
+                        border: `1px solid ${tokens.sep}`,
+                        background: tokens.fill,
+                        color: tokens.text,
+                        width: 26,
+                        height: 26,
+                        borderRadius: 8,
+                        display: "grid",
+                        placeItems: "center",
+                        cursor: "pointer",
+                      }}
+                      title="Status settings"
+                    >
+                      <EllipsisVertical size={13} />
+                    </button>
+                  </div>
+                  {gridchatStatusSettingsOpen && (
+                    <div
+                      style={{
+                        position: "absolute",
+                        right: 0,
+                        top: 28,
+                        width: 236,
+                        border: `1px solid ${tokens.sep}`,
+                        background: tokens.card,
+                        borderRadius: 10,
+                        boxShadow: tokens.shadow,
+                        zIndex: 5,
+                        overflow: "hidden",
+                      }}
+                    >
+                      <button
+                        type="button"
+                        onClick={setMyGridchatStatus}
+                        style={{ width: "100%", border: "none", borderBottom: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.text, textAlign: "left", padding: "10px 12px", fontWeight: 700, cursor: "pointer" }}
+                      >
+                        Set my status
+                      </button>
+                      <button
+                        type="button"
+                        onClick={applyGridchatStatusTemplate}
+                        style={{ width: "100%", border: "none", borderBottom: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.text, textAlign: "left", padding: "10px 12px", fontWeight: 700, cursor: "pointer" }}
+                      >
+                        Apply template
+                      </button>
+                      <button
+                        type="button"
+                        onClick={setGridchatPrivacySetting}
+                        style={{ width: "100%", border: "none", borderBottom: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.text, textAlign: "left", padding: "10px 12px", fontWeight: 700, cursor: "pointer" }}
+                      >
+                        Privacy: {gridchatStatusPrivacy}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={setGridchatStatusAutoClear}
+                        style={{ width: "100%", border: "none", borderBottom: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.text, textAlign: "left", padding: "10px 12px", fontWeight: 700, cursor: "pointer" }}
+                      >
+                        Auto-clear: {gridchatStatusAutoClearHours <= 0 ? "off" : `${gridchatStatusAutoClearHours}h`}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={setGridchatStatusRing}
+                        style={{ width: "100%", border: "none", borderBottom: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.text, textAlign: "left", padding: "10px 12px", fontWeight: 700, cursor: "pointer" }}
+                      >
+                        Ring color: {gridchatStatusRingColor}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={toggleGridchatStatusStealth}
+                        style={{ width: "100%", border: "none", borderBottom: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.text, textAlign: "left", padding: "10px 12px", fontWeight: 700, cursor: "pointer" }}
+                      >
+                        Stealth mode: {gridchatStatusStealthMode ? "on" : "off"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={archiveMyGridchatStatus}
+                        style={{ width: "100%", border: "none", borderBottom: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.text, textAlign: "left", padding: "10px 12px", fontWeight: 700, cursor: "pointer" }}
+                      >
+                        Archive current status
+                      </button>
+                      <button
+                        type="button"
+                        onClick={restoreLastArchivedGridchatStatus}
+                        style={{ width: "100%", border: "none", borderBottom: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.text, textAlign: "left", padding: "10px 12px", fontWeight: 700, cursor: "pointer" }}
+                      >
+                        Restore archived ({gridchatStatusArchive.length})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={copyMyGridchatStatusLine}
+                        style={{ width: "100%", border: "none", borderBottom: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.text, textAlign: "left", padding: "10px 12px", fontWeight: 700, cursor: "pointer" }}
+                      >
+                        Copy status line
+                      </button>
+                      <button
+                        type="button"
+                        onClick={clearMyGridchatStatus}
+                        style={{ width: "100%", border: "none", background: tokens.card, color: tokens.red, textAlign: "left", padding: "10px 12px", fontWeight: 700, cursor: "pointer" }}
+                      >
+                        Clear my status
+                      </button>
+                    </div>
+                  )}
+                  <div style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 4 }}>
+                    <button
+                      type="button"
+                      onClick={setMyGridchatStatus}
+                      style={{
+                        border: `1px solid ${tokens.sep}`,
+                        background: tokens.bg,
+                        color: tokens.text,
+                        borderRadius: 12,
+                        minWidth: 106,
+                        maxWidth: 122,
+                        padding: "8px 8px 9px",
+                        cursor: "pointer",
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        gap: 5,
+                      }}
+                      title={gridchatMyStatusText ? `My status: ${gridchatMyStatusText}` : "Set my status"}
+                    >
+                      <div style={{ position: "relative" }}>
+                        <div
+                          style={{
+                            width: 48,
+                            height: 48,
+                            borderRadius: 24,
+                            background: gridchatStatusRingColor === "green" ? tokens.green : gridchatStatusRingColor === "orange" ? tokens.orange : gridchatStatusRingColor === "red" ? tokens.red : tokens.blue,
+                            display: "grid",
+                            placeItems: "center",
+                          }}
+                        >
+                          <div
+                            style={{
+                              width: 42,
+                              height: 42,
+                              borderRadius: 21,
+                              background: tokens.blue,
+                              color: "#fff",
+                              display: "grid",
+                              placeItems: "center",
+                              fontWeight: 800,
+                              fontSize: 14,
+                            }}
+                          >
+                            {initials(myName || "Me")}
+                          </div>
+                        </div>
+                        <span
+                          style={{
+                            position: "absolute",
+                            right: -1,
+                            bottom: -1,
+                            width: 11,
+                            height: 11,
+                            borderRadius: 999,
+                            background: gridchatMyStatusText ? tokens.blue : tokens.label,
+                            border: `2px solid ${tokens.card}`,
+                          }}
+                        />
+                      </div>
+                      <div style={{ width: "100%", textAlign: "center", fontSize: 11, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        My status
+                      </div>
+                      <div style={{ fontSize: 10, color: tokens.label, fontWeight: 700, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {gridchatMyStatusText || "Tap to add"}
+                      </div>
+                    </button>
+                    {gridchatStatusUsers.length === 0 ? (
+                      <div style={{ fontSize: 12, color: tokens.label }}>No user status yet</div>
+                    ) : (
+                      gridchatStatusUsers.map((u) => (
+                        <button
+                          key={`st_${u.id}`}
+                          type="button"
+                          onClick={() => openGridchatRow({ id: `d:${u.id}`, kind: "direct", peerId: u.id })}
+                          style={{
+                            border: `1px solid ${tokens.sep}`,
+                            background: tokens.bg,
+                            color: tokens.text,
+                            borderRadius: 12,
+                            minWidth: 94,
+                            maxWidth: 110,
+                            padding: "8px 8px 9px",
+                            cursor: "pointer",
+                            display: "flex",
+                            flexDirection: "column",
+                            alignItems: "center",
+                            gap: 5,
+                          }}
+                          title={u.online ? "Online" : u.lastTs ? `Last active ${timeLabel(u.lastTs)}` : "No activity"}
+                        >
+                          <div style={{ position: "relative" }}>
+                            <div
+                              style={{
+                                width: 42,
+                                height: 42,
+                                borderRadius: 21,
+                                background: hue(u.id),
+                                color: "#fff",
+                                display: "grid",
+                                placeItems: "center",
+                                fontWeight: 800,
+                                fontSize: 14,
+                              }}
+                            >
+                              {initials(u.alias)}
+                            </div>
+                            <span
+                              style={{
+                                position: "absolute",
+                                right: -1,
+                                bottom: -1,
+                                width: 11,
+                                height: 11,
+                                borderRadius: 999,
+                                background: u.online ? tokens.green : tokens.label,
+                                border: `2px solid ${tokens.card}`,
+                              }}
+                            />
+                          </div>
+                          <div style={{ width: "100%", textAlign: "center", fontSize: 11, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {u.alias}
+                          </div>
+                          <div style={{ fontSize: 10, color: u.online ? tokens.green : tokens.label, fontWeight: 700 }}>
+                            {u.online ? "online" : gridchatStatusStealthMode ? "hidden" : u.lastTs ? "last seen" : "offline"}
+                          </div>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <CardList>
+                {gridchatItems.length === 0 ? (
+                  <EmptyState title="No Gridchat users/chats yet" body="Create a group or message an online user to start chatting." />
+                ) : (
+                  gridchatItems.map((row) => (
+                    <div key={row.id} style={{ padding: "12px 14px", borderBottom: `0.5px solid ${tokens.sep}` }}>
+                      <div onClick={() => openGridchatRow(row)} style={{ display: "flex", gap: 10, cursor: "pointer" }}>
+                        <div
+                          style={{
+                            width: 46,
+                            height: 46,
+                            borderRadius: 23,
+                            background: row.kind === "group" ? `${tokens.green}28` : hue(row.peerId || row.id),
+                            color: row.kind === "group" ? tokens.green : "#fff",
+                            fontWeight: 800,
+                            display: "grid",
+                            placeItems: "center",
+                            flexShrink: 0,
+                          }}
+                        >
+                          {row.kind === "group" ? <Users size={18} /> : initials(row.alias)}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                            <div style={{ fontSize: 15, fontWeight: 700, color: tokens.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {row.alias}
+                            </div>
+                            <div style={{ fontSize: 11, color: row.unread ? tokens.green : tokens.label, whiteSpace: "nowrap", fontWeight: row.unread ? 700 : 500 }}>
+                              {row.ts ? timeLabel(row.ts) : "new"}
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
+                            {row.mediaIcon === "photo" ? <ImageIcon size={13} color={tokens.label} /> : null}
+                            {row.mediaIcon === "audio" ? <Mic size={13} color={tokens.label} /> : null}
+                            {row.mediaIcon === "video" ? <Video size={13} color={tokens.label} /> : null}
+                            {row.mediaIcon === "doc" ? <Download size={13} color={tokens.label} /> : null}
+                            {row.mediaIcon === "location" ? <MapIcon size={13} color={tokens.label} /> : null}
+                            <div style={{ fontSize: 13, color: tokens.label, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {row.preview}
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 5 }}>
+                            <div style={{ fontSize: 11, color: row.online ? tokens.green : tokens.label, fontWeight: 700 }}>
+                              {row.memberInfo}
+                            </div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              {row.muted ? <BellOff size={13} color={tokens.label} /> : null}
+                              {row.unread > 0 ? (
+                                <span
+                                  style={{
+                                    minWidth: 18,
+                                    height: 18,
+                                    borderRadius: 999,
+                                    background: tokens.green,
+                                    color: "#032112",
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    fontSize: 10,
+                                    fontWeight: 800,
+                                    padding: "0 6px",
+                                  }}
+                                >
+                                  {row.unread > 99 ? "99+" : row.unread}
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
+                        <button
+                          type="button"
+                          onClick={() => openGridchatRow(row)}
+                          style={{ ...compactActionBtn(tokens), borderRadius: 999, padding: "6px 10px" }}
+                        >
+                          <MessageCircle size={13} /> Open
+                        </button>
+                        {row.kind === "group" && row.groupId ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => void startGroupCall(row.groupId!, "audio")}
+                              style={{ ...compactActionBtn(tokens), borderRadius: 999, padding: "6px 10px" }}
+                            >
+                              <Phone size={13} /> Call
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void startGroupCall(row.groupId!, "video")}
+                              style={{ ...compactActionBtn(tokens), borderRadius: 999, padding: "6px 10px" }}
+                            >
+                              <Video size={13} /> Video
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => shareGroupLocation(row.groupId!)}
+                              style={{ ...compactActionBtn(tokens), borderRadius: 999, padding: "6px 10px" }}
+                            >
+                              <MapIcon size={13} /> Location
+                            </button>
+                          </>
+                        ) : row.peerId ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => void placeCallLocal(row.peerId!, row.name)}
+                              style={{ ...compactActionBtn(tokens), borderRadius: 999, padding: "6px 10px" }}
+                            >
+                              <Phone size={13} /> Voice
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setComposeOpen(true);
+                                setComposeTo(row.peerId!);
+                                setTab("sms");
+                              }}
+                              style={{ ...compactActionBtn(tokens), borderRadius: 999, padding: "6px 10px" }}
+                            >
+                              <Pencil size={13} /> Message
+                            </button>
+                          </>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() => toggleGridchatFavourite(row.id)}
+                          style={{ ...compactActionBtn(tokens), borderRadius: 999, padding: "6px 10px" }}
+                        >
+                          {row.favourite ? <Star size={13} fill={tokens.orange} color={tokens.orange} /> : <StarOff size={13} />} {row.favourite ? "Fav" : "Favourite"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => toggleGridchatMuted(row.id)}
+                          style={{ ...compactActionBtn(tokens), borderRadius: 999, padding: "6px 10px" }}
+                        >
+                          <BellOff size={13} /> {row.muted ? "Unmute" : "Mute"}
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </CardList>
+
+              <div
+                ref={gridchatCreatePanelRef}
+                style={{
+                  margin: "10px 12px",
+                  padding: 12,
+                  borderRadius: 12,
+                  background: tokens.card,
+                  border: `1px solid ${tokens.sep}`,
+                }}
+              >
+                <div style={{ fontSize: 12, color: tokens.label, fontWeight: 700, marginBottom: 8 }}>
+                  Create Gridchat group (full stack sync)
+                </div>
+                <input
+                  value={groupNameInput}
+                  onChange={(e) => setGroupNameInput(e.target.value)}
+                  placeholder="Group name"
+                  style={{ ...settingsInputStyle(tokens), margin: "0 0 8px" }}
+                />
+                <input
+                  value={groupMembersInput}
+                  onChange={(e) => setGroupMembersInput(e.target.value)}
+                  placeholder="Member IDs / numbers / handles (comma separated)"
+                  style={{ ...settingsInputStyle(tokens), margin: 0 }}
+                />
+                <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+                  {peers.slice(0, 10).map((p) => (
+                    <button
+                      key={`gpick_${p.id}`}
+                      type="button"
+                      onClick={() => {
+                        setGroupMembersInput((prev) => {
+                          const add = p.id;
+                          const parts = Array.from(new Set(prev.split(/[,\n]/).map((x) => x.trim()).filter(Boolean)));
+                          if (!parts.includes(add)) parts.push(add);
+                          return parts.join(", ");
+                        });
+                      }}
+                      style={{
+                        border: `1px solid ${tokens.sep}`,
+                        background: tokens.fill,
+                        color: tokens.text,
+                        borderRadius: 999,
+                        padding: "5px 8px",
+                        fontSize: 11,
+                        fontWeight: 700,
+                        cursor: "pointer",
+                      }}
+                    >
+                      + {gridchatAlias(p.name, p.id)}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={createGroupChat}
+                  style={{
+                    width: "100%",
+                    marginTop: 10,
+                    border: "none",
+                    background: tokens.green,
+                    color: "#041510",
+                    borderRadius: 10,
+                    padding: 11,
+                    fontWeight: 800,
+                    cursor: "pointer",
+                  }}
+                >
+                  Create Gridchat
+                </button>
+              </div>
+
+              {activeGroup && (
+                <div
+                  style={{
+                    margin: "10px 12px",
+                    padding: 0,
+                    borderRadius: 12,
+                    background: tokens.card,
+                    border: `1px solid ${tokens.sep}`,
+                    overflow: "hidden",
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "10px 12px", borderBottom: `1px solid ${tokens.sep}`, background: tokens.bar, position: "relative" }}>
+                    <div>
+                      <div style={{ fontWeight: 800, color: tokens.text }}>{activeGroup.name}</div>
+                      <div style={{ fontSize: 11, color: tokens.label, marginTop: 2 }}>{activeGroup.members.length} participants</div>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+                      <button
+                        type="button"
+                        onClick={() => void startGroupCall(activeGroup.id, "video")}
+                        title="Video call"
+                        style={{ border: "none", background: "transparent", color: tokens.text, width: 32, height: 32, borderRadius: 999, display: "grid", placeItems: "center", cursor: "pointer" }}
+                      >
+                        <Video size={18} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void startGroupCall(activeGroup.id, "audio")}
+                        title="Voice call"
+                        style={{ border: "none", background: "transparent", color: tokens.text, width: 32, height: 32, borderRadius: 999, display: "grid", placeItems: "center", cursor: "pointer" }}
+                      >
+                        <Phone size={18} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setGroupChatMenuOpen(false);
+                          setGroupSearchOpen((v) => !v);
+                        }}
+                        title="Search"
+                        style={{ border: "none", background: "transparent", color: tokens.text, width: 32, height: 32, borderRadius: 999, display: "grid", placeItems: "center", cursor: "pointer" }}
+                      >
+                        <Search size={18} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setGroupChatMenuOpen((v) => !v)}
+                        title="More"
+                        style={{ border: "none", background: "transparent", color: tokens.text, width: 32, height: 32, borderRadius: 999, display: "grid", placeItems: "center", cursor: "pointer" }}
+                      >
+                        <EllipsisVertical size={18} />
+                      </button>
+                      {groupChatMenuOpen && (
+                        <div
+                          style={{
+                            position: "absolute",
+                            right: 10,
+                            top: 42,
+                            width: "min(84vw, 230px)",
+                            borderRadius: 12,
+                            border: `1px solid ${tokens.sep}`,
+                            background: tokens.card,
+                            boxShadow: tokens.shadow,
+                            zIndex: 8,
+                            overflow: "hidden",
+                          }}
+                        >
+                          {[
+                            { id: "group-info", label: "Group info" },
+                            { id: "search", label: "Search" },
+                            { id: "mute", label: "Mute notifications" },
+                            { id: "favourite", label: "Add to favourites" },
+                            { id: "share-invite", label: "Share invite" },
+                            { id: "clear-chat", label: "Clear chat" },
+                            { id: "exit-group", label: "Exit group" },
+                            { id: "close", label: "Close" },
+                          ].map((item) => (
+                            <button
+                              key={item.id}
+                              type="button"
+                              onClick={() => runGroupChatMenuAction(item.id, activeGroup.id, activeGroup.name)}
+                              style={{
+                                width: "100%",
+                                border: "none",
+                                borderBottom: `1px solid ${tokens.sep}`,
+                                background: tokens.card,
+                                color: item.id === "exit-group" ? tokens.red : tokens.text,
+                                textAlign: "left",
+                                padding: "10px 12px",
+                                fontSize: 13,
+                                fontWeight: 600,
+                                cursor: "pointer",
+                              }}
+                            >
+                              {item.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {groupSearchOpen && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: `1px solid ${tokens.sep}`, background: tokens.fill }}>
+                      <Search size={14} color={tokens.label} />
+                      <input
+                        value={groupSearchQuery}
+                        onChange={(e) => setGroupSearchQuery(e.target.value)}
+                        placeholder="Search in this group"
+                        style={{ flex: 1, border: "none", background: "transparent", color: tokens.text, outline: "none", fontSize: 13 }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setGroupSearchQuery("");
+                          setGroupSearchOpen(false);
+                        }}
+                        style={{ border: "none", background: "transparent", color: tokens.blue, fontWeight: 700, cursor: "pointer" }}
+                      >
+                        Close
+                      </button>
+                    </div>
+                  )}
+                  {groupShowStarredOnly && (
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 12px", borderBottom: `1px solid ${tokens.sep}`, background: tokens.fill }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: tokens.text }}>Showing starred in this group</div>
+                      <button
+                        type="button"
+                        onClick={() => setGroupShowStarredOnly(false)}
+                        style={{ border: "none", background: "transparent", color: tokens.blue, fontWeight: 700, cursor: "pointer" }}
+                      >
+                        Show all
+                      </button>
+                    </div>
+                  )}
+                  {groupSelectMode && (
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 12px", borderBottom: `1px solid ${tokens.sep}`, background: tokens.fill }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: tokens.text }}>{groupSelectedMessageIds.length} selected</div>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setGroupSelectMode(false);
+                            setGroupSelectedMessageIds([]);
+                          }}
+                          style={{ border: "none", background: "transparent", color: tokens.label, fontWeight: 700, cursor: "pointer" }}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={deleteSelectedGroupMessages}
+                          style={{ border: "none", background: "transparent", color: tokens.red, fontWeight: 700, cursor: "pointer" }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  <div
+                    style={{
+                      maxHeight: 280,
+                      overflowY: "auto",
+                      padding: "12px 10px",
+                      backgroundColor: tokens.dark ? "#0e0e10" : "#efeae2",
+                      backgroundImage:
+                        "radial-gradient(rgba(0,0,0,0.035) 1px, transparent 1px), radial-gradient(rgba(0,0,0,0.02) 1px, transparent 1px)",
+                      backgroundSize: "22px 22px, 44px 44px",
+                      backgroundPosition: "0 0, 11px 11px",
+                    }}
+                  >
+                    {visibleGroupMsgs.length === 0 ? (
+                      <div style={{ color: tokens.label, fontSize: 12 }}>{groupSearchQuery.trim() || groupShowStarredOnly ? "No matching group messages" : "No group messages yet"}</div>
+                    ) : (
+                      visibleGroupMsgs.slice(-80).map((m) => {
+                        const isStarred = starredMessageIds.includes(m.id);
+                        const isSelected = groupSelectedMessageIds.includes(m.id);
+                        return (
+                        <div key={m.id} style={{ marginBottom: 8, display: "flex", justifyContent: m.mine ? "flex-end" : "flex-start" }}>
+                          <div
+                            onClick={() => {
+                              if (groupSelectMode) toggleGroupMessageSelection(m.id);
+                            }}
+                            style={{
+                              maxWidth: "75%",
+                              color: m.mine ? (tokens.dark ? "#e8fff4" : "#111") : tokens.text,
+                              fontSize: 13,
+                              background: m.mine ? (tokens.dark ? "#144d37" : "#dcf8c6") : tokens.card,
+                              border: groupSelectMode && isSelected ? `2px solid ${tokens.blue}` : m.mine ? "none" : `1px solid ${tokens.sep}`,
+                              borderRadius: 15,
+                              padding: "8px 10px",
+                              cursor: groupSelectMode ? "pointer" : "default",
+                            }}
+                          >
+                            <div>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (!m.system) openChatProfile(m.fromId, m.fromName, "group", activeGroup.id);
+                                }}
+                                style={{ border: "none", background: "transparent", color: m.mine ? tokens.blue : tokens.green, fontWeight: 800, padding: 0, margin: 0, cursor: m.system ? "default" : "pointer" }}
+                                title={m.system ? "System message" : "Open contact info"}
+                              >
+                                {m.fromName}
+                              </button>
+                              {m.system ? <span style={{ color: tokens.orange }}> · system</span> : null}: {m.text}
+                            </div>
+                            {m.attachment?.kind === "location" && m.attachment.lat != null && m.attachment.lng != null ? (
+                              <div style={{ fontSize: 12, marginTop: 2 }}>
+                                Location: {m.attachment.lat.toFixed(5)}, {m.attachment.lng.toFixed(5)}
+                              </div>
+                            ) : null}
+                            {m.attachment?.dataUrl ? (
+                              <div style={{ marginTop: 4 }}>
+                                {m.attachment.kind === "image" ? (
+                                  <img src={m.attachment.dataUrl} alt={m.attachment.name} style={{ maxWidth: "100%", borderRadius: 8 }} />
+                                ) : m.attachment.kind === "audio" ? (
+                                  <audio controls src={m.attachment.dataUrl} style={{ width: "100%" }} />
+                                ) : m.attachment.kind === "video" ? (
+                                  <video controls src={m.attachment.dataUrl} style={{ width: "100%", borderRadius: 8 }} />
+                                ) : (
+                                  <a href={m.attachment.dataUrl} download={m.attachment.name} style={{ color: m.mine ? "#fff" : tokens.blue, fontWeight: 700 }}>
+                                    Download {m.attachment.name}
+                                  </a>
+                                )}
+                              </div>
+                            ) : null}
+                            <div style={{ fontSize: 10, color: m.mine ? "rgba(255,255,255,0.8)" : tokens.label, marginTop: 2, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                              <span>{fullDateTime(m.ts)}</span>
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                                <button
+                                  type="button"
+                                  title={isStarred ? "Unstar" : "Star"}
+                                  onClick={() => toggleStarMessage(m.id)}
+                                  style={{ border: "none", background: "rgba(0,0,0,0.12)", color: isStarred ? "#ffd54a" : tokens.text, borderRadius: 10, padding: "2px 6px", cursor: "pointer", display: "inline-flex", alignItems: "center" }}
+                                >
+                                  {isStarred ? <Star size={12} fill="#ffd54a" color="#ffd54a" /> : <StarOff size={12} />}
+                                </button>
+                                {groupSelectMode ? (
+                                  <button
+                                    type="button"
+                                    title={isSelected ? "Unselect" : "Select"}
+                                    onClick={() => toggleGroupMessageSelection(m.id)}
+                                    style={{ border: "none", background: "rgba(0,0,0,0.12)", color: tokens.text, borderRadius: 10, padding: "2px 6px", cursor: "pointer", display: "inline-flex", alignItems: "center" }}
+                                  >
+                                    {isSelected ? <CheckCircle2 size={12} /> : <Circle size={12} />}
+                                  </button>
+                                ) : null}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      );})
+                    )}
+                  </div>
+                  <div style={{ position: "relative", padding: "10px 10px 12px", background: tokens.dark ? "#1b1b1f" : "#f0f2f5", borderTop: `1px solid ${tokens.sep}` }}>
+                    {groupAttachMenuOpen && (
+                      <div
+                        style={{
+                          position: "absolute",
+                          left: 0,
+                          bottom: 56,
+                          width: "min(92vw, 280px)",
+                          borderRadius: 14,
+                          border: `1px solid ${tokens.sep}`,
+                          background: tokens.card,
+                          boxShadow: tokens.shadow,
+                          zIndex: 3,
+                          overflow: "hidden",
+                        }}
+                      >
+                        {[
+                          { id: "document" as const, label: "Document", icon: <Download size={16} color={tokens.blue} /> },
+                          { id: "photos" as const, label: "Photos & videos", icon: <ImageIcon size={16} color={tokens.green} /> },
+                          { id: "camera" as const, label: "Camera", icon: <Camera size={16} color={tokens.red} /> },
+                          { id: "audio" as const, label: "Audio", icon: <Mic size={16} color={tokens.orange} /> },
+                          { id: "contact" as const, label: "Contact", icon: <IdCard size={16} color={tokens.blue} /> },
+                          { id: "poll" as const, label: "Poll", icon: <CheckCircle2 size={16} color={tokens.green} /> },
+                          { id: "event" as const, label: "Event", icon: <CalendarDays size={16} color={tokens.orange} /> },
+                          { id: "sticker" as const, label: "Sticker", icon: <Sparkles size={16} color={tokens.red} /> },
+                        ].map((item) => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => runGridchatAttachAction(activeGroup.id, item.id)}
+                            style={{
+                              width: "100%",
+                              border: "none",
+                              borderBottom: `1px solid ${tokens.sep}`,
+                              background: tokens.card,
+                              color: tokens.text,
+                              padding: "11px 12px",
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 10,
+                              fontWeight: 700,
+                              cursor: "pointer",
+                              textAlign: "left",
+                            }}
+                          >
+                            {item.icon}
+                            {item.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setGroupChatMenuOpen(false);
+                          setGroupAttachMenuOpen((v) => !v);
+                        }}
+                        style={{
+                          width: 38,
+                          height: 38,
+                          borderRadius: 999,
+                          border: "none",
+                          background: tokens.dark ? "#38383d" : "#ffffff",
+                          color: tokens.text,
+                          display: "grid",
+                          placeItems: "center",
+                          cursor: "pointer",
+                          flexShrink: 0,
+                        }}
+                        title="Attach"
+                      >
+                        <Plus size={16} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => sendGridchatSticker(activeGroup.id)}
+                        style={{
+                          width: 38,
+                          height: 38,
+                          borderRadius: 999,
+                          border: "none",
+                          background: tokens.dark ? "#38383d" : "#ffffff",
+                          color: tokens.text,
+                          display: "grid",
+                          placeItems: "center",
+                          cursor: "pointer",
+                          flexShrink: 0,
+                        }}
+                        title="Sticker"
+                      >
+                        <Sparkles size={16} />
+                      </button>
+                      <input
+                        value={groupDraft}
+                        onChange={(e) => setGroupDraft(e.target.value)}
+                        placeholder="Type a message"
+                        style={{ ...settingsInputStyle(tokens), margin: 0, flex: 1, borderRadius: 999, boxShadow: "none", background: tokens.dark ? "#2f2f32" : "#ffffff" }}
+                        onFocus={() => {
+                          setGroupAttachMenuOpen(false);
+                          setGroupChatMenuOpen(false);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && groupDraft.trim()) {
+                            sendGroupMessage(activeGroup.id, groupDraft);
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (groupDraft.trim()) {
+                            sendGroupMessage(activeGroup.id, groupDraft);
+                            return;
+                          }
+                          setErr("Type a message or use + to attach");
+                        }}
+                        style={{
+                          width: 42,
+                          height: 42,
+                          borderRadius: 999,
+                          border: "none",
+                          background: tokens.blue,
+                          color: "#fff",
+                          display: "grid",
+                          placeItems: "center",
+                          cursor: "pointer",
+                          flexShrink: 0,
+                        }}
+                        title={groupDraft.trim() ? "Send" : "Voice"}
+                      >
+                        {groupDraft.trim() ? <MessageCircle size={17} /> : <Mic size={17} />}
+                      </button>
+                    </div>
+
+                    <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+                      <button
+                        type="button"
+                        onClick={() => shareGroupLocation(activeGroup.id)}
+                        style={{ ...compactActionBtn(tokens), borderRadius: 999, padding: "6px 10px" }}
+                      >
+                        <MapIcon size={13} /> Share location
+                      </button>
+                    </div>
+                  </div>
+
+                  <input
+                    ref={groupMediaInputRef}
+                    type="file"
+                    accept="image/*,video/*"
+                    style={{ display: "none" }}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) shareGroupFile(activeGroup.id, f);
+                      e.target.value = "";
+                    }}
+                  />
+                  <input
+                    ref={groupDocumentInputRef}
+                    type="file"
+                    accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.json,.xml"
+                    style={{ display: "none" }}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) shareGroupFile(activeGroup.id, f);
+                      e.target.value = "";
+                    }}
+                  />
+                  <input
+                    ref={groupCameraInputRef}
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    style={{ display: "none" }}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) shareGroupFile(activeGroup.id, f);
+                      e.target.value = "";
+                    }}
+                  />
+                  <input
+                    ref={groupAudioInputRef}
+                    type="file"
+                    accept="audio/*"
+                    style={{ display: "none" }}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) shareGroupFile(activeGroup.id, f);
+                      e.target.value = "";
+                    }}
+                  />
+                </div>
+              )}
+            </div>
           </>
         )}
       </div>
+
+      {renderChatProfileOverlay()}
 
       {/* ═══ Hamburger menu: network people + map + settings ═══ */}
       {menuOpen && (
@@ -4791,21 +7896,23 @@ export default function GridCaller({
             position: "absolute",
             inset: 0,
             zIndex: 100,
-            background: "rgba(0,0,0,.45)",
+            background: menuFullscreen ? tokens.bg : "rgba(0,0,0,.45)",
             display: "flex",
             boxSizing: "border-box",
           }}
-          onClick={() => setMenuOpen(false)}
+          onClick={() => {
+            if (!menuFullscreen) setMenuOpen(false);
+          }}
         >
           <div
             onClick={(e) => e.stopPropagation()}
             style={{
-              width: "min(86%, 340px)",
+              width: menuFullscreen ? "100%" : "min(86%, 340px)",
               maxWidth: "100%",
               height: "100%",
               maxHeight: "100%",
               background: tokens.card,
-              borderRight: `1px solid ${tokens.sep}`,
+              borderRight: menuFullscreen ? "none" : `1px solid ${tokens.sep}`,
               display: "flex",
               flexDirection: "column",
               boxShadow: tokens.shadow,
@@ -4828,7 +7935,15 @@ export default function GridCaller({
             >
               <button
                 type="button"
-                onClick={() => (menuView === "home" ? setMenuOpen(false) : setMenuView("home"))}
+                onClick={() => {
+                  if (menuView === "home") {
+                    setMenuOpen(false);
+                    setMenuFullscreen(false);
+                  } else {
+                    setMenuView("home");
+                    setMenuFullscreen(false);
+                  }
+                }}
                 style={{ border: "none", background: "transparent", color: tokens.blue, cursor: "pointer", padding: 4 }}
               >
                 {menuView === "home" ? <X size={22} /> : <ChevronLeft size={22} />}
@@ -4852,7 +7967,9 @@ export default function GridCaller({
                                 ? "Privacy"
                                 : menuView === "emergency"
                                   ? "Emergency / Mesh"
-                                  : "Settings"}
+                                  : menuView === "logs"
+                                    ? "Logs"
+                                    : "Settings"}
               </div>
             </div>
 
@@ -4902,6 +8019,9 @@ export default function GridCaller({
                         icon: <Shield size={20} color={isPrivacyMode() ? tokens.green : tokens.orange} />,
                         title: "Emergency / Mesh",
                       },
+                      { id: "groupchat" as const, icon: <MessageSquare size={20} color={tokens.blue} />, title: "Gridchat" },
+                      { id: "logs" as const, icon: <MessageCircle size={20} color={tokens.orange} />, title: "Logs" },
+                      { id: "radio" as const, icon: <Radio size={20} color={tokens.blue} />, title: "Radio" },
                       { id: "share" as const, icon: <Share2 size={20} color={tokens.green} />, title: "Share app" },
                       { id: "devices" as const, icon: <Wifi size={20} color={tokens.blue} />, title: "Devices" },
                       { id: "tower" as const, icon: <Smartphone size={20} color={tokens.blue} />, title: "Network" },
@@ -4921,7 +8041,19 @@ export default function GridCaller({
                             setApkInfo(a ? { name: a.file.name, url: a.url, size: a.file.size } : null)
                           );
                         }
-                        setMenuView(item.id);
+                        if (item.id === "groupchat") {
+                          setTab("groups");
+                          setMenuOpen(false);
+                          setMenuFullscreen(false);
+                          return;
+                        }
+                        if (item.id === "logs") {
+                          setTab("logs");
+                          setMenuOpen(false);
+                          setMenuFullscreen(false);
+                          return;
+                        }
+                        openMenuFeature(item.id);
                       }}
                       style={{
                         width: "100%",
@@ -5229,7 +8361,7 @@ export default function GridCaller({
                   <div style={{ display: "flex", gap: 8 }}>
                     <button
                       type="button"
-                      onClick={() => setMenuView("radio")}
+                      onClick={() => openMenuFeature("radio")}
                       style={{
                         flex: 1,
                         padding: 10,
@@ -5245,7 +8377,7 @@ export default function GridCaller({
                     </button>
                     <button
                       type="button"
-                      onClick={() => setMenuView("tower")}
+                      onClick={() => openMenuFeature("tower")}
                       style={{
                         flex: 1,
                         padding: 10,
@@ -5264,6 +8396,72 @@ export default function GridCaller({
                   {privacyMsg ? (
                     <div style={{ marginTop: 10, fontSize: 12, color: tokens.green }}>{privacyMsg}</div>
                   ) : null}
+                </>
+              )}
+
+              {menuView === "logs" && (
+                <>
+                  <div style={{ marginBottom: 12, padding: 12, borderRadius: 14, background: `${tokens.orange}12`, border: `1px solid ${tokens.orange}44` }}>
+                    <div style={{ fontSize: 16, fontWeight: 800, color: tokens.text }}>Private device log</div>
+                    <div style={{ fontSize: 12, color: tokens.label, marginTop: 4 }}>
+                      Stored on this device only. No server required.
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+                    <button
+                      type="button"
+                      onClick={() => setLogFiltersOpen((prev) => !prev)}
+                      style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, borderRadius: 12, width: 40, height: 40, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}
+                      title={logFiltersOpen ? "Hide log filters" : "Show log filters"}
+                    >
+                      <Menu size={18} />
+                    </button>
+                    <div style={{ fontSize: 12, color: tokens.label }}>
+                      Open filters to switch between local device and mesh network call/message logs.
+                    </div>
+                  </div>
+                  {logFiltersOpen ? renderLogFilterPanel() : null}
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+                    <button
+                      type="button"
+                      onClick={refreshLocalLogs}
+                      style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, borderRadius: 999, padding: "8px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+                    >
+                      Refresh
+                    </button>
+                    <button
+                      type="button"
+                      onClick={clearLocalLogs}
+                      style={{ border: `1px solid ${tokens.red}55`, background: `${tokens.red}12`, color: tokens.red, borderRadius: 999, padding: "8px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+                    >
+                      Clear log
+                    </button>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+                    {[
+                      { id: "all" as const, label: `All ${localCommLog.length}` },
+                      { id: "calls" as const, label: `Calls ${logStats.calls}` },
+                      { id: "messages" as const, label: `Messages ${logStats.messages}` },
+                      { id: "blocked" as const, label: `Blocked ${logStats.blocked}` },
+                    ].map((item) => {
+                      const active = logFilter === item.id;
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={() => setLogFilter(item.id)}
+                          style={{ border: active ? "none" : `1px solid ${tokens.sep}`, background: active ? tokens.blue : tokens.card, color: active ? "#fff" : tokens.text, borderRadius: 999, padding: "6px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                        >
+                          {item.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {latestLocalCommLog.length === 0 ? (
+                    <div style={{ fontSize: 13, color: tokens.label }}>No local logs yet.</div>
+                  ) : (
+                    latestLocalCommLog.map((row) => renderLogRow(row))
+                  )}
                 </>
               )}
 
@@ -6515,45 +9713,409 @@ export default function GridCaller({
                   >
                   </div>
 
-                  <label style={{ fontSize: 12, color: tokens.label, fontWeight: 600 }}>Channel</label>
-                  <input
-                    value={radioChannel}
-                    onChange={(e) => setRadioChannel(e.target.value)}
-                    placeholder="Channel name"
-                    style={settingsInputStyle(tokens)}
-                  />
-                  <label style={{ fontSize: 12, color: tokens.label, fontWeight: 600 }}>
-                    Password
-                  </label>
-                  <input
-                    value={radioSecret}
-                    onChange={(e) => setRadioSecret(e.target.value)}
-                    placeholder="Channel password"
-                    type="password"
-                    style={settingsInputStyle(tokens)}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void freeRadio.setChannel(radioChannel, radioSecret);
-                      void freeRadio.enable(true);
-                      freeRadio.setOperatorName(myName);
-                      setIdSaveMsg(`Joined ${radioChannel}`);
-                    }}
+                  <div
                     style={{
-                      width: "100%",
-                      padding: 12,
-                      borderRadius: 10,
-                      border: "none",
-                      background: tokens.green,
-                      color: "#041510",
-                      fontWeight: 800,
-                      cursor: "pointer",
-                      marginBottom: 10,
+                      display: "flex",
+                      gap: 8,
+                      marginBottom: 12,
                     }}
                   >
-                    Join channel
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => setRadioSideTab("radio")}
+                      style={{
+                        flex: 1,
+                        padding: "9px 10px",
+                        borderRadius: 999,
+                        border: `1px solid ${tokens.sep}`,
+                        background: radioSideTab === "radio" ? tokens.blue : tokens.fill,
+                        color: radioSideTab === "radio" ? "#fff" : tokens.text,
+                        fontWeight: 700,
+                        fontSize: 12,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Radio
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRadioSideTab("radar")}
+                      style={{
+                        flex: 1,
+                        padding: "9px 10px",
+                        borderRadius: 999,
+                        border: `1px solid ${tokens.sep}`,
+                        background: radioSideTab === "radar" ? tokens.green : tokens.fill,
+                        color: radioSideTab === "radar" ? "#04200f" : tokens.text,
+                        fontWeight: 700,
+                        fontSize: 12,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Nearby radar
+                    </button>
+                  </div>
+
+                  {radioSideTab === "radio" ? (
+                    <>
+
+                  <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+                    <button
+                      type="button"
+                      onClick={() => setRadioPanelTab("channels")}
+                      style={{
+                        flex: 1,
+                        padding: "8px 10px",
+                        borderRadius: 999,
+                        border: `1px solid ${tokens.sep}`,
+                        background: radioPanelTab === "channels" ? tokens.blue : tokens.fill,
+                        color: radioPanelTab === "channels" ? "#fff" : tokens.text,
+                        fontWeight: 700,
+                        fontSize: 12,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Channel list
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRadioPanelTab("groups")}
+                      style={{
+                        flex: 1,
+                        padding: "8px 10px",
+                        borderRadius: 999,
+                        border: `1px solid ${tokens.sep}`,
+                        background: radioPanelTab === "groups" ? tokens.green : tokens.fill,
+                        color: radioPanelTab === "groups" ? "#04200f" : tokens.text,
+                        fontWeight: 700,
+                        fontSize: 12,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Channel groups
+                    </button>
+                  </div>
+
+                  {radioPanelTab === "channels" ? (
+                    <>
+                      <label style={{ fontSize: 12, color: tokens.label, fontWeight: 600 }}>Channel</label>
+                      <input
+                        value={radioChannel}
+                        onChange={(e) => setRadioChannel(e.target.value)}
+                        placeholder="Channel name"
+                        style={settingsInputStyle(tokens)}
+                      />
+                      <label style={{ fontSize: 12, color: tokens.label, fontWeight: 600 }}>
+                        Password
+                      </label>
+                      <input
+                        value={radioSecret}
+                        onChange={(e) => setRadioSecret(e.target.value)}
+                        placeholder="Channel password"
+                        type="password"
+                        style={settingsInputStyle(tokens)}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => joinRadioChannel(radioChannel, radioSecret)}
+                        style={{
+                          width: "100%",
+                          padding: 12,
+                          borderRadius: 10,
+                          border: "none",
+                          background: tokens.green,
+                          color: "#041510",
+                          fontWeight: 800,
+                          cursor: "pointer",
+                          marginBottom: 10,
+                        }}
+                      >
+                        Join channel
+                      </button>
+                      {idSaveMsg ? (
+                        <div style={{ fontSize: 12, color: tokens.green, marginBottom: 10 }}>{idSaveMsg}</div>
+                      ) : null}
+
+                      <div
+                        style={{
+                          border: `1px solid ${tokens.sep}`,
+                          borderRadius: 12,
+                          padding: 10,
+                          marginBottom: 12,
+                          background: tokens.fill,
+                        }}
+                      >
+                        <div style={{ fontSize: 12, color: tokens.label, fontWeight: 700, marginBottom: 8 }}>
+                          Serial channel list (tap to join)
+                        </div>
+                        <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+                          {radioChannels.map((ch, idx) => {
+                            const active = ch === freeRadio.channelName && freeRadio.enabled;
+                            return (
+                              <button
+                                key={ch}
+                                type="button"
+                                onClick={() => joinRadioChannel(ch, radioSecret)}
+                                style={{
+                                  border: `1px solid ${tokens.sep}`,
+                                  borderRadius: 10,
+                                  padding: "8px 10px",
+                                  fontSize: 12,
+                                  fontWeight: 700,
+                                  background: active ? tokens.green : tokens.bg,
+                                  color: active ? "#041510" : tokens.text,
+                                  cursor: "pointer",
+                                  textAlign: "left",
+                                }}
+                              >
+                                {idx + 1}. {ch}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void freeRadio.enable(false);
+                              setIdSaveMsg("Channel exited");
+                            }}
+                            style={{
+                              flex: 1,
+                              padding: 9,
+                              borderRadius: 10,
+                              border: `1px solid ${tokens.sep}`,
+                              background: tokens.bg,
+                              color: tokens.red,
+                              fontWeight: 700,
+                              cursor: "pointer",
+                            }}
+                          >
+                            Exit channel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMenuView("home");
+                              setMenuFullscreen(false);
+                              setRadioSideTab("radio");
+                            }}
+                            style={{
+                              flex: 1,
+                              padding: 9,
+                              borderRadius: 10,
+                              border: `1px solid ${tokens.sep}`,
+                              background: tokens.bg,
+                              color: tokens.text,
+                              fontWeight: 700,
+                              cursor: "pointer",
+                            }}
+                          >
+                            Back to menu
+                          </button>
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div
+                        style={{
+                          border: `1px solid ${tokens.sep}`,
+                          borderRadius: 12,
+                          padding: 10,
+                          marginBottom: 12,
+                          background: tokens.fill,
+                        }}
+                      >
+                        <div style={{ fontSize: 12, color: tokens.label, fontWeight: 700, marginBottom: 8 }}>
+                          Create new group
+                        </div>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <input
+                            value={radioGroupName}
+                            onChange={(e) => setRadioGroupName(e.target.value)}
+                            placeholder="Group name"
+                            style={{ ...settingsInputStyle(tokens), margin: 0, flex: 1 }}
+                          />
+                          <button
+                            type="button"
+                            onClick={createRadioGroup}
+                            style={{
+                              padding: "0 12px",
+                              borderRadius: 10,
+                              border: "none",
+                              background: tokens.green,
+                              color: "#041510",
+                              fontWeight: 800,
+                              cursor: "pointer",
+                            }}
+                          >
+                            Add
+                          </button>
+                        </div>
+                      </div>
+
+                      <div
+                        style={{
+                          border: `1px solid ${tokens.sep}`,
+                          borderRadius: 12,
+                          padding: 10,
+                          marginBottom: 12,
+                          background: tokens.fill,
+                        }}
+                      >
+                        <div style={{ fontSize: 12, color: tokens.label, fontWeight: 700, marginBottom: 8 }}>
+                          Add channel to selected group
+                        </div>
+                        <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                          {radioGroups.map((g, idx) => (
+                            <button
+                              key={g.id}
+                              type="button"
+                              onClick={() => setSelectedRadioGroupId(g.id)}
+                              style={{
+                                border: `1px solid ${tokens.sep}`,
+                                borderRadius: 999,
+                                padding: "6px 10px",
+                                fontSize: 12,
+                                fontWeight: 700,
+                                background: selectedRadioGroupId === g.id ? tokens.blue : tokens.bg,
+                                color: selectedRadioGroupId === g.id ? "#fff" : tokens.text,
+                                cursor: "pointer",
+                              }}
+                            >
+                              {idx + 1}. {g.name}
+                            </button>
+                          ))}
+                        </div>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <input
+                            value={radioGroupChannelInput}
+                            onChange={(e) => setRadioGroupChannelInput(e.target.value)}
+                            placeholder="Channel name"
+                            style={{ ...settingsInputStyle(tokens), margin: 0, flex: 1 }}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!selectedRadioGroupId) {
+                                setErr("Select a group first");
+                                return;
+                              }
+                              addChannelToGroup(selectedRadioGroupId, radioGroupChannelInput || radioChannel);
+                            }}
+                            style={{
+                              padding: "0 12px",
+                              borderRadius: 10,
+                              border: "none",
+                              background: tokens.blue,
+                              color: "#fff",
+                              fontWeight: 700,
+                              cursor: "pointer",
+                            }}
+                          >
+                            Add channel
+                          </button>
+                        </div>
+                      </div>
+
+                      <div style={{ fontSize: 12, color: tokens.label, fontWeight: 700, marginBottom: 8 }}>
+                        Grouped channel workflow
+                      </div>
+                      {radioGroups.map((g, gIdx) => (
+                        <div
+                          key={g.id}
+                          style={{
+                            border: `1px solid ${tokens.sep}`,
+                            borderRadius: 12,
+                            padding: 10,
+                            marginBottom: 10,
+                            background: tokens.fill,
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
+                            <div style={{ fontSize: 13, color: tokens.text, fontWeight: 800 }}>
+                              {gIdx + 1}. {g.name}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => deleteRadioGroup(g.id)}
+                              style={{
+                                border: `1px solid ${tokens.sep}`,
+                                borderRadius: 8,
+                                background: tokens.bg,
+                                color: tokens.red,
+                                fontSize: 11,
+                                fontWeight: 700,
+                                padding: "4px 8px",
+                                cursor: "pointer",
+                              }}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                          {g.channels.length === 0 ? (
+                            <div style={{ fontSize: 12, color: tokens.label }}>No channels in this group.</div>
+                          ) : (
+                            g.channels.map((ch, chIdx) => {
+                              const active = freeRadio.enabled && freeRadio.channelName === ch;
+                              return (
+                                <div
+                                  key={`${g.id}_${ch}`}
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "space-between",
+                                    gap: 8,
+                                    padding: "6px 0",
+                                    borderTop: `1px solid ${tokens.sep}`,
+                                  }}
+                                >
+                                  <div style={{ fontSize: 12, color: tokens.text }}>
+                                    {chIdx + 1}. {ch}
+                                  </div>
+                                  <div style={{ display: "flex", gap: 6 }}>
+                                    <button
+                                      type="button"
+                                      onClick={() => joinRadioChannel(ch, radioSecret)}
+                                      style={{
+                                        border: "none",
+                                        borderRadius: 8,
+                                        background: active ? tokens.green : tokens.blue,
+                                        color: active ? "#041510" : "#fff",
+                                        fontSize: 11,
+                                        fontWeight: 700,
+                                        padding: "5px 8px",
+                                        cursor: "pointer",
+                                      }}
+                                    >
+                                      {active ? "Joined" : "Join"}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => removeChannelFromGroup(g.id, ch)}
+                                      style={{
+                                        border: `1px solid ${tokens.sep}`,
+                                        borderRadius: 8,
+                                        background: tokens.bg,
+                                        color: tokens.red,
+                                        fontSize: 11,
+                                        fontWeight: 700,
+                                        padding: "5px 8px",
+                                        cursor: "pointer",
+                                      }}
+                                    >
+                                      Remove
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
+                      ))}
+                    </>
+                  )}
                   <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
                     <button
                       type="button"
@@ -6718,6 +10280,149 @@ export default function GridCaller({
                   <div style={{ fontSize: 11, color: tokens.label, marginTop: 8, lineHeight: 1.4 }}>
                     ID: <code>{freeRadio.radioNodeId}</code>
                   </div>
+                    </>
+                  ) : (
+                    <>
+                      {(() => {
+                        const radarPeers = meshMapPeers.slice(0, 40);
+                        const farthest = myGps
+                          ? radarPeers.reduce((max, p) => Math.max(max, calcDistanceMeters(myGps, p)), 0)
+                          : 0;
+                        const radarRange = Math.max(200, Math.min(5000, Math.ceil(farthest / 100) * 100 || 300));
+                        return (
+                          <>
+                            <div
+                              style={{
+                                fontSize: 12,
+                                color: tokens.label,
+                                marginBottom: 8,
+                                lineHeight: 1.45,
+                              }}
+                            >
+                              {myGps
+                                ? `Live nearby users: ${radarPeers.length} · range ${radarRange}m`
+                                : "Enable location to see live nearby users on radar."}
+                            </div>
+
+                            <div
+                              style={{
+                                position: "relative",
+                                width: "100%",
+                                aspectRatio: "1 / 1",
+                                maxHeight: 280,
+                                borderRadius: 14,
+                                border: `1px solid ${tokens.sep}`,
+                                background: `radial-gradient(circle at center, ${tokens.fill}, ${tokens.bg})`,
+                                overflow: "hidden",
+                                marginBottom: 12,
+                              }}
+                            >
+                              {[80, 56, 32].map((r) => (
+                                <div
+                                  key={r}
+                                  style={{
+                                    position: "absolute",
+                                    width: `${r}%`,
+                                    height: `${r}%`,
+                                    left: `${(100 - r) / 2}%`,
+                                    top: `${(100 - r) / 2}%`,
+                                    borderRadius: "50%",
+                                    border: `1px solid ${tokens.sep}`,
+                                  }}
+                                />
+                              ))}
+
+                              <div
+                                style={{
+                                  position: "absolute",
+                                  left: "50%",
+                                  top: "50%",
+                                  width: 12,
+                                  height: 12,
+                                  transform: "translate(-50%, -50%)",
+                                  borderRadius: "50%",
+                                  background: tokens.blue,
+                                  boxShadow: `0 0 0 5px ${tokens.blue}22`,
+                                }}
+                                title="You"
+                              />
+
+                              {myGps &&
+                                radarPeers.map((p) => {
+                                  const offset = projectRadarOffset(myGps, p, radarRange);
+                                  const motion = radarMotionRef.current.get(p.id);
+                                  const moving = (motion?.speedMps || 0) > 0.7;
+                                  return (
+                                    <div
+                                      key={p.id}
+                                      title={`${p.name}${p.distance != null ? ` · ${Math.round(p.distance)}m` : ""}`}
+                                      style={{
+                                        position: "absolute",
+                                        left: `${offset.xPct}%`,
+                                        top: `${offset.yPct}%`,
+                                        transform: "translate(-50%, -50%)",
+                                        width: moving ? 12 : 9,
+                                        height: moving ? 12 : 9,
+                                        borderRadius: "50%",
+                                        background: moving ? tokens.green : tokens.orange,
+                                        boxShadow: moving ? `0 0 0 4px ${tokens.green}22` : "none",
+                                      }}
+                                    />
+                                  );
+                                })}
+                            </div>
+
+                            {myGps && (
+                              <div style={{ fontSize: 11, color: tokens.label, marginBottom: 8 }}>
+                                You: {myGps.lat.toFixed(4)}, {myGps.lng.toFixed(4)}
+                              </div>
+                            )}
+
+                            <div style={{ fontSize: 12, color: tokens.label, fontWeight: 700, marginBottom: 6 }}>
+                              Nearby users
+                            </div>
+                            {radarPeers.length === 0 ? (
+                              <div style={{ fontSize: 13, color: tokens.label }}>Waiting for nearby GridCaller users.</div>
+                            ) : (
+                              radarPeers.map((p) => {
+                                const dist = myGps ? calcDistanceMeters(myGps, p) : p.distance ?? null;
+                                const motion = radarMotionRef.current.get(p.id);
+                                const speedMps = motion?.speedMps || 0;
+                                const moving = speedMps > 0.7;
+                                return (
+                                  <div
+                                    key={p.id}
+                                    style={{
+                                      padding: "10px 0",
+                                      borderBottom: `1px solid ${tokens.sep}`,
+                                      display: "flex",
+                                      justifyContent: "space-between",
+                                      gap: 10,
+                                      fontSize: 13,
+                                    }}
+                                  >
+                                    <div style={{ color: tokens.text, minWidth: 0 }}>
+                                      <div style={{ fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                        {p.online ? "●" : "○"} {p.name}
+                                      </div>
+                                      <div style={{ color: tokens.label, fontSize: 11 }}>
+                                        {moving
+                                          ? `Moving · ${(speedMps * 3.6).toFixed(1)} km/h`
+                                          : "Stable"}
+                                      </div>
+                                    </div>
+                                    <div style={{ color: tokens.label, fontSize: 12, flexShrink: 0 }}>
+                                      {dist != null ? `${Math.round(dist)}m` : "-"}
+                                    </div>
+                                  </div>
+                                );
+                              })
+                            )}
+                          </>
+                        );
+                      })()}
+                    </>
+                  )}
                 </>
               )}
 
@@ -7084,8 +10789,8 @@ export default function GridCaller({
                         const st = await pstnBridge.getStatus();
                         setIdSaveMsg(
                           st.configured
-                            ? `Ready · ${st.provider}`
-                            : `Not live · ${st.provider}`
+                            ? `Live mobile calling ready via ${st.provider}`
+                            : `Dry-run only (${st.provider}) · add TWILIO_* on hub for real cellular` 
                         );
                       }}
                       style={{
@@ -7300,6 +11005,113 @@ function resolveMyPublicNumber(): string {
   if (custom) return custom;
 
   return "";
+}
+
+function sanitizeRadioChannel(name: string): string {
+  return String(name || "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-zA-Z0-9_-]/g, "")
+    .slice(0, 32);
+}
+
+function sanitizeRadioGroupName(name: string): string {
+  return String(name || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/[^a-zA-Z0-9 _-]/g, "")
+    .slice(0, 28);
+}
+
+function loadRadioChannelList(currentChannel: string): string[] {
+  const defaults = ["grid-ch-1", "gridcaller-free", "emergency-mesh", "rescue-ops", "community-net"];
+  const stored = S.get("gc_radio_channels", []);
+  const list = Array.isArray(stored) ? stored : [];
+  const merged = [currentChannel, ...list, ...defaults].map(sanitizeRadioChannel).filter(Boolean);
+  return Array.from(new Set(merged)).slice(0, 12);
+}
+
+function loadRadioGroups(defaultChannels: string[]) {
+  const now = Date.now();
+  const fallback = [
+    {
+      id: "rg_primary",
+      name: "Primary",
+      channels: defaultChannels.slice(0, 4),
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: "rg_emergency",
+      name: "Emergency",
+      channels: defaultChannels.filter((c) => /emergency|rescue|grid/i.test(c)).slice(0, 4),
+      createdAt: now,
+      updatedAt: now,
+    },
+  ].filter((g) => g.channels.length > 0);
+  const raw = S.get("gc_radio_groups", []);
+  if (!Array.isArray(raw) || raw.length === 0) return fallback;
+
+  const normalized = raw
+    .map((row: any) => {
+      const name = sanitizeRadioGroupName(row?.name || "");
+      const channels = Array.isArray(row?.channels)
+        ? Array.from(new Set(row.channels.map((c: string) => sanitizeRadioChannel(c)).filter(Boolean))).slice(0, 60)
+        : [];
+      if (!name) return null;
+      return {
+        id: String(row?.id || `rg_${Math.random().toString(36).slice(2, 8)}`),
+        name,
+        channels,
+        createdAt: Number(row?.createdAt || now),
+        updatedAt: Number(row?.updatedAt || now),
+      };
+    })
+    .filter(Boolean) as { id: string; name: string; channels: string[]; createdAt: number; updatedAt: number }[];
+
+  return normalized.length ? normalized : fallback;
+}
+
+function calcDistanceMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+  const R = 6371000;
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const h =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+function calcBearingDeg(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const toDeg = (rad: number) => (rad * 180) / Math.PI;
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+function projectRadarOffset(
+  origin: { lat: number; lng: number },
+  target: { lat: number; lng: number },
+  rangeMeters: number
+): { xPct: number; yPct: number } {
+  const latRad = (origin.lat * Math.PI) / 180;
+  const dx = (target.lng - origin.lng) * 111320 * Math.cos(latRad);
+  const dy = (target.lat - origin.lat) * 110540;
+  const normX = dx / Math.max(1, rangeMeters);
+  const normY = dy / Math.max(1, rangeMeters);
+  const r = Math.sqrt(normX * normX + normY * normY);
+  const scale = r > 1 ? 1 / r : 1;
+  return {
+    xPct: 50 + normX * scale * 44,
+    yPct: 50 - normY * scale * 44,
+  };
 }
 
 function settingsInputStyle(tokens: Tokens): Record<string, string | number> {

@@ -95,9 +95,9 @@ const DOCTRINE: SovereignDoctrine = {
   devices: ["pc", "laptop", "mobile", "tablet", "browser"],
   currency: "GridCoins",
   manifesto:
-    "GridAlive is a sovereign software mesh: free calls between people on any device, without SIM voice, without carrier lock-in, without satellite bills. The public earns GridCoins by sharing spare RAM, storage, and GPU for cloud, cluster, and AI train work. Companies drain the public — we pay the public.",
+    "GridAlive is a software mesh for free calls between devices when a network path exists. It can work locally or over ordinary internet. Optional earning features may be enabled later, but the core app focuses on reliable calling first.",
   manifestoHi:
-    "GridAlive sovereign software mesh hai: SIM voice / cellular company / satellite bill ke bina free call — PC, laptop, mobile. Public spare RAM, storage, GPU se GridCoins kamati hai. Doosri companies public ka paisa drain karti hain — yahan public kamati hai. Koi ek company humein band nahi kar sakti.",
+    "GridAlive ek software mesh hai jo devices ke beech free call ke liye kaam karti hai jab network path ho. Yeh local ya normal internet par kaam kar sakti hai. Optional earning features baad mein enable ho sakte hain, lekin core app pehle reliable calling par focus karta hai.",
 };
 
 class SovereignMesh {
@@ -207,14 +207,14 @@ class SovereignMesh {
         dependsOnCentralCloudKeys: false,
         canBeBannedByOneTelco: false,
         note:
-          "Voice is software (WebRTC + multi-hop mesh). Any ISP/data is only a dumb pipe when used. Local fabric works without telco identity. Decentralized signaling resists single kill-switch.",
+          "Voice uses a software path when devices can reach each other. Local mesh works without a carrier identity, and internet or Wi-Fi is only used as a transport path.",
       },
       physics: {
         needsSomePath: true,
         note:
           fabricStats?.estimatedRangeLabel
-            ? `Local free fabric range ≈ ${fabricStats.estimatedRangeLabel} (grows with peer density). Global reach uses any IP path between GridAlive nodes — not carrier voice, not satellite license.`
-            : "Local free fabric grows with peer density. Global GridAlive↔GridAlive uses any IP as dumb pipe. Zero medium between two devices = no call (physics).",
+            ? `Local mesh range is approximately ${fabricStats.estimatedRangeLabel} and grows with peer density. Global reach depends on whatever network path exists between devices.`
+            : "Local mesh grows with peer density. Global reach depends on the network path available between devices. No path means no call.",
       },
     };
   }

@@ -82,6 +82,7 @@ export interface TrainContribution {
   steps: number;
   samples: number;
   loss?: number;
+  lossSource?: "reported" | "proxy";
   nodeId: string;
   rewardGC: number;
   ts: number;
@@ -545,7 +546,7 @@ class MeshRentCloud {
                 role: "system",
                 content:
                   job.type === "train_step"
-                    ? "You are a training helper. Summarize gradient-like feedback in one short line (simulated local train step)."
+                    ? "You are a training helper. Summarize optimization feedback in one short line."
                     : "Answer briefly.",
               },
               { role: "user", content: String(job.payload?.prompt || job.payload?.text || "ok") },
@@ -554,12 +555,15 @@ class MeshRentCloud {
           });
           result = { text: r.message?.content, model, evalCount: r.evalCount };
           if (job.type === "train_step") {
+            const rawLoss = Number(job.payload?.loss);
+            const loss = Number.isFinite(rawLoss) && rawLoss >= 0 ? rawLoss : undefined;
             const tc: TrainContribution = {
               id: uid("tr"),
               modelName: model,
               steps: 1,
               samples: Number(job.payload?.samples || 1),
-              loss: Math.random() * 0.5 + 0.1, // local heuristic only — honest UI labels this
+              loss,
+              lossSource: loss === undefined ? undefined : "reported",
               nodeId: nodeId(),
               rewardGC: job.rewardGC,
               ts: Date.now(),
@@ -567,32 +571,55 @@ class MeshRentCloud {
             const log = S.get(KEYS.train, []) as TrainContribution[];
             S.set(KEYS.train, [tc, ...log].slice(0, 200));
             this.credit(job.rewardGC, "train", `Train step on ${model}`);
+            result = {
+              ...result,
+              train: {
+                samples: tc.samples,
+                steps: tc.steps,
+                reportedLoss: tc.loss ?? null,
+                lossSource: tc.lossSource || "none",
+              },
+            };
           } else {
             this.credit(job.rewardGC, "gpu_job", `Inference job ${job.id}`);
           }
         } else {
-          result = { text: "No local model — job deferred", deferred: true };
+          result = {
+            text: "No local model available on this worker",
+            deferred: true,
+            reason: "ollama-unavailable",
+          };
         }
       } else if (job.type === "embed") {
-        const input = String(job.payload?.text || job.payload?.prompt || "").trim();
+        const text = String(job.payload?.text || job.payload?.prompt || "").trim();
         const model = String(job.model || "nomic-embed-text").trim();
-        if (!input) {
-          throw new Error("embed job requires non-empty text");
+        if (!text) {
+          result = {
+            ok: false,
+            deferred: true,
+            reason: "empty-input",
+            model,
+          };
+        } else if (!ollamaEngine.available) {
+          result = {
+            ok: false,
+            deferred: true,
+            reason: "ollama-unavailable",
+            model,
+          };
+        } else {
+          const embedding = await ollamaEngine.embed(text, model);
+          if (!Array.isArray(embedding) || embedding.length === 0) {
+            throw new Error("embedding failed");
+          }
+          result = {
+            ok: true,
+            model,
+            dimensions: embedding.length,
+            vectorPreview: embedding.slice(0, 8),
+          };
+          this.credit(job.rewardGC, "gpu_job", `Embed job ${job.id} (${model})`);
         }
-        if (!ollamaEngine.available) {
-          result = { error: "Ollama unavailable for embedding", deferred: true };
-          throw new Error("embed deferred: ollama unavailable");
-        }
-        const embedding = await ollamaEngine.embed(input, model);
-        if (!Array.isArray(embedding) || embedding.length === 0) {
-          throw new Error("embedding failed");
-        }
-        result = {
-          model,
-          dimensions: embedding.length,
-          vectorPreview: embedding.slice(0, 8),
-        };
-        this.credit(job.rewardGC, "gpu_job", `Embed job ${job.id} (${model})`);
       } else if (job.type === "compress") {
         const raw = String(job.payload?.text || "");
         const packed = await compressBytes(raw);

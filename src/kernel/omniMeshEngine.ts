@@ -998,9 +998,16 @@ class OmniMeshEngine {
     const avgRam =
       online.reduce((s, p) => s + (p.ramMB || this.ramBudgetMB), 0) /
         Math.max(1, online.length) || this.ramBudgetMB;
+    const densityBoost = Math.min(12, Math.log2(density + 1) * 3);
 
     for (const h of this.health.values()) {
-      h.score = Math.max(0, Math.min(100, this.scoreTransport(h) + (Math.random() - 0.5) * 3));
+      const baseScore = this.scoreTransport(h);
+      let adjustedScore = baseScore;
+      if (h.available) {
+        if (h.id === "wifi-lan-ws" || h.id === "webrtc-p2p") adjustedScore += densityBoost;
+        if (h.id === "ram-relay") adjustedScore += Math.min(10, avgRam / 64);
+      }
+      h.score = Math.max(0, Math.min(100, Math.round(adjustedScore)));
       // Software multi-hop expansion
       if (h.id === "wifi-lan-ws" || h.id === "webrtc-p2p" || h.id === "gun-graph" || h.id === "trystero-sw") {
         h.rangeHintM = RANGE_HINT[h.id] * (1 + Math.log2(density + 1) * 1.15);

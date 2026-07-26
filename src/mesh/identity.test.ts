@@ -9,7 +9,7 @@ test("deriveStableMeshHandle prefers the phone number when present", () => {
 
 test("deriveStableMeshHandle falls back to IMEI digits when phone is missing", () => {
   const handle = deriveStableMeshHandle({ imei: "359123456789012", peerId: "mesh_a7376a2d" });
-  assert.equal(handle, "123456789012");
+  assert.equal(handle, "3456789012");
 });
 
 test("deriveStableMeshHandle uses a stable numeric fallback when no phone or IMEI is present", () => {

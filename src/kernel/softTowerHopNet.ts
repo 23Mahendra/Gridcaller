@@ -686,7 +686,7 @@ export class SoftTowerHopNet {
       };
       const transport = copy.transport as HopTransport;
       if (copy.delayMs > 0) {
-        window.setTimeout(() => this.sendOn(transport, relayPacket), copy.delayMs);
+        setTimeout(() => this.sendOn(transport, relayPacket), copy.delayMs);
       } else {
         this.sendOn(transport, relayPacket);
       }
