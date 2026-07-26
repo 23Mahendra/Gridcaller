@@ -13,11 +13,9 @@ import { S } from "./storage";
 import { bus } from "./bus";
 import { MeshEngine } from "./mesh";
 import { meshEconomy } from "./meshEconomy";
-import { gunStore } from "../plugins/gunStore";
 import { deviceVault } from "./deviceVault";
 import { compressBytes, decompressBytes, formatBytes } from "./compress";
 import { ollamaEngine } from "./ollamaEngine";
-import omniMesh from "./omniMeshEngine";
 import {
   applyRentSplit,
   getPoolBalances,
@@ -106,6 +104,37 @@ const KEYS = {
   accepting: "mesh_rent_accepting",
 };
 
+type GunStoreLike = {
+  ensure?: () => unknown;
+  put: (path: string, data: any) => void;
+  once: (path: string) => Promise<any>;
+};
+
+type OmniMeshLike = {
+  send: (type: string, payload: any, opts?: { priority?: string; ttl?: number; to?: string }) => Promise<any>;
+};
+
+let gunStorePromise: Promise<GunStoreLike | null> | null = null;
+let omniMeshPromise: Promise<OmniMeshLike | null> | null = null;
+
+async function getGunStore(): Promise<GunStoreLike | null> {
+  if (!gunStorePromise) {
+    gunStorePromise = import("../plugins/gunStore")
+      .then((mod) => mod.gunStore as GunStoreLike)
+      .catch(() => null);
+  }
+  return gunStorePromise;
+}
+
+async function getOmniMesh(): Promise<OmniMeshLike | null> {
+  if (!omniMeshPromise) {
+    omniMeshPromise = import("./omniMeshEngine")
+      .then((mod) => mod.default as OmniMeshLike)
+      .catch(() => null);
+  }
+  return omniMeshPromise;
+}
+
 function uid(p = "x") {
   return `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 }
@@ -156,6 +185,8 @@ function fromB64(s: string) {
 class MeshRentCloud {
   private started = false;
   private unsubMesh: (() => void) | null = null;
+  private advertiseTimer: ReturnType<typeof setInterval> | null = null;
+  private rebalanceTimer: ReturnType<typeof setInterval> | null = null;
 
   start() {
     if (this.started) return;
@@ -178,11 +209,11 @@ class MeshRentCloud {
     });
 
     // Advertise + auto re-measure capacity periodically
-    setInterval(() => {
+    this.rebalanceTimer = setInterval(() => {
       this.advertiseOffer();
       if (getAutoRentConfig().enabled) void this.runAutoRent();
     }, 60000);
-    setInterval(() => this.advertiseOffer(), 12000);
+    this.advertiseTimer = setInterval(() => this.advertiseOffer(), 12000);
     this.advertiseOffer();
 
     bus.emit("meshRent:ready", this.getStatus());
@@ -211,6 +242,21 @@ class MeshRentCloud {
       honesty:
         "Auto-rent free capacity. Gross GC split: Public 60% · Owner 20% · Maintenance 10% · Mesh reserve 10%. Browser work units: WebGPU/Ollama/encrypted storage.",
     };
+  }
+
+  stop() {
+    this.started = false;
+    if (this.advertiseTimer) clearInterval(this.advertiseTimer);
+    if (this.rebalanceTimer) clearInterval(this.rebalanceTimer);
+    this.advertiseTimer = null;
+    this.rebalanceTimer = null;
+    try {
+      this.unsubMesh?.();
+    } catch {}
+    this.unsubMesh = null;
+    try {
+      meshEconomy.stop();
+    } catch {}
   }
 
   getOffer(): RentOffer {
@@ -283,13 +329,19 @@ class MeshRentCloud {
     try {
       MeshEngine.broadcast("MESH_RENT_OFFER", offer);
     } catch {}
-    try {
-      gunStore.ensure?.();
-      gunStore.put(`gridalive.rent.offers.${offer.nodeId}`, offer);
-    } catch {}
-    try {
-      void omniMesh.send("MESH_RENT_OFFER", offer, { priority: "presence", ttl: 8 });
-    } catch {}
+    void (async () => {
+      try {
+        const store = await getGunStore();
+        store?.ensure?.();
+        store?.put(`gridalive.rent.offers.${offer.nodeId}`, offer);
+      } catch {}
+    })();
+    void (async () => {
+      try {
+        const omniMesh = await getOmniMesh();
+        if (omniMesh) void omniMesh.send("MESH_RENT_OFFER", offer, { priority: "presence", ttl: 8 });
+      } catch {}
+    })();
   }
 
   /**
@@ -411,15 +463,16 @@ class MeshRentCloud {
     const CHUNK = 4000;
     const n = Math.ceil(b64data.length / CHUNK);
     try {
-      gunStore.ensure?.();
+      const store = await getGunStore();
+      store?.ensure?.();
       for (let i = 0; i < n; i++) {
-        gunStore.put(`gridalive.cloud.blob.${id}.${i}`, {
+        store?.put(`gridalive.cloud.blob.${id}.${i}`, {
           i,
           n,
           d: b64data.slice(i * CHUNK, (i + 1) * CHUNK),
         });
       }
-      gunStore.put(`gridalive.cloud.meta.${id}`, {
+      store?.put(`gridalive.cloud.meta.${id}`, {
         id,
         name,
         n,
@@ -474,10 +527,11 @@ class MeshRentCloud {
     const meta = (S.get(KEYS.cloudIndex, []) as CloudObjectMeta[]).find((m) => m.id === id);
     let b64data = "";
     try {
-      gunStore.ensure?.();
+      const store = await getGunStore();
+      store?.ensure?.();
       const n = meta?.shards || 1;
       for (let i = 0; i < n; i++) {
-        const part = await gunStore.once(`gridalive.cloud.blob.${id}.${i}`);
+        const part = store ? await store.once(`gridalive.cloud.blob.${id}.${i}`) : null;
         if (part?.d) b64data += part.d;
       }
     } catch {}
@@ -511,10 +565,13 @@ class MeshRentCloud {
     const jobs = S.get(KEYS.jobs, []) as ClusterJob[];
     S.set(KEYS.jobs, [full, ...jobs].slice(0, 100));
     MeshEngine.broadcast("MESH_CLUSTER_JOB", full);
-    gunStore.ensure?.();
-    try {
-      gunStore.put(`gridalive.cluster.jobs.${full.id}`, full);
-    } catch {}
+    void (async () => {
+      try {
+        const store = await getGunStore();
+        store?.ensure?.();
+        store?.put(`gridalive.cluster.jobs.${full.id}`, full);
+      } catch {}
+    })();
     // Try local worker immediately
     void this.tryWorkJob(full);
     return full;
@@ -527,8 +584,9 @@ class MeshRentCloud {
   private async tryWorkJob(job: ClusterJob) {
     if (!S.get(KEYS.accepting, false)) return;
     const offer = this.getOffer();
-    if (job.type === "inference" || job.type === "train_step") {
-      if (!offer.gpuShare && job.type === "train_step") return;
+    if (job.type === "train_step") {
+      // Local Ollama CPU workers are valid trainers even when the browser exposes no GPU.
+      if (!offer.gpuShare && !ollamaEngine.available) return;
     }
     job.status = "running";
     job.workerId = nodeId();

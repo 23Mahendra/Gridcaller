@@ -20,7 +20,6 @@ import { bus } from "./bus";
 import { S } from "./storage";
 import { MeshEngine } from "./mesh";
 import meshComms from "./meshCommsEngine";
-import { gunStore } from "../plugins/gunStore";
 
 // ── Software-only transports (always the product core) ───────────
 export type OmniTransport =
@@ -129,6 +128,24 @@ const LABELS: Record<OmniTransport, string> = {
   "trystero-sw": "Software P2P room",
 };
 
+type GunStoreLike = {
+  ensure?: () => unknown;
+  init?: () => unknown;
+  map: (path: string, callback: (data: any, key: string) => void) => (() => void) | void;
+  put: (path: string, data: any) => void;
+};
+
+let gunStorePromise: Promise<GunStoreLike | null> | null = null;
+
+async function getGunStore(): Promise<GunStoreLike | null> {
+  if (!gunStorePromise) {
+    gunStorePromise = import("../plugins/gunStore")
+      .then((mod) => mod.gunStore as GunStoreLike)
+      .catch(() => null);
+  }
+  return gunStorePromise;
+}
+
 function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 9);
 }
@@ -193,6 +210,7 @@ class OmniMeshEngine {
   private probeTimer: ReturnType<typeof setInterval> | null = null;
   private learnTimer: ReturnType<typeof setInterval> | null = null;
   private flushTimer: ReturnType<typeof setInterval> | null = null;
+  private gunUnsub: (() => void) | null = null;
 
   /** RAM store-and-forward queue — every device is a relay */
   private storeForward: OmniPacket[] = [];
@@ -281,37 +299,7 @@ class OmniMeshEngine {
     // Gun + WebRTC software plane
     try {
       meshComms.init(this.nodeId, this.nodeName);
-      try {
-        gunStore.ensure?.() || gunStore.init();
-        // Live ingest from Gun graph into OmniMesh
-        gunStore.map("gridalive.omni.sw", (data: any, key: string) => {
-          if (!data || data.from === this.nodeId) return;
-          let payload = data.payload;
-          try {
-            if (typeof payload === "string") payload = JSON.parse(payload);
-          } catch {}
-          this.ingest(
-            {
-              id: key || data.id || uid(),
-              type: data.type || "GUN_EVENT",
-              payload,
-              from: data.from,
-              fromName: data.fromName,
-              to: data.to || undefined,
-              ts: data.ts || Date.now(),
-              hops: data.hops || 1,
-              ttl: 14,
-              path: data.path ? String(data.path).split(",") : [data.from],
-              via: ["gun-graph"],
-              priority: this.classifyPriority(data.type || ""),
-            } as OmniPacket,
-            "gun-graph"
-          );
-        });
-        this.markAvailable("gun-graph", true, 10);
-      } catch {
-        this.markAvailable("gun-graph", true, 20); // still mark via meshComms
-      }
+      void this.attachGunGraph();
       this.markAvailable("webrtc-p2p", typeof RTCPeerConnection !== "undefined", 35);
       this.markAvailable("trystero-sw", true, 50);
     } catch {
@@ -349,6 +337,10 @@ class OmniMeshEngine {
     if (this.probeTimer) clearInterval(this.probeTimer);
     if (this.learnTimer) clearInterval(this.learnTimer);
     if (this.flushTimer) clearInterval(this.flushTimer);
+    try {
+      this.gunUnsub?.();
+    } catch {}
+    this.gunUnsub = null;
     try {
       this.bc?.close();
     } catch {}
@@ -485,6 +477,42 @@ class OmniMeshEngine {
   }
 
   /** Explicit relay flood — rebroadcast held + live packets to expand reach */
+  private async attachGunGraph() {
+    try {
+      const store = await getGunStore();
+      store?.ensure?.();
+      store?.init?.();
+      const unsub = store?.map("gridalive.omni.sw", (data: any, key: string) => {
+        if (!data || data.from === this.nodeId) return;
+        let payload = data.payload;
+        try {
+          if (typeof payload === "string") payload = JSON.parse(payload);
+        } catch {}
+        this.ingest(
+          {
+            id: key || data.id || uid(),
+            type: data.type || "GUN_EVENT",
+            payload,
+            from: data.from,
+            fromName: data.fromName,
+            to: data.to || undefined,
+            ts: data.ts || Date.now(),
+            hops: data.hops || 1,
+            ttl: 14,
+            path: data.path ? String(data.path).split(",") : [data.from],
+            via: ["gun-graph"],
+            priority: this.classifyPriority(data.type || ""),
+          } as OmniPacket,
+          "gun-graph"
+        );
+      });
+      this.gunUnsub = typeof unsub === "function" ? unsub : null;
+      this.markAvailable("gun-graph", true, 10);
+    } catch {
+      this.markAvailable("gun-graph", true, 20);
+    }
+  }
+
   async amplifyRelay() {
     const held = this.storeForward.slice(-20);
     for (const p of held) {
@@ -736,8 +764,9 @@ class OmniMeshEngine {
 
       case "gun-graph":
         try {
-          gunStore.ensure?.();
-          gunStore.put(`gridalive.omni.sw.${pkt.id}`, {
+          const store = await getGunStore();
+          store?.ensure?.();
+          store?.put(`gridalive.omni.sw.${pkt.id}`, {
             type: pkt.type,
             payload: JSON.stringify(pkt.payload).slice(0, 6000),
             from: pkt.from,

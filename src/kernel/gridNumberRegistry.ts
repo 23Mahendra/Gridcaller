@@ -380,6 +380,17 @@ class GridNumberRegistry {
     return this.getMyIdentity();
   }
 
+  stop() {
+    this.started = false;
+    try {
+      this.gun?.off?.();
+    } catch {}
+    try {
+      this.gun?.bye?.();
+    } catch {}
+    this.gun = null;
+  }
+
   acknowledgePolicy(): void {
     S.set(KEYS.policyAck, { at: Date.now(), version: POLICY.version });
     this.appendLedger({
@@ -1157,12 +1168,13 @@ class GridNumberRegistry {
   private async publishDirectory(num: GridNumberRecord | null, serial: DeviceSerialRecord) {
     if (!num) return;
     try {
-      // Reuse global gun peers if gun is available via window / dynamic
-      const Gun = (await import("gun/gun")).default;
-      const peers = [
+      const { gunPeersForMesh } = await import("./offlineMode");
+      const peers = gunPeersForMesh([
         "https://gun-manhattan.herokuapp.com/gun",
         "https://gunjs.herokuapp.com/gun",
-      ];
+      ]);
+      if (!peers.length) return;
+      const Gun = (await import("gun/gun")).default;
       this.gun = Gun({ peers, localStorage: false, radisk: false, multicast: false });
       const payload = {
         number: num.number,
@@ -1192,10 +1204,16 @@ class GridNumberRegistry {
     const local = this.resolve(d);
     if (local) return { number: local.number, name: local.userName, nodeId: local.nodeId };
     try {
+      const { gunPeersForMesh } = await import("./offlineMode");
+      const peers = gunPeersForMesh([
+        "https://gun-manhattan.herokuapp.com/gun",
+        "https://gunjs.herokuapp.com/gun",
+      ]);
+      if (!peers.length) return null;
       if (!this.gun) {
         const Gun = (await import("gun/gun")).default;
         this.gun = Gun({
-          peers: ["https://gun-manhattan.herokuapp.com/gun", "https://gunjs.herokuapp.com/gun"],
+          peers,
           localStorage: false,
           radisk: false,
         });

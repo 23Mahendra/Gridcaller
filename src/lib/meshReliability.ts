@@ -69,7 +69,7 @@ export function shouldRetryPendingOutboundMessage(
 export function shouldRetryPendingEnvelopeEntry(
   entry: PendingEnvelopeEntry,
   now: number,
-  minGapMs = 2000
+  minGapMs = 1000
 ): boolean {
   if (entry.status === "sent" || entry.status === "acked") return false;
   if (entry.attempts >= 6) return false;

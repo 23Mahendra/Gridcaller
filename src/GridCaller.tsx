@@ -263,6 +263,39 @@ type GroupMessage = {
   system?: boolean;
 };
 
+type StatusPost = {
+  id: string;
+  userId: string;
+  userName: string;
+  text: string;
+  ts: number;
+};
+
+type StatusComment = {
+  id: string;
+  postId: string;
+  fromId: string;
+  fromName: string;
+  text: string;
+  ts: number;
+};
+
+type StatusReactionKind = "like" | "heart";
+
+type StatusReaction = {
+  postId: string;
+  userId: string;
+  kind: StatusReactionKind;
+  ts: number;
+};
+
+type StatusViewLog = {
+  postId: string;
+  viewerId: string;
+  viewerName: string;
+  ts: number;
+};
+
 type Tab = "mesh" | "contacts" | "keypad" | "sms" | "groups" | "logs";
 
 type GridchatFilter = "all" | "unread" | "favourites";
@@ -557,6 +590,13 @@ export default function GridCaller({
     return Array.isArray(rows) ? rows.filter((r) => r && typeof r.text === "string" && typeof r.at === "number").slice(0, 24) : [];
   });
   const [gridchatStatusSettingsOpen, setGridchatStatusSettingsOpen] = useState(false);
+  const [statusPosts, setStatusPosts] = useState<StatusPost[]>(() => S.get("gridcaller_status_posts", []));
+  const [statusComments, setStatusComments] = useState<StatusComment[]>(() => S.get("gridcaller_status_comments", []));
+  const [statusReactions, setStatusReactions] = useState<StatusReaction[]>(() => S.get("gridcaller_status_reactions", []));
+  const [statusViews, setStatusViews] = useState<StatusViewLog[]>(() => S.get("gridcaller_status_views", []));
+  const [statusViewerPostId, setStatusViewerPostId] = useState<string | null>(null);
+  const [statusCommentDraft, setStatusCommentDraft] = useState("");
+  const [statusViewerUserId, setStatusViewerUserId] = useState<string | null>(null);
   const [gridchatCreateMenuOpen, setGridchatCreateMenuOpen] = useState(false);
   const [gridchatMoreMenuOpen, setGridchatMoreMenuOpen] = useState(false);
   const [threadSearchOpen, setThreadSearchOpen] = useState(false);
@@ -1096,6 +1136,10 @@ export default function GridCaller({
     return (
       <div
         key={row.id}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          runLogLongPressAction(row.id);
+        }}
         style={{
           margin: compact ? "8px 12px 0" : "0 0 8px",
           padding: 12,
@@ -1263,6 +1307,10 @@ export default function GridCaller({
   useEffect(() => S.set("gridcaller_status_ring_color", gridchatStatusRingColor), [gridchatStatusRingColor]);
   useEffect(() => S.set("gridcaller_status_stealth", !!gridchatStatusStealthMode), [gridchatStatusStealthMode]);
   useEffect(() => S.set("gridcaller_status_archive", gridchatStatusArchive.slice(0, 24)), [gridchatStatusArchive]);
+  useEffect(() => S.set("gridcaller_status_posts", statusPosts.slice(-400)), [statusPosts]);
+  useEffect(() => S.set("gridcaller_status_comments", statusComments.slice(-1200)), [statusComments]);
+  useEffect(() => S.set("gridcaller_status_reactions", statusReactions.slice(-2500)), [statusReactions]);
+  useEffect(() => S.set("gridcaller_status_views", statusViews.slice(-4000)), [statusViews]);
   useEffect(() => S.set("gridcaller_starred_messages", starredMessageIds.slice(0, 3000)), [starredMessageIds]);
   useEffect(() => S.set("gridcaller_report_log", gridchatReportLog.slice(0, 500)), [gridchatReportLog]);
   useEffect(() => S.set("gridcaller_blocked", blocked), [blocked]);
@@ -3622,6 +3670,17 @@ export default function GridCaller({
     if (!next) return;
     setGridchatMyStatusText(next.slice(0, 120));
     setGridchatMyStatusAt(Date.now());
+    setStatusPosts((prev) => {
+      const post: StatusPost = {
+        id: `st_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+        userId: MeshEngine.localId,
+        userName: myName || "Me",
+        text: next.slice(0, 120),
+        ts: Date.now(),
+      };
+      const withoutMine = prev.filter((row) => row.userId !== post.userId);
+      return [...withoutMine, post].slice(-400);
+    });
     setGridchatStatusSettingsOpen(false);
     setContactBusy("Status updated");
     setTimeout(() => setContactBusy(""), 1500);
@@ -3727,6 +3786,179 @@ export default function GridCaller({
       setErr("Clipboard unavailable");
     }
     setGridchatStatusSettingsOpen(false);
+  };
+
+  const statusPostsByUser = useMemo(() => {
+    const byUser = new Map<string, StatusPost>();
+    for (const post of statusPosts) {
+      const prev = byUser.get(post.userId);
+      if (!prev || post.ts > prev.ts) byUser.set(post.userId, post);
+    }
+    return byUser;
+  }, [statusPosts]);
+
+  const activeStatusPost = useMemo(
+    () => (statusViewerPostId ? statusPosts.find((row) => row.id === statusViewerPostId) || null : null),
+    [statusPosts, statusViewerPostId]
+  );
+
+  const activeStatusComments = useMemo(
+    () => (activeStatusPost ? statusComments.filter((row) => row.postId === activeStatusPost.id).sort((a, b) => a.ts - b.ts) : []),
+    [statusComments, activeStatusPost]
+  );
+
+  const statusPostsTimeline = useMemo(() => {
+    const rows = statusPosts.slice().sort((a, b) => b.ts - a.ts);
+    if (!rows.length) return rows;
+    if (!statusViewerUserId) return rows;
+    const start = rows.findIndex((row) => row.userId === statusViewerUserId);
+    if (start <= 0) return rows;
+    return [...rows.slice(start), ...rows.slice(0, start)];
+  }, [statusPosts, statusViewerUserId]);
+
+  const activeStatusIndex = useMemo(() => {
+    if (!activeStatusPost) return -1;
+    return statusPostsTimeline.findIndex((row) => row.id === activeStatusPost.id);
+  }, [activeStatusPost, statusPostsTimeline]);
+
+  const activeStatusViews = useMemo(() => {
+    if (!activeStatusPost) return [] as StatusViewLog[];
+    return statusViews
+      .filter((row) => row.postId === activeStatusPost.id)
+      .sort((a, b) => b.ts - a.ts);
+  }, [statusViews, activeStatusPost]);
+
+  const activeStatusReactions = useMemo(() => {
+    if (!activeStatusPost) {
+      return { like: 0, heart: 0, my: null as StatusReactionKind | null };
+    }
+    let like = 0;
+    let heart = 0;
+    let my: StatusReactionKind | null = null;
+    for (const row of statusReactions) {
+      if (row.postId !== activeStatusPost.id) continue;
+      if (row.kind === "like") like += 1;
+      if (row.kind === "heart") heart += 1;
+      if (row.userId === MeshEngine.localId) my = row.kind;
+    }
+    return { like, heart, my };
+  }, [statusReactions, activeStatusPost]);
+
+  const openStatusViewer = (userId: string, fallbackName: string) => {
+    if (!userId) return;
+    const known = statusPostsByUser.get(userId);
+    if (known) {
+      setStatusViewerPostId(known.id);
+      setStatusViewerUserId(userId);
+      setStatusCommentDraft("");
+      return;
+    }
+    const fallback: StatusPost = {
+      id: `st_fallback_${userId}`,
+      userId,
+      userName: fallbackName || userId,
+      text: "No status post yet.",
+      ts: Date.now(),
+    };
+    setStatusPosts((prev) => [...prev, fallback].slice(-400));
+    setStatusViewerPostId(fallback.id);
+    setStatusViewerUserId(userId);
+    setStatusCommentDraft("");
+  };
+
+  const markStatusViewed = (post: StatusPost) => {
+    if (!post) return;
+    if (post.userId === MeshEngine.localId) return;
+    const viewerId = MeshEngine.localId;
+    setStatusViews((prev) => {
+      const without = prev.filter((row) => !(row.postId === post.id && row.viewerId === viewerId));
+      const entry: StatusViewLog = {
+        postId: post.id,
+        viewerId,
+        viewerName: myName || "Me",
+        ts: Date.now(),
+      };
+      return [...without, entry].slice(-4000);
+    });
+  };
+
+  const setStatusReaction = (kind: StatusReactionKind) => {
+    if (!activeStatusPost) return;
+    const postId = activeStatusPost.id;
+    const userId = MeshEngine.localId;
+    setStatusReactions((prev) => {
+      const withoutMine = prev.filter((row) => !(row.postId === postId && row.userId === userId));
+      const row: StatusReaction = {
+        postId,
+        userId,
+        kind,
+        ts: Date.now(),
+      };
+      return [...withoutMine, row].slice(-2500);
+    });
+  };
+
+  const openNextStatusPost = () => {
+    if (!statusPostsTimeline.length || activeStatusIndex < 0) return;
+    const nextIndex = (activeStatusIndex + 1) % statusPostsTimeline.length;
+    const next = statusPostsTimeline[nextIndex];
+    setStatusViewerPostId(next.id);
+    setStatusViewerUserId(next.userId);
+    setStatusCommentDraft("");
+  };
+
+  useEffect(() => {
+    if (!activeStatusPost) return;
+    markStatusViewed(activeStatusPost);
+  }, [activeStatusPost?.id]);
+
+  const addStatusComment = (mode: "comment" | "chat") => {
+    if (!activeStatusPost) return;
+    const text = String(statusCommentDraft || "").trim();
+    if (!text) return;
+    const row: StatusComment = {
+      id: `stc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+      postId: activeStatusPost.id,
+      fromId: MeshEngine.localId,
+      fromName: myName || "Me",
+      text,
+      ts: Date.now(),
+    };
+    setStatusComments((prev) => [...prev, row].slice(-1200));
+    setStatusCommentDraft("");
+    if (mode === "chat") {
+      setStatusViewerPostId(null);
+      setStatusViewerUserId(null);
+      setComposeTo(activeStatusPost.userId);
+      setThread(activeStatusPost.userId);
+      setTab("sms");
+      sendSms(activeStatusPost.userId, activeStatusPost.userName, text);
+    }
+  };
+
+  const runThreadLongPressAction = (peerId: string, label: string) => {
+    const action = String(prompt(`Action for ${label}: archive or delete`, "archive") || "").trim().toLowerCase();
+    if (action === "archive") {
+      moveSmsThreadToFolder(peerId, "trash");
+      setContactBusy("Thread moved to archive");
+      setTimeout(() => setContactBusy(""), 1500);
+      return;
+    }
+    if (action === "delete") {
+      deleteMessageThread(peerId);
+      setContactBusy("Thread deleted");
+      setTimeout(() => setContactBusy(""), 1500);
+    }
+  };
+
+  const runLogLongPressAction = (id: string) => {
+    const action = String(prompt("Log action: archive or delete", "archive") || "").trim().toLowerCase();
+    if (action === "delete") {
+      deleteLocalLogEntry(id);
+      return;
+    }
+    setContactBusy("Log archived in private device history");
+    setTimeout(() => setContactBusy(""), 1500);
   };
 
   const sendDirectQuickText = (peerId: string, peerName: string, text: string) => {
@@ -4233,6 +4465,129 @@ export default function GridCaller({
             </button>
           ))}
           <div style={{ display: "none" }}>{chatProfileMetaVer}</div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderStatusViewerOverlay = () => {
+    if (!activeStatusPost) return null;
+    const isMine = activeStatusPost.userId === MeshEngine.localId;
+    return (
+      <div
+        className="gc-overlay"
+        style={{
+          position: "absolute",
+          inset: 0,
+          zIndex: 700,
+          background: tokens.bg,
+          color: tokens.text,
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderBottom: `1px solid ${tokens.sep}`, background: tokens.bar }}>
+          <button type="button" onClick={() => setStatusViewerPostId(null)} style={{ border: "none", background: "transparent", color: tokens.text, cursor: "pointer", display: "grid", placeItems: "center" }}>
+            <X size={20} />
+          </button>
+          <div style={{ fontSize: 19, fontWeight: 700 }}>Status post</div>
+        </div>
+        <div className="gc-scroll" style={{ flex: 1, overflowY: "auto", padding: "14px 12px 20px" }}>
+          <div style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, borderRadius: 14, padding: 14, marginBottom: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+              <div style={{ fontWeight: 800, color: tokens.text }}>{activeStatusPost.userName}</div>
+              <div style={{ fontSize: 11, color: tokens.label, fontWeight: 700 }}>{fullDateTime(activeStatusPost.ts)}</div>
+            </div>
+            <div style={{ marginTop: 8, fontSize: 15, lineHeight: 1.5, color: tokens.text }}>{activeStatusPost.text}</div>
+            <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={() => setStatusReaction("like")}
+                style={{ border: activeStatusReactions.my === "like" ? "none" : `1px solid ${tokens.sep}`, background: activeStatusReactions.my === "like" ? `${tokens.blue}22` : tokens.fill, color: tokens.text, borderRadius: 999, padding: "6px 10px", fontWeight: 700, cursor: "pointer" }}
+              >
+                👍 {activeStatusReactions.like}
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatusReaction("heart")}
+                style={{ border: activeStatusReactions.my === "heart" ? "none" : `1px solid ${tokens.sep}`, background: activeStatusReactions.my === "heart" ? `${tokens.red}20` : tokens.fill, color: tokens.text, borderRadius: 999, padding: "6px 10px", fontWeight: 700, cursor: "pointer" }}
+              >
+                ❤️ {activeStatusReactions.heart}
+              </button>
+              <button
+                type="button"
+                onClick={openNextStatusPost}
+                style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.text, borderRadius: 999, padding: "6px 10px", fontWeight: 700, cursor: "pointer" }}
+              >
+                Next status
+              </button>
+            </div>
+          </div>
+
+          <div style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, borderRadius: 12, padding: 12, marginBottom: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: tokens.label, marginBottom: 8 }}>
+              Views ({activeStatusViews.length})
+            </div>
+            {activeStatusViews.length === 0 ? (
+              <div style={{ fontSize: 12, color: tokens.label }}>No views yet</div>
+            ) : (
+              activeStatusViews.slice(0, 40).map((v) => (
+                <div key={`${v.postId}_${v.viewerId}`} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12, color: tokens.text, padding: "4px 0" }}>
+                  <span>{v.viewerName || v.viewerId}</span>
+                  <span style={{ color: tokens.label }}>{fullDateTime(v.ts)}</span>
+                </div>
+              ))
+            )}
+          </div>
+
+          <div style={{ fontSize: 12, fontWeight: 800, color: tokens.label, marginBottom: 8 }}>COMMENTS / CHATS</div>
+          {activeStatusComments.length === 0 ? (
+            <div style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, borderRadius: 12, padding: 12, fontSize: 13, color: tokens.label }}>
+              No comments yet. Add first comment or chat from below.
+            </div>
+          ) : (
+            activeStatusComments.map((row) => (
+              <div key={row.id} style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, borderRadius: 12, padding: 10, marginBottom: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: tokens.text }}>{row.fromName}</div>
+                  <div style={{ fontSize: 10, color: tokens.label }}>{timeLabel(row.ts)}</div>
+                </div>
+                <div style={{ marginTop: 6, fontSize: 13, color: tokens.text, lineHeight: 1.45 }}>{row.text}</div>
+              </div>
+            ))
+          )}
+        </div>
+        <div style={{ borderTop: `1px solid ${tokens.sep}`, background: tokens.card, padding: 10 }}>
+          <textarea
+            value={statusCommentDraft}
+            onChange={(e) => setStatusCommentDraft(e.target.value)}
+            placeholder="Write comment or chat on this status..."
+            rows={2}
+            style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${tokens.sep}`, background: tokens.inputBg, color: tokens.text, borderRadius: 10, padding: "10px 12px", fontSize: 13, outline: "none", resize: "vertical" }}
+          />
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button type="button" onClick={() => addStatusComment("comment")} style={{ flex: 1, border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, borderRadius: 10, padding: "9px 10px", fontWeight: 700, cursor: "pointer" }}>
+              Comment
+            </button>
+            <button
+              type="button"
+              disabled={isMine}
+              onClick={() => addStatusComment("chat")}
+              style={{
+                flex: 1,
+                border: "none",
+                background: isMine ? tokens.fill : tokens.blue,
+                color: isMine ? tokens.label : "#fff",
+                borderRadius: 10,
+                padding: "9px 10px",
+                fontWeight: 700,
+                cursor: isMine ? "default" : "pointer",
+                opacity: isMine ? 0.6 : 1,
+              }}
+            >
+              Chat now
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -5193,6 +5548,7 @@ export default function GridCaller({
           />
         </div>
         {renderChatProfileOverlay()}
+        {renderStatusViewerOverlay()}
       </Shell>
       </ThemeCtx.Provider>
     );
@@ -6640,6 +6996,10 @@ export default function GridCaller({
               {smsThreads.map((t) => (
                 <div
                   key={t.peerId}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    runThreadLongPressAction(t.peerId, t.name || t.peerId);
+                  }}
                   style={{
                     borderBottom: `0.5px solid ${tokens.sep}`,
                     background: tokens.card,
@@ -7157,7 +7517,7 @@ export default function GridCaller({
                         <button
                           key={`st_${u.id}`}
                           type="button"
-                          onClick={() => openGridchatRow({ id: `d:${u.id}`, kind: "direct", peerId: u.id })}
+                          onClick={() => openStatusViewer(u.id, u.alias)}
                           style={{
                             border: `1px solid ${tokens.sep}`,
                             background: tokens.bg,
@@ -7887,6 +8247,7 @@ export default function GridCaller({
       </div>
 
       {renderChatProfileOverlay()}
+      {renderStatusViewerOverlay()}
 
       {/* ═══ Hamburger menu: network people + map + settings ═══ */}
       {menuOpen && (
