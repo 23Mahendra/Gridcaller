@@ -618,6 +618,7 @@ export default function GridCaller({
   const [actionComposerPlace, setActionComposerPlace] = useState("");
   const [gridchatCreateMenuOpen, setGridchatCreateMenuOpen] = useState(false);
   const [gridchatMoreMenuOpen, setGridchatMoreMenuOpen] = useState(false);
+  const [gridchatSubTab, setGridchatSubTab] = useState<"chats" | "updates" | "communities" | "calls">("chats");
   const [threadSearchOpen, setThreadSearchOpen] = useState(false);
   const [threadSearchQuery, setThreadSearchQuery] = useState("");
   const [groupSearchOpen, setGroupSearchOpen] = useState(false);
@@ -7286,17 +7287,10 @@ export default function GridCaller({
             </div>
 
             <div style={{ display: tab === "groups" ? "block" : "none" }}>
-              <div
-                style={{
-                  margin: "10px 12px 0",
-                  padding: 12,
-                  borderRadius: 12,
-                  background: tokens.card,
-                  border: `1px solid ${tokens.sep}`,
-                }}
-              >
-                <div ref={gridchatHeaderRef} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, position: "relative" }}>
-                  <div style={{ fontSize: 24, fontWeight: 800, color: tokens.text }}>Gridchat</div>
+              <div style={{ background: tokens.bg }}>
+                {/* WhatsApp-style top header */}
+                <div ref={gridchatHeaderRef} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px 6px", position: "relative" }}>
+                  <div style={{ fontSize: 22, fontWeight: 800, color: tokens.green }}>Gridchat</div>
                   <div style={{ display: "flex", gap: 8 }}>
                     <button
                       type="button"
@@ -7466,21 +7460,22 @@ export default function GridCaller({
                   </div>
                 </div>
 
-                <div style={{ display: "flex", alignItems: "center", gap: 8, background: tokens.fill, borderRadius: 12, padding: "8px 10px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, background: tokens.fill, borderRadius: 24, padding: "9px 14px", margin: "4px 16px 2px" }}>
                   <Search size={15} color={tokens.label} />
                   <input
                     value={gridchatSearch}
                     onChange={(e) => setGridchatSearch(e.target.value)}
-                    placeholder="Search or start a new Gridchat"
+                    placeholder="Ask Meta AI or Search"
                     style={{ flex: 1, border: "none", background: "transparent", outline: "none", color: tokens.text, fontSize: 14 }}
                   />
+                  {gridchatSearch ? <button type="button" onClick={() => setGridchatSearch("")} style={{ border: "none", background: "none", color: tokens.label, cursor: "pointer", padding: 0 }}><X size={14} /></button> : null}
                 </div>
 
-                <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                <div style={{ display: "flex", gap: 8, padding: "6px 16px 8px", overflowX: "auto" }}>
                   {[
                     { id: "all" as GridchatFilter, label: "All" },
-                    { id: "unread" as GridchatFilter, label: `Unread ${gridchatUnreadTotal}` },
-                    { id: "favourites" as GridchatFilter, label: `Favourites ${gridchatFavourites.length}` },
+                    { id: "unread" as GridchatFilter, label: `Unread ${gridchatUnreadTotal > 0 ? gridchatUnreadTotal : ""}`.trim() },
+                    { id: "favourites" as GridchatFilter, label: "Favourites" },
                   ].map((chip) => {
                     const active = gridchatFilter === chip.id;
                     return (
@@ -7490,19 +7485,22 @@ export default function GridCaller({
                         onClick={() => setGridchatFilter(chip.id)}
                         style={{
                           border: active ? "none" : `1px solid ${tokens.sep}`,
-                          background: active ? `${tokens.green}30` : tokens.card,
-                          color: active ? "#053318" : tokens.text,
+                          background: active ? tokens.green : tokens.card,
+                          color: active ? "#fff" : tokens.text,
                           borderRadius: 999,
-                          padding: "6px 12px",
+                          padding: "5px 14px",
                           fontSize: 12,
                           fontWeight: 700,
                           cursor: "pointer",
+                          flexShrink: 0,
                         }}
                       >
                         {chip.label}
                       </button>
                     );
                   })}
+                  <button type="button" style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.text, borderRadius: 999, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center" }}><span style={{ fontSize: 11, color: tokens.label }}>Groups {gridchatItems.filter(r => r.kind === "group").length}</span></button>
+                  <button type="button" onClick={openGridchatCreatePanel} style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.text, borderRadius: 999, width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}><Plus size={14} /></button>
                 </div>
 
                 <div style={{ marginTop: 10, position: "relative" }}>
@@ -7747,6 +7745,15 @@ export default function GridCaller({
                 </div>
               </div>
 
+              {/* Archived row - WhatsApp style */}
+              <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 16px", borderBottom: `0.5px solid ${tokens.sep}`, cursor: "pointer" }} onClick={() => {}}>
+                <div style={{ width: 46, height: 46, borderRadius: 23, background: tokens.fill, display: "grid", placeItems: "center", flexShrink: 0 }}>
+                  <Download size={18} color={tokens.label} />
+                </div>
+                <div style={{ fontSize: 15, fontWeight: 500, color: tokens.text }}>Archived</div>
+              </div>
+              {/* Floating + FAB */}
+              <div style={{ position: "relative" }}>
               <CardList>
                 {gridchatItems.length === 0 ? (
                   <EmptyState title="No Gridchat users/chats yet" body="Create a group or message an online user to start chatting." />
@@ -7892,6 +7899,16 @@ export default function GridCaller({
                 )}
               </CardList>
 
+              </div>
+              {/* Green floating + FAB */}
+              <button
+                type="button"
+                onClick={openGridchatCreatePanel}
+                style={{ position: "absolute", bottom: 16, right: 16, width: 54, height: 54, borderRadius: 14, border: "none", background: tokens.green, color: "#041510", display: "grid", placeItems: "center", cursor: "pointer", boxShadow: `0 4px 16px ${tokens.green}66`, zIndex: 5 }}
+                title="New chat"
+              >
+                <Plus size={22} />
+              </button>
               <div
                 ref={gridchatCreatePanelRef}
                 style={{
@@ -8417,25 +8434,49 @@ export default function GridCaller({
         )}
       </div>
 
-      {/* ═══ TrueCaller-style bottom navigation ═══ */}
+      {/* Bottom navigation */}
       <div style={{ display: "flex", background: tokens.card, borderTop: `1px solid ${tokens.sep}`, flexShrink: 0, paddingBottom: "env(safe-area-inset-bottom, 0px)" }}>
-        {([
-          { id: "logs" as Tab, label: "Calls", icon: <Phone size={22} /> },
-          { id: "sms" as Tab, label: "Messages", icon: <MessageCircle size={22} /> },
-          { id: "contacts" as Tab, label: "Contacts", icon: <Users size={22} /> },
-          { id: "groups" as Tab, label: "Gridchat", icon: <MessageSquare size={22} /> },
-          { id: "mesh" as Tab, label: "Mesh", icon: <Wifi size={22} /> },
-        ] as const).map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => { setTab(t.id); if (t.id === "logs") setLogsSubView("recents"); }}
-            style={{ flex: 1, border: "none", background: "transparent", padding: "10px 4px 8px", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, color: tab === t.id ? tokens.blue : tokens.label, cursor: "pointer" }}
-          >
-            {t.icon}
-            <span style={{ fontSize: 10, fontWeight: tab === t.id ? 700 : 500 }}>{t.label}</span>
-          </button>
-        ))}
+        {tab === "groups" ? (
+          // WhatsApp-style nav for Gridchat tab
+          [{ id: "chats", label: "Chats", icon: <MessageCircle size={22} />, badge: gridchatUnreadTotal > 0 ? gridchatUnreadTotal : 0 },
+           { id: "updates", label: "Updates", icon: <Camera size={22} />, dot: true },
+           { id: "communities", label: "Communities", icon: <Users size={22} />, badge: 0 },
+           { id: "calls", label: "Calls", icon: <Phone size={22} />, badge: 0 }].map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => {
+                if (item.id === "calls") { setTab("logs"); return; }
+                setGridchatSubTab(item.id as any);
+              }}
+              style={{ flex: 1, border: "none", background: "transparent", padding: "10px 4px 8px", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, color: gridchatSubTab === item.id ? tokens.green : tokens.label, cursor: "pointer", position: "relative" }}
+            >
+              {item.icon}
+              {(item as any).badge > 0 && <span style={{ position: "absolute", top: 6, right: "calc(50% - 18px)", background: tokens.green, color: "#041510", borderRadius: 999, minWidth: 18, height: 18, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 800 }}>{(item as any).badge}</span>}
+              {(item as any).dot && gridchatSubTab !== "updates" && <span style={{ position: "absolute", top: 8, right: "calc(50% - 14px)", width: 8, height: 8, borderRadius: 999, background: tokens.green }} />}
+              <span style={{ fontSize: 10, fontWeight: gridchatSubTab === item.id ? 700 : 500 }}>{item.label}</span>
+            </button>
+          ))
+        ) : (
+          // Regular TrueCaller nav for other tabs
+          ([
+            { id: "logs" as Tab, label: "Calls", icon: <Phone size={22} /> },
+            { id: "sms" as Tab, label: "Messages", icon: <MessageCircle size={22} /> },
+            { id: "contacts" as Tab, label: "Contacts", icon: <Users size={22} /> },
+            { id: "groups" as Tab, label: "Gridchat", icon: <MessageSquare size={22} /> },
+            { id: "mesh" as Tab, label: "Mesh", icon: <Wifi size={22} /> },
+          ] as const).map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => { setTab(t.id); if (t.id === "logs") setLogsSubView("recents"); }}
+              style={{ flex: 1, border: "none", background: "transparent", padding: "10px 4px 8px", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, color: tab === t.id ? tokens.blue : tokens.label, cursor: "pointer" }}
+            >
+              {t.icon}
+              <span style={{ fontSize: 10, fontWeight: tab === t.id ? 700 : 500 }}>{t.label}</span>
+            </button>
+          ))
+        )}
       </div>
 
       {renderChatProfileOverlay()}
