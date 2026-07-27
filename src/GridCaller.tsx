@@ -699,7 +699,7 @@ export default function GridCaller({
   >("home");
   const [logFilter, setLogFilter] = useState<LogTopFilter>("all");
   const [logFiltersOpen, setLogFiltersOpen] = useState(false);
-  const [logsSubView, setLogsSubView] = useState<"recents" | "keypad">("recents");
+  const [logsSubView, setLogsSubView] = useState<"recents" | "keypad" | "contacts">("recents");
   const [callLogSourceFilter, setCallLogSourceFilter] = useState<LogSourceFilter>("all");
   const [messageLogSourceFilter, setMessageLogSourceFilter] = useState<LogSourceFilter>("all");
   const [callDirectionFilters, setCallDirectionFilters] = useState<CallDirectionFilter[]>(DEFAULT_CALL_LOG_FILTERS);
@@ -5983,7 +5983,7 @@ export default function GridCaller({
         </div>
       </div>
 
-      {tab === "contacts" && (
+      {(tab === "contacts" || (tab === "logs" && logsSubView === "contacts")) && (
         <div style={{ padding: "10px 16px 6px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, background: tokens.fill, borderRadius: 10, padding: "8px 12px" }}>
             <Search size={15} color={tokens.label} />
@@ -6009,8 +6009,8 @@ export default function GridCaller({
 
       {tab === "logs" && (
         <div>
-          {/* TrueCaller-style top: search + menu */}
-          <div style={{ padding: "8px 16px 4px", display: "flex", alignItems: "center", gap: 8 }}>
+          {/* TrueCaller-style top: search + menu — hidden when in contacts sub-view (contacts has its own search) */}
+          <div style={{ padding: "8px 16px 4px", display: logsSubView === "contacts" ? "none" : "flex", alignItems: "center", gap: 8 }}>
             <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: tokens.fill, borderRadius: 24, padding: "8px 14px" }}>
               <Search size={15} color={tokens.label} />
               <input
@@ -6062,10 +6062,10 @@ export default function GridCaller({
               </div>
             );
           })()}
-          {/* Filter chips + keypad FAB row */}
-          {logsSubView === "recents" && (
+          {/* Filter chips + People chip + keypad FAB row */}
+          {logsSubView !== "keypad" && (
             <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px 4px", flexWrap: "wrap" }}>
-              {[
+              {logsSubView === "recents" && [
                 { id: "all" as const, label: `All ${localCommLog.length}` },
                 { id: "calls" as const, label: `Calls ${logStats.calls}` },
                 { id: "messages" as const, label: `Messages ${logStats.messages}` },
@@ -6080,8 +6080,15 @@ export default function GridCaller({
               })}
               <button
                 type="button"
+                onClick={() => setLogsSubView(logsSubView === "contacts" ? "recents" : "contacts")}
+                style={{ border: logsSubView === "contacts" ? "none" : `1px solid ${tokens.sep}`, background: logsSubView === "contacts" ? tokens.blue : tokens.card, color: logsSubView === "contacts" ? "#fff" : tokens.text, borderRadius: 999, padding: "6px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}
+              >
+                <Users size={12} /> People
+              </button>
+              <button
+                type="button"
                 onClick={() => setLogsSubView(logsSubView === "keypad" ? "recents" : "keypad")}
-                style={{ marginLeft: "auto", border: "none", background: logsSubView === "keypad" ? tokens.blue : tokens.fill, color: logsSubView === "keypad" ? "#fff" : tokens.text, borderRadius: 12, width: 44, height: 34, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", transition: "all 0.15s" }}
+                style={{ marginLeft: "auto", border: "none", background: tokens.fill, color: tokens.text, borderRadius: 12, width: 44, height: 34, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", transition: "all 0.15s" }}
                 title="Keypad"
               >
                 <span style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "2.5px", width: 16, height: 18 }}>
@@ -6251,7 +6258,7 @@ export default function GridCaller({
             )}
           </CardList>
         )}
-        {tab === "contacts" && (
+        {(tab === "contacts" || (tab === "logs" && logsSubView === "contacts")) && (
           <>
             {/* Toolbar — Truecaller-style actions */}
             <div style={{ padding: "4px 12px 8px", display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
@@ -8552,14 +8559,18 @@ export default function GridCaller({
           ([
             { id: "logs" as Tab, label: "Calls", icon: <Phone size={22} /> },
             { id: "sms" as Tab, label: "Messages", icon: <MessageCircle size={22} /> },
-            { id: "contacts" as Tab, label: "Contacts", icon: <Users size={22} /> },
+            { id: "radio" as "radio", label: "Radio", icon: <Radio size={22} /> },
             { id: "groups" as Tab, label: "Gridchat", icon: <MessageSquare size={22} /> },
             { id: "mesh" as Tab, label: "Mesh", icon: <Wifi size={22} /> },
           ] as const).map((t) => (
             <button
               key={t.id}
               type="button"
-              onClick={() => { setTab(t.id); if (t.id === "logs") setLogsSubView("recents"); }}
+              onClick={() => {
+                if (t.id === "radio") { setMenuView("radio"); setMenuOpen(true); return; }
+                setTab(t.id as Tab);
+                if (t.id === "logs") setLogsSubView("recents");
+              }}
               style={{ flex: 1, border: "none", background: "transparent", padding: "10px 4px 8px", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, color: tab === t.id ? tokens.blue : tokens.label, cursor: "pointer" }}
             >
               {t.icon}
