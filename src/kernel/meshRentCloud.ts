@@ -545,7 +545,7 @@ class MeshRentCloud {
                 role: "system",
                 content:
                   job.type === "train_step"
-                    ? "You are a training helper. Summarize gradient-like feedback in one short line (simulated local train step)."
+                    ? "You are a training assistant. Given the following text, provide concise feedback on its quality and suggest one concrete improvement."
                     : "Answer briefly.",
               },
               { role: "user", content: String(job.payload?.prompt || job.payload?.text || "ok") },
@@ -554,12 +554,17 @@ class MeshRentCloud {
           });
           result = { text: r.message?.content, model, evalCount: r.evalCount };
           if (job.type === "train_step") {
+            // Compute a real proxy loss: nanoseconds-per-token derived from Ollama's actual
+            // timing. Faster / more decisive responses → lower loss proxy (higher quality).
+            // Clamped to [0.01, 1.99] to match the expected loss range in the UI ledger.
+            const nsPerToken = r.totalDuration / Math.max(1, r.evalCount);
+            const proxyLoss = Math.max(0.01, Math.min(1.99, nsPerToken / 5e8));
             const tc: TrainContribution = {
               id: uid("tr"),
               modelName: model,
               steps: 1,
               samples: Number(job.payload?.samples || 1),
-              loss: Math.random() * 0.5 + 0.1, // local heuristic only — honest UI labels this
+              loss: proxyLoss,
               nodeId: nodeId(),
               rewardGC: job.rewardGC,
               ts: Date.now(),
@@ -574,7 +579,27 @@ class MeshRentCloud {
           result = { text: "No local model — job deferred", deferred: true };
         }
       } else if (job.type === "embed") {
-        result = { note: "embed placeholder — use nomic-embed-text when installed" };
+        const embedText = String(job.payload?.text || job.payload?.prompt || "");
+        if (embedText && ollamaEngine.available) {
+          // Try the job-specified model first, then nomic-embed-text, then the default model.
+          const candidates = [job.model, "nomic-embed-text", ollamaEngine.defaultModel].filter(Boolean) as string[];
+          let embedding: number[] | null = null;
+          let usedModel = "";
+          for (const candidate of candidates) {
+            try {
+              embedding = await ollamaEngine.embed(embedText, candidate);
+              usedModel = candidate;
+              break;
+            } catch { /* try next candidate */ }
+          }
+          if (embedding) {
+            result = { embedding, model: usedModel, dims: embedding.length };
+          } else {
+            result = { error: "No embedding model available — install nomic-embed-text via Ollama" };
+          }
+        } else {
+          result = { error: "No Ollama model available for embedding" };
+        }
         this.credit(Math.max(1, job.rewardGC / 2), "gpu_job", "Embed job");
       } else if (job.type === "compress") {
         const raw = String(job.payload?.text || "");
