@@ -749,6 +749,10 @@ export default function GridCaller({
   const [radioGroupChannelInput, setRadioGroupChannelInput] = useState("");
   const [selectedRadioGroupId, setSelectedRadioGroupId] = useState("");
   const [radioText, setRadioText] = useState("");
+  const [radioSelectMode, setRadioSelectMode] = useState(false);
+  const [selectedRadioMessageIds, setSelectedRadioMessageIds] = useState<string[]>([]);
+  const [radioMessageReadState, setRadioMessageReadState] = useState<Record<string, boolean>>(() => S.get("gridcaller_radio_msg_read_state", {}));
+  const [hiddenRadioMessageIds, setHiddenRadioMessageIds] = useState<string[]>(() => S.get("gridcaller_hidden_radio_msg_ids", []));
   const [radioSideTab, setRadioSideTab] = useState<"radio" | "radar">("radio");
   const [pttOn, setPttOn] = useState(false);
   const radarMotionRef = useRef<
@@ -1438,6 +1442,8 @@ export default function GridCaller({
   useEffect(() => S.set("gridcaller_starred_messages", starredMessageIds.slice(0, 3000)), [starredMessageIds]);
   useEffect(() => S.set("gridcaller_report_log", gridchatReportLog.slice(0, 500)), [gridchatReportLog]);
   useEffect(() => S.set("gridcaller_log_seen_state", logSeenState), [logSeenState]);
+  useEffect(() => S.set("gridcaller_radio_msg_read_state", radioMessageReadState), [radioMessageReadState]);
+  useEffect(() => S.set("gridcaller_hidden_radio_msg_ids", hiddenRadioMessageIds.slice(-500)), [hiddenRadioMessageIds]);
   useEffect(() => S.set("gridcaller_blocked", blocked), [blocked]);
   useEffect(() => {
     void deviceVault.put("gridcaller.sms", sms.slice(0, 400)).catch(() => {});
@@ -4463,6 +4469,27 @@ export default function GridCaller({
     setTimeout(() => setContactBusy(""), 1500);
   };
 
+  const toggleRadioMessageSelection = (id: string) => {
+    if (!id) return;
+    setSelectedRadioMessageIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const markRadioMessagesReadState = (ids: string[], read: boolean) => {
+    if (!ids.length) return;
+    setRadioMessageReadState((prev) => {
+      const next = { ...prev };
+      for (const id of ids) next[id] = read;
+      return next;
+    });
+  };
+
+  const hideSelectedRadioMessages = () => {
+    if (!selectedRadioMessageIds.length) return;
+    setHiddenRadioMessageIds((prev) => Array.from(new Set([...prev, ...selectedRadioMessageIds])).slice(-500));
+    setSelectedRadioMessageIds([]);
+    setRadioSelectMode(false);
+  };
+
   const runGroupChatMenuAction = (action: string, groupId: string, groupName: string) => {
     setGroupChatMenuOpen(false);
     if (action === "group-info") {
@@ -5040,6 +5067,8 @@ export default function GridCaller({
     setSelectedSmsThreadIds([]);
     setGridchatListSelectMode(false);
     setSelectedGridchatRowIds([]);
+    setRadioSelectMode(false);
+    setSelectedRadioMessageIds([]);
   }, [tab]);
 
   useEffect(() => {
@@ -11273,16 +11302,49 @@ export default function GridCaller({
                       fontSize: 13,
                     }}
                   >
-                    {freeRadio.messages.length === 0 ? (
-                      <span style={{ color: tokens.label }}>No messages</span>
-                    ) : (
-                      freeRadio.messages.slice(-30).map((m) => (
-                        <div key={m.id} style={{ marginBottom: 6, color: tokens.text }}>
-                          <b style={{ color: tokens.blue }}>{m.fromName}</b>: {m.text}
-                          <div style={{ fontSize: 10, color: tokens.label }}>{fullDateTime(m.ts)}</div>
-                        </div>
-                      ))
-                    )}
+                    {(() => {
+                      const radioVisibleMessages = freeRadio.messages.filter((m) => !hiddenRadioMessageIds.includes(m.id)).slice(-30);
+                      if (!radioVisibleMessages.length) return <span style={{ color: tokens.label }}>No messages</span>;
+                      return (
+                        <>
+                          {radioSelectMode ? (
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                              <button type="button" onClick={() => setSelectedRadioMessageIds(radioVisibleMessages.map((m) => m.id))} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Select all</button>
+                              <button type="button" onClick={() => markRadioMessagesReadState(radioVisibleMessages.map((m) => m.id), true)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Read all</button>
+                              <button type="button" onClick={() => markRadioMessagesReadState(radioVisibleMessages.map((m) => m.id), false)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Unread all</button>
+                              <button type="button" onClick={() => markRadioMessagesReadState(selectedRadioMessageIds, true)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Read selected</button>
+                              <button type="button" onClick={() => markRadioMessagesReadState(selectedRadioMessageIds, false)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Unread selected</button>
+                              <button type="button" onClick={hideSelectedRadioMessages} style={{ ...compactActionBtn(tokens), padding: "5px 9px", color: tokens.red }}>Delete</button>
+                              <button type="button" onClick={() => { setRadioSelectMode(false); setSelectedRadioMessageIds([]); }} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Cancel</button>
+                            </div>
+                          ) : null}
+                          {radioVisibleMessages.map((m) => {
+                            const isSelected = selectedRadioMessageIds.includes(m.id);
+                            const isRead = !!radioMessageReadState[m.id];
+                            return (
+                              <div
+                                key={m.id}
+                                onContextMenu={(e) => {
+                                  e.preventDefault();
+                                  setRadioSelectMode(true);
+                                  toggleRadioMessageSelection(m.id);
+                                }}
+                                onClick={() => {
+                                  if (radioSelectMode) toggleRadioMessageSelection(m.id);
+                                }}
+                                style={{ marginBottom: 6, color: tokens.text, padding: "4px 6px", borderRadius: 8, border: radioSelectMode && isSelected ? `1px solid ${tokens.blue}` : "1px solid transparent", background: radioSelectMode && isSelected ? `${tokens.blue}14` : "transparent", cursor: radioSelectMode ? "pointer" : "default" }}
+                              >
+                                <b style={{ color: tokens.blue }}>{m.fromName}</b>: {m.text}
+                                <div style={{ fontSize: 10, color: tokens.label, display: "flex", alignItems: "center", gap: 8 }}>
+                                  <span>{fullDateTime(m.ts)}</span>
+                                  <span style={{ color: isRead ? tokens.label : tokens.orange, fontWeight: 700 }}>{isRead ? "Read" : "Unread"}</span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </>
+                      );
+                    })()}
                   </div>
                   <div style={{ display: "flex", gap: 8 }}>
                     <input
