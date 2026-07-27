@@ -481,41 +481,39 @@ class OllamaEngine {
   }
 
   /** Get Ollama install instructions for the current OS */
-  getInstallInstructions(): { os: string; command: string; url: string; steps: string[] } {
+  getInstallInstructions(): { os: string; url: string; steps: string[] } {
     const ua = navigator.userAgent.toLowerCase();
     if (ua.includes("win")) {
       return {
         os: "Windows",
-        command: "winget install Ollama.Ollama",
         url: "https://ollama.com/download/windows",
         steps: [
-          "Download Ollama from ollama.com/download",
-          "Run the installer (OllamaSetup.exe)",
-          "Ollama starts automatically in the system tray",
-          "Come back here — we'll detect it automatically!",
+          "Download and install Ollama for Windows.",
+          "Open Ollama from your Start menu.",
+          "Wait for the Ollama tray icon to appear.",
+          "Come back here — we'll detect it automatically.",
         ],
       };
     } else if (ua.includes("mac")) {
       return {
         os: "macOS",
-        command: "brew install ollama",
         url: "https://ollama.com/download/mac",
         steps: [
-          "Download Ollama from ollama.com/download",
-          "Drag Ollama to Applications",
-          "Launch Ollama — it runs in the menu bar",
-          "Come back here — we'll detect it automatically!",
+          "Download and install Ollama for macOS.",
+          "Move Ollama to Applications if prompted.",
+          "Open Ollama from Applications.",
+          "Come back here — we'll detect it automatically.",
         ],
       };
     } else {
       return {
         os: "Linux",
-        command: "curl -fsSL https://ollama.com/install.sh | sh",
         url: "https://ollama.com/download/linux",
         steps: [
-          "Open terminal and run: curl -fsSL https://ollama.com/install.sh | sh",
-          "Start Ollama: ollama serve",
-          "Come back here — we'll detect it automatically!",
+          "Download the Linux package from ollama.com/download.",
+          "Install Ollama using your package installer.",
+          "Open Ollama from your apps list and keep it running.",
+          "Come back here — we'll detect it automatically.",
         ],
       };
     }
