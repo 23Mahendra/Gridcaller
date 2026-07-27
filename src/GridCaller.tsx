@@ -702,6 +702,7 @@ export default function GridCaller({
   >("home");
   const [logFilter, setLogFilter] = useState<LogTopFilter>("all");
   const [logFiltersOpen, setLogFiltersOpen] = useState(false);
+  const [filterPanelCollapsed, setFilterPanelCollapsed] = useState(false);
   const [logsSubView, setLogsSubView] = useState<"recents" | "keypad" | "contacts">("recents");
   const [callLogSourceFilter, setCallLogSourceFilter] = useState<LogSourceFilter>("all");
   const [messageLogSourceFilter, setMessageLogSourceFilter] = useState<LogSourceFilter>("all");
@@ -1093,66 +1094,85 @@ export default function GridCaller({
         background: tokens.card,
       }}
     >
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", marginBottom: 10 }}>
-        <div>
-          <div style={{ fontSize: 13, fontWeight: 800, color: tokens.text }}>Filter logs</div>
-          <div style={{ fontSize: 11, color: tokens.label, marginTop: 2 }}>
-            Tick the items you want to see together.
-          </div>
-        </div>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", marginBottom: filterPanelCollapsed ? 0 : 10 }}>
         <button
           type="button"
-          onClick={selectAllLogFilters}
-          style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, borderRadius: 999, padding: "7px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+          onClick={() => setFilterPanelCollapsed((p) => !p)}
+          style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", padding: 0, flex: 1, textAlign: "left" }}
+          title={filterPanelCollapsed ? "Expand filter panel" : "Collapse filter panel"}
         >
-          Select all
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 800, color: tokens.text }}>Filter logs</div>
+            {!filterPanelCollapsed && (
+              <div style={{ fontSize: 11, color: tokens.label, marginTop: 2 }}>
+                Tick the items you want to see together.
+              </div>
+            )}
+          </div>
+          {filterPanelCollapsed
+            ? <ChevronDown size={16} color={tokens.label} style={{ marginLeft: "auto", flexShrink: 0 }} />
+            : <ChevronUp size={16} color={tokens.label} style={{ marginLeft: "auto", flexShrink: 0 }} />
+          }
         </button>
-      </div>
-
-      <div style={{ fontSize: 11, fontWeight: 800, color: tokens.secondary, marginBottom: 8, letterSpacing: 0.4 }}>
-        CALL LOGS
-      </div>
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
-        {([
-          { id: "all", label: `All ${callLogSourceStats.all}` },
-          { id: "local-device", label: `Local device ${callLogSourceStats["local-device"]}` },
-          { id: "mesh-network", label: `Mesh network ${callLogSourceStats["mesh-network"]}` },
-        ] as const).map((item) =>
-          renderFilterChip(callLogSourceFilter === item.id, item.label, () => setCallLogSourceFilter(item.id))
-        )}
-      </div>
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
-        {([
-          { id: "in", label: "Incoming", icon: <PhoneIncoming size={13} /> },
-          { id: "out", label: "Outgoing", icon: <PhoneOutgoing size={13} /> },
-          { id: "missed", label: "Missed", icon: <PhoneMissed size={13} /> },
-          { id: "blocked", label: "Blocked", icon: <PhoneOff size={13} /> },
-        ] as const).map((item) =>
-          renderFilterChip(callDirectionFilters.includes(item.id), item.label, () => toggleCallDirectionFilter(item.id), item.icon)
+        {!filterPanelCollapsed && (
+          <button
+            type="button"
+            onClick={selectAllLogFilters}
+            style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, borderRadius: 999, padding: "7px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}
+          >
+            Select all
+          </button>
         )}
       </div>
 
-      <div style={{ fontSize: 11, fontWeight: 800, color: tokens.secondary, marginBottom: 8, letterSpacing: 0.4 }}>
-        MESSAGE LOGS
-      </div>
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
-        {([
-          { id: "all", label: `All ${messageLogSourceStats.all}` },
-          { id: "local-device", label: `Local device ${messageLogSourceStats["local-device"]}` },
-          { id: "mesh-network", label: `Mesh network ${messageLogSourceStats["mesh-network"]}` },
-        ] as const).map((item) =>
-          renderFilterChip(messageLogSourceFilter === item.id, item.label, () => setMessageLogSourceFilter(item.id))
-        )}
-      </div>
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        {([
-          { id: "inbox", label: "Inbox", icon: <MessageSquare size={13} /> },
-          { id: "sent", label: "Sent", icon: <MessageCircle size={13} /> },
-          { id: "blocked", label: "Blocked", icon: <Ban size={13} /> },
-        ] as const).map((item) =>
-          renderFilterChip(messageDirectionFilters.includes(item.id), item.label, () => toggleMessageDirectionFilter(item.id), item.icon)
-        )}
-      </div>
+      {!filterPanelCollapsed && (
+        <>
+          <div style={{ fontSize: 11, fontWeight: 800, color: tokens.secondary, marginBottom: 8, letterSpacing: 0.4 }}>
+            CALL LOGS
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+            {([
+              { id: "all", label: `All ${callLogSourceStats.all}` },
+              { id: "local-device", label: `Local device ${callLogSourceStats["local-device"]}` },
+              { id: "mesh-network", label: `Mesh network ${callLogSourceStats["mesh-network"]}` },
+            ] as const).map((item) =>
+              renderFilterChip(callLogSourceFilter === item.id, item.label, () => setCallLogSourceFilter(item.id))
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+            {([
+              { id: "in", label: "Incoming", icon: <PhoneIncoming size={13} /> },
+              { id: "out", label: "Outgoing", icon: <PhoneOutgoing size={13} /> },
+              { id: "missed", label: "Missed", icon: <PhoneMissed size={13} /> },
+              { id: "blocked", label: "Blocked", icon: <PhoneOff size={13} /> },
+            ] as const).map((item) =>
+              renderFilterChip(callDirectionFilters.includes(item.id), item.label, () => toggleCallDirectionFilter(item.id), item.icon)
+            )}
+          </div>
+
+          <div style={{ fontSize: 11, fontWeight: 800, color: tokens.secondary, marginBottom: 8, letterSpacing: 0.4 }}>
+            MESSAGE LOGS
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+            {([
+              { id: "all", label: `All ${messageLogSourceStats.all}` },
+              { id: "local-device", label: `Local device ${messageLogSourceStats["local-device"]}` },
+              { id: "mesh-network", label: `Mesh network ${messageLogSourceStats["mesh-network"]}` },
+            ] as const).map((item) =>
+              renderFilterChip(messageLogSourceFilter === item.id, item.label, () => setMessageLogSourceFilter(item.id))
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {([
+              { id: "inbox", label: "Inbox", icon: <MessageSquare size={13} /> },
+              { id: "sent", label: "Sent", icon: <MessageCircle size={13} /> },
+              { id: "blocked", label: "Blocked", icon: <Ban size={13} /> },
+            ] as const).map((item) =>
+              renderFilterChip(messageDirectionFilters.includes(item.id), item.label, () => toggleMessageDirectionFilter(item.id), item.icon)
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 
@@ -1213,6 +1233,55 @@ export default function GridCaller({
       </div>
     );
   };
+
+  /** Renders a list of log rows with date-separator headers between different calendar days */
+  const renderLogsWithDateSeparators = (rows: LocalCommLogEntry[], compact = false) => {
+    const today = new Date();
+    const todayKey = `${today.getFullYear()}-${today.getMonth()}-${today.getDate()}`;
+    const yesterday = new Date(today);
+    yesterday.setDate(today.getDate() - 1);
+    const yesterdayKey = `${yesterday.getFullYear()}-${yesterday.getMonth()}-${yesterday.getDate()}`;
+
+    const items: ReactNode[] = [];
+    let lastDateKey = "";
+    rows.forEach((row) => {
+      const d = new Date(row.ts);
+      const dateKey = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+      if (dateKey !== lastDateKey) {
+        lastDateKey = dateKey;
+        let label: string;
+        if (dateKey === todayKey) {
+          label = "Today";
+        } else if (dateKey === yesterdayKey) {
+          label = "Yesterday";
+        } else {
+          label = d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+        }
+        items.push(
+          <div
+            key={`sep-${dateKey}`}
+            style={{
+              fontSize: 11,
+              fontWeight: 700,
+              color: tokens.label,
+              padding: compact ? "8px 12px 4px" : "8px 0 4px",
+              letterSpacing: 0.3,
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+            }}
+          >
+            <span style={{ flex: 1, height: 1, background: tokens.sep }} />
+            <span>{label}</span>
+            <span style={{ flex: 1, height: 1, background: tokens.sep }} />
+          </div>
+        );
+      }
+      items.push(<div key={row.id}>{renderLogRow(row, compact)}</div>);
+    });
+    return items;
+  };
+
   const [contactFilter, setContactFilter] = useState<"all" | "fav" | "spam">("all");
   const fileImportRef = useRef<HTMLInputElement>(null);
 
@@ -6300,11 +6369,7 @@ export default function GridCaller({
                 </CardList>
               ) : (
                 <div style={{ padding: "4px 0 16px" }}>
-                  {filteredMeshLog.map((row) => (
-                    <div key={row.id} style={{ margin: "8px 12px 0" }}>
-                      {renderLogRow(row, true)}
-                    </div>
-                  ))}
+                  {renderLogsWithDateSeparators(filteredMeshLog, true)}
                 </div>
               )}
             </>
@@ -6315,7 +6380,7 @@ export default function GridCaller({
             {latestLocalCommLog.length === 0 ? (
               <EmptyState title="No local logs yet" body="Calls, inbox, sent, missed, and blocked actions will appear here on this device only." />
             ) : (
-              latestLocalCommLog.map((row) => renderLogRow(row, true))
+              renderLogsWithDateSeparators(latestLocalCommLog, true)
             )}
           </CardList>
         )}
@@ -9231,7 +9296,7 @@ export default function GridCaller({
                   {latestLocalCommLog.length === 0 ? (
                     <div style={{ fontSize: 13, color: tokens.label }}>No local logs yet.</div>
                   ) : (
-                    latestLocalCommLog.map((row) => renderLogRow(row))
+                    renderLogsWithDateSeparators(latestLocalCommLog)
                   )}
                 </>
               )}
