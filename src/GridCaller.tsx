@@ -12,7 +12,7 @@ import {
   Upload, UserPlus, X, Smartphone, Users, Menu, Map as MapIcon, Settings,
   Share2, Image as ImageIcon, IdCard, Wifi, Bluetooth, Shield, Sun, Moon, Power,
   Network, Radio, Video, VideoOff, SwitchCamera, Camera, BellOff, EllipsisVertical,
-  CalendarDays, Sparkles,
+  CalendarDays, Sparkles, Home,
 } from "lucide-react";
 import { bus } from "./kernel/bus";
 import { removeStorageValue, S } from "./kernel/storage";
@@ -8699,6 +8699,7 @@ export default function GridCaller({
 
                   {(
                     [
+                      { id: "home" as const, icon: <Home size={20} color={tokens.blue} />, title: "Home" },
                       {
                         id: "emergency" as const,
                         icon: <Shield size={20} color={isPrivacyMode() ? tokens.green : tokens.orange} />,
@@ -8719,6 +8720,13 @@ export default function GridCaller({
                       key={item.id}
                       type="button"
                       onClick={() => {
+                        if (item.id === "home") {
+                          setTab("logs");
+                          setLogsSubView("recents");
+                          setMenuOpen(false);
+                          setMenuFullscreen(false);
+                          return;
+                        }
                         if (item.id === "profile") setMyCard(loadMyCard());
                         if (item.id === "settings") setSettingsName(myName);
                         if (item.id === "share") {
