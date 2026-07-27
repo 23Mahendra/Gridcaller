@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { enqueuePendingPacket, prunePendingPackets, shouldStoreForReplay } from "./meshReliability.ts";
 
 test("queues packets addressed to another node for later replay", () => {
-  const queue = [];
+  const queue: any[] = [];
   const next = enqueuePendingPacket(queue, {
     id: "msg-1",
     to: "peer-2",

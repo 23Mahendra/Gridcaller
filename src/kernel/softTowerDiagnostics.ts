@@ -135,7 +135,7 @@ export function recordPeerSighting(
     };
   }
   state.recentEvents = [
-    { kind: "peer", at: state.lastPeerSeenAt, peerId, peerName, detail: detail || "sighted" },
+    { kind: "peer" as const, at: state.lastPeerSeenAt, peerId, peerName, detail: detail || "sighted" },
     ...state.recentEvents,
   ].slice(0, 12);
 }
@@ -169,7 +169,7 @@ export function recordRelay(
     };
   }
   state.recentEvents = [
-    { kind: "relay", at: state.lastRelayAt, peerId, peerName, detail: detail || "relayed" },
+    { kind: "relay" as const, at: state.lastRelayAt, peerId, peerName, detail: detail || "relayed" },
     ...state.recentEvents,
   ].slice(0, 12);
 }
@@ -212,7 +212,7 @@ export function recordHandshake(state: SoftTowerRuntimeDiagnostics, peerId: stri
     handshakeState: "handshaken",
   };
   state.recentEvents = [
-    { kind: "handshake", at: state.lastHandshakeAt, peerId, peerName: peerName || "Peer", detail: "hello" },
+    { kind: "handshake" as const, at: state.lastHandshakeAt, peerId, peerName: peerName || "Peer", detail: "hello" },
     ...state.recentEvents,
   ].slice(0, 12);
 }
@@ -226,7 +226,7 @@ export function recordSelfTestResult(state: SoftTowerRuntimeDiagnostics, status:
   state.lastSelfTestDetail = detail || "";
   state.lastSelfTestAt = Date.now();
   state.recentEvents = [
-    { kind: "self-test", at: state.lastSelfTestAt, detail: `${status}:${detail || "self-test"}` },
+    { kind: "self-test" as const, at: state.lastSelfTestAt, detail: `${status}:${detail || "self-test"}` },
     ...state.recentEvents,
   ].slice(0, 12);
 }

@@ -224,6 +224,7 @@ class MeshAppBridge {
     const id = meta?.id || `mab_${Date.now().toString(36)}`;
     const fromName = meta?.fromName || S.get("user_name") || "User";
     const packet: MeshTrafficPacket & { id: string; channel: string; text: string; to?: string; fromName: string; from: string; ts: number } = {
+      kind: "message",
       id,
       channel,
       text,

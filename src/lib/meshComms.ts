@@ -13,6 +13,7 @@ import {
   createPendingCallSignal,
   shouldRetryPendingCallSignal,
   type PendingCallSignalEntry,
+  type PendingCallSignalKind,
 } from "./meshCallReliability";
 
 export type CallState =
@@ -627,7 +628,7 @@ class MeshCommsImpl {
     }
 
     if (msg.type === "MESH_CALL_ACCEPT" && this.call?.callId === msg.data?.callId) {
-      this.call = { ...this.call, state: "connecting" };
+      this.call = { ...this.call!, state: "connecting" };
       this._markPendingCallSignalAcked(this.call.callId, "accept");
       this._emit();
       if (this.call.direction === "out" && this.pc) {
@@ -660,7 +661,7 @@ class MeshCommsImpl {
     if (msg.type === "MESH_CALL_REJECT" && this.call?.callId === msg.data?.callId) {
       this._finalizeHistory("rejected");
       this._cleanupMedia();
-      this.call = { ...this.call, state: "ended" };
+      this.call = { ...this.call!, state: "ended" };
       this._emit();
       setTimeout(() => {
         this.call = null;
@@ -671,7 +672,8 @@ class MeshCommsImpl {
 
     if (msg.type === "MESH_CALL_SDP" && this.call?.callId === msg.data?.callId) {
       try {
-        if (!this.pc) await this._createPc(this.call.peerId, this.call.callId, false);
+        const activeCall = this.call!;
+        if (!this.pc) await this._createPc(activeCall.peerId, activeCall.callId, false);
         const sdp = msg.data.sdp;
         await this.pc!.setRemoteDescription(new RTCSessionDescription(sdp));
         for (const c of this.pendingIce) {
@@ -685,22 +687,22 @@ class MeshCommsImpl {
           const answer = await this.pc!.createAnswer();
           await this.pc!.setLocalDescription(answer);
           const payload = {
-            callId: this.call.callId,
+            callId: activeCall.callId,
             sdp: answer,
             kind: "answer",
           };
-          MeshEngine.sendTo(this.call.peerId, "MESH_CALL_SDP", payload);
+          MeshEngine.sendTo(activeCall.peerId, "MESH_CALL_SDP", payload);
           this._queuePendingCallSignal(
             createPendingCallSignal({
-              callId: this.call.callId,
-              peerId: this.call.peerId,
+              callId: activeCall.callId,
+              peerId: activeCall.peerId,
               kind: "sdp",
               payload,
               createdAt: Date.now(),
             })
           );
         }
-        this.call = { ...this.call, state: "connecting" };
+        this.call = { ...activeCall, state: "connecting" };
         this._markPendingCallSignalAcked(this.call.callId, "sdp");
         this._emit();
       } catch (e) {
@@ -724,7 +726,7 @@ class MeshCommsImpl {
     if (msg.type === "MESH_CALL_END" && this.call?.callId === msg.data?.callId) {
       this._finalizeHistory(msg.data?.reason || "remote_end");
       this._cleanupMedia();
-      this.call = { ...this.call, state: "ended" };
+      this.call = { ...this.call!, state: "ended" };
       this._emit();
       setTimeout(() => {
         this.call = null;
