@@ -553,10 +553,10 @@ export default function GridCaller({
   }, []);
 
   const [tab, setTab] = useState<Tab>(() => {
-    const raw = String(S.get("gridcaller_active_tab", "groups") || "groups").trim().toLowerCase();
-    return raw === "mesh" || raw === "contacts" || raw === "keypad" || raw === "sms" || raw === "groups"
+    const raw = String(S.get("gridcaller_active_tab", "logs") || "logs").trim().toLowerCase();
+    return raw === "mesh" || raw === "contacts" || raw === "keypad" || raw === "sms" || raw === "groups" || raw === "logs"
       ? (raw as Tab)
-      : "groups";
+      : "logs";
   });
   const [q, setQ] = useState("");
   const [peers, setPeers] = useState<
@@ -697,6 +697,7 @@ export default function GridCaller({
   >("home");
   const [logFilter, setLogFilter] = useState<LogTopFilter>("all");
   const [logFiltersOpen, setLogFiltersOpen] = useState(false);
+  const [logsSubView, setLogsSubView] = useState<"recents" | "keypad">("recents");
   const [callLogSourceFilter, setCallLogSourceFilter] = useState<LogSourceFilter>("all");
   const [messageLogSourceFilter, setMessageLogSourceFilter] = useState<LogSourceFilter>("all");
   const [callDirectionFilters, setCallDirectionFilters] = useState<CallDirectionFilter[]>(DEFAULT_CALL_LOG_FILTERS);
@@ -5977,36 +5978,6 @@ export default function GridCaller({
             </div>
           </div>
         </div>
-        <div style={{ display: "flex", gap: 0, marginBottom: 0 }}>
-          {(
-            [
-              { id: "mesh" as Tab, label: "Mesh" },
-              { id: "contacts" as Tab, label: "Contacts" },
-              { id: "keypad" as Tab, label: "Keypad" },
-              { id: "sms" as Tab, label: "Messages" },
-              { id: "groups" as Tab, label: "Gridchat" },
-              { id: "logs" as Tab, label: "Log" },
-            ] as const
-          ).map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
-              style={{
-                flex: 1,
-                border: "none",
-                background: "transparent",
-                padding: "10px 4px 12px",
-                fontSize: 13,
-                fontWeight: tab === t.id ? 600 : 400,
-                color: tab === t.id ? tokens.blue : tokens.label,
-                borderBottom: tab === t.id ? `2px solid ${tokens.blue}` : "2px solid transparent",
-                cursor: "pointer",
-              }}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
       </div>
 
       {tab === "contacts" && (
@@ -6034,60 +6005,85 @@ export default function GridCaller({
       )}
 
       {tab === "logs" && (
-        <div style={{ padding: "10px 16px 6px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-              <button
-                type="button"
-                onClick={() => setLogFiltersOpen((prev) => !prev)}
-                style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, borderRadius: 12, width: 38, height: 38, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}
-                title={logFiltersOpen ? "Hide log filters" : "Show log filters"}
-              >
-                <Menu size={18} />
-              </button>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 18, fontWeight: 800, color: tokens.text }}>Local Device Logs</div>
-                <div style={{ fontSize: 12, color: tokens.label }}>Calls, inbox, sent, blocked and private device history</div>
+        <div>
+          {/* TrueCaller-style top: search + menu */}
+          <div style={{ padding: "8px 16px 4px", display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: tokens.fill, borderRadius: 24, padding: "8px 14px" }}>
+              <Search size={15} color={tokens.label} />
+              <input
+                placeholder="Search names &amp; numbers"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                style={{ flex: 1, border: "none", background: "transparent", outline: "none", color: tokens.text, fontSize: 14 }}
+              />
+              {q ? <button type="button" onClick={() => setQ("")} style={{ border: "none", background: "none", color: tokens.label, cursor: "pointer", padding: 0, display: "grid", placeItems: "center" }}><X size={14} /></button> : null}
+            </div>
+            <button type="button" onClick={refreshLocalLogs} style={{ border: "none", background: tokens.fill, color: tokens.text, borderRadius: 999, width: 36, height: 36, display: "grid", placeItems: "center", cursor: "pointer" }} title="Refresh"><Radio size={16} /></button>
+            <button type="button" onClick={() => setLogFiltersOpen((p) => !p)} style={{ border: "none", background: tokens.fill, color: tokens.text, borderRadius: 999, width: 36, height: 36, display: "grid", placeItems: "center", cursor: "pointer" }} title="Filters"><EllipsisVertical size={16} /></button>
+          </div>
+          {/* Recent callers horizontal strip - TrueCaller style */}
+          {logsSubView === "recents" && (() => {
+            const seen = new Set<string>();
+            const recents = latestLocalCommLog
+              .filter((e) => e.kind === "call")
+              .filter((e) => {
+                const key = e.peerId || e.peerNumber || e.peerName || "";
+                if (!key || seen.has(key)) return false;
+                seen.add(key); return true;
+              })
+              .slice(0, 8);
+            if (!recents.length) return null;
+            return (
+              <div style={{ display: "flex", gap: 14, overflowX: "auto", padding: "8px 16px 6px", borderBottom: `1px solid ${tokens.sep}` }}>
+                {recents.map((e) => (
+                  <button
+                    key={e.id}
+                    type="button"
+                    onClick={() => e.peerId ? void placeCallLocal(e.peerId, e.peerName || "") : undefined}
+                    style={{ flex: "0 0 auto", display: "flex", flexDirection: "column", alignItems: "center", gap: 4, border: "none", background: "transparent", cursor: "pointer" }}
+                  >
+                    <div style={{ position: "relative" }}>
+                      <div style={{ width: 50, height: 50, borderRadius: 25, background: hue(e.peerId || e.peerName || e.id), color: "#fff", display: "grid", placeItems: "center", fontWeight: 800, fontSize: 15 }}>
+                        {initials(e.peerName || e.peerNumber || "?")}
+                      </div>
+                      <span style={{ position: "absolute", bottom: -4, left: "50%", transform: "translateX(-50%)", background: e.direction === "missed" ? tokens.red : tokens.label, color: "#fff", borderRadius: 999, fontSize: 9, fontWeight: 700, padding: "1px 5px", whiteSpace: "nowrap" }}>
+                        {timeLabel(e.ts)}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 11, color: tokens.text, fontWeight: 600, maxWidth: 60, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 6 }}>
+                      {(e.peerName || e.peerNumber || "Unknown").split(" ")[0]}
+                    </div>
+                    <div style={{ fontSize: 10, color: tokens.label }}>Mobile</div>
+                  </button>
+                ))}
               </div>
+            );
+          })()}
+          {/* Filter chips + keypad FAB row */}
+          {logsSubView === "recents" && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px 4px", flexWrap: "wrap" }}>
+              {[
+                { id: "all" as const, label: `All ${localCommLog.length}` },
+                { id: "calls" as const, label: `Calls ${logStats.calls}` },
+                { id: "messages" as const, label: `Messages ${logStats.messages}` },
+                { id: "blocked" as const, label: `Blocked ${logStats.blocked}` },
+              ].map((item) => {
+                const active = logFilter === item.id;
+                return (
+                  <button key={item.id} type="button" onClick={() => setLogFilter(item.id)} style={{ border: active ? "none" : `1px solid ${tokens.sep}`, background: active ? tokens.blue : tokens.card, color: active ? "#fff" : tokens.text, borderRadius: 999, padding: "6px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                    {item.label}
+                  </button>
+                );
+              })}
+              <button type="button" onClick={() => setLogsSubView("keypad")} style={{ marginLeft: "auto", border: "none", background: tokens.blue, color: "#fff", borderRadius: 999, padding: "6px 14px", fontSize: 11, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}><Delete size={12} /> Keypad</button>
             </div>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-              <button
-                type="button"
-                onClick={refreshLocalLogs}
-                style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, borderRadius: 999, padding: "8px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
-              >
-                Refresh
-              </button>
-              <button
-                type="button"
-                onClick={clearLocalLogs}
-                style={{ border: `1px solid ${tokens.red}55`, background: `${tokens.red}12`, color: tokens.red, borderRadius: 999, padding: "8px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
-              >
-                Clear log
-              </button>
+          )}
+          {logsSubView === "keypad" && (
+            <div style={{ padding: "6px 16px 0", display: "flex", alignItems: "center", gap: 6 }}>
+              <button type="button" onClick={() => setLogsSubView("recents")} style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, borderRadius: 999, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}><Phone size={12} /> Back to Recents</button>
             </div>
-          </div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
-            {[
-              { id: "all" as const, label: `All ${localCommLog.length}` },
-              { id: "calls" as const, label: `Calls ${logStats.calls}` },
-              { id: "messages" as const, label: `Messages ${logStats.messages}` },
-              { id: "blocked" as const, label: `Blocked ${logStats.blocked}` },
-            ].map((item) => {
-              const active = logFilter === item.id;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => setLogFilter(item.id)}
-                  style={{ border: active ? "none" : `1px solid ${tokens.sep}`, background: active ? tokens.blue : tokens.card, color: active ? "#fff" : tokens.text, borderRadius: 999, padding: "6px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
-                >
-                  {item.label}
-                </button>
-              );
-            })}
-          </div>
-          {logFiltersOpen ? renderLogFilterPanel(true) : null}
+          )}
+          {logsSubView === "recents" && logFiltersOpen ? renderLogFilterPanel(true) : null}
         </div>
       )}
 
@@ -6233,7 +6229,7 @@ export default function GridCaller({
             />
           </CardList>
         )}
-        {tab === "logs" && (
+        {tab === "logs" && logsSubView === "recents" && (
           <CardList>
             {latestLocalCommLog.length === 0 ? (
               <EmptyState title="No local logs yet" body="Calls, inbox, sent, missed, and blocked actions will appear here on this device only." />
@@ -6476,7 +6472,7 @@ export default function GridCaller({
           </>
         )}
 
-        {tab === "keypad" && (
+        {(tab === "keypad" || (tab === "logs" && logsSubView === "keypad")) && (
           <div style={{ padding: "20px 16px 12px", textAlign: "center" }}>
             <div style={{ fontSize: 13, color: tokens.secondary, marginBottom: 8, fontWeight: 600 }}>
               Enter number or ID
@@ -8419,6 +8415,27 @@ export default function GridCaller({
             </div>
           </>
         )}
+      </div>
+
+      {/* ═══ TrueCaller-style bottom navigation ═══ */}
+      <div style={{ display: "flex", background: tokens.card, borderTop: `1px solid ${tokens.sep}`, flexShrink: 0, paddingBottom: "env(safe-area-inset-bottom, 0px)" }}>
+        {([
+          { id: "logs" as Tab, label: "Calls", icon: <Phone size={22} /> },
+          { id: "sms" as Tab, label: "Messages", icon: <MessageCircle size={22} /> },
+          { id: "contacts" as Tab, label: "Contacts", icon: <Users size={22} /> },
+          { id: "groups" as Tab, label: "Gridchat", icon: <MessageSquare size={22} /> },
+          { id: "mesh" as Tab, label: "Mesh", icon: <Wifi size={22} /> },
+        ] as const).map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => { setTab(t.id); if (t.id === "logs") setLogsSubView("recents"); }}
+            style={{ flex: 1, border: "none", background: "transparent", padding: "10px 4px 8px", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, color: tab === t.id ? tokens.blue : tokens.label, cursor: "pointer" }}
+          >
+            {t.icon}
+            <span style={{ fontSize: 10, fontWeight: tab === t.id ? 700 : 500 }}>{t.label}</span>
+          </button>
+        ))}
       </div>
 
       {renderChatProfileOverlay()}
