@@ -142,6 +142,7 @@ import {
   loadPersistedRuntimeDiagnostics,
   persistRuntimeDiagnostics,
 } from "./kernel/softTowerDiagnostics";
+import gridCallerLogo from "../logo.png";
 
 type Tokens = {
   bg: string;
@@ -5840,8 +5841,8 @@ export default function GridCaller({
           boxSizing: "border-box",
         }}
       >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 8 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", marginBottom: 10, gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: "1 1 260px" }}>
             <button
               type="button"
               title="Menu"
@@ -5879,11 +5880,11 @@ export default function GridCaller({
                 boxShadow: "inset 0 1px 0 rgba(255,255,255,0.18)",
               }}
             >
-              <img src="/logo.png" alt="GridCaller logo" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
+              <img src={gridCallerLogo} alt="GridCaller logo" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
             </div>
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 28, fontWeight: 700, letterSpacing: -0.5, color: tokens.text }}>GridCaller</div>
-              <div style={{ fontSize: 14, color: tokens.text, marginTop: 3, fontWeight: 700 }}>
+              <div style={{ fontSize: "clamp(22px, 4vw, 28px)", fontWeight: 700, letterSpacing: -0.5, color: tokens.text, lineHeight: 1.15 }}>GridCaller</div>
+              <div style={{ fontSize: "clamp(13px, 2.8vw, 14px)", color: tokens.text, marginTop: 3, fontWeight: 700 }}>
                 {myGridDisplay ||
                   (globalHandle && String(globalHandle).replace(/\D/g, "").length >= 8
                     ? formatTestPhone(globalHandle)
@@ -5915,7 +5916,7 @@ export default function GridCaller({
               </div>
             </div>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, flexWrap: "wrap", marginLeft: "auto" }}>
             <button
               type="button"
               title={darkMode ? "Light mode" : "Dark mode"}
