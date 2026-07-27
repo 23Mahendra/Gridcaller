@@ -20,6 +20,18 @@ export default defineConfig({
         changeOrigin: true,
         ws: true,
       },
+      // Ollama local LLM gateway (localhost:11434)
+      "/api/ollama": {
+        target: "http://127.0.0.1:11434",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/ollama/, ""),
+      },
+      // Off Grid AI / any OpenAI-compatible local gateway (localhost:7878/v1)
+      "/api/offgrid": {
+        target: "http://127.0.0.1:7878/v1",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/offgrid/, ""),
+      },
     },
   },
   build: {

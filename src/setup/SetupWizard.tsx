@@ -1,5 +1,5 @@
 /**
- * First-launch setup wizard — Next → permissions → mesh hub connect.
+ * First-launch setup wizard — Next → permissions → mesh hub → AI → done.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -22,6 +22,7 @@ import {
   statusEmoji,
   type PermResult,
 } from "./permissions";
+import localAiEngine from "../kernel/localAiEngine";
 
 const WIZARD_DONE_KEY = "gc_wizard_done";
 
@@ -46,6 +47,7 @@ type StepId =
   | "perm_camera"
   | "perm_storage"
   | "hub"
+  | "ai_setup"
   | "finish";
 
 const STEPS: StepId[] = [
@@ -57,6 +59,7 @@ const STEPS: StepId[] = [
   "perm_camera",
   "perm_storage",
   "hub",
+  "ai_setup",
   "finish",
 ];
 
@@ -70,9 +73,42 @@ export default function SetupWizard({ onComplete }: Props) {
   const [results, setResults] = useState<Record<string, PermResult>>({});
   const [err, setErr] = useState("");
 
+  // AI setup step state
+  const [aiDetected, setAiDetected] = useState(false);
+  const [aiChecking, setAiChecking] = useState(false);
+  const [aiShowOllama, setAiShowOllama] = useState(false);
+  const [aiShowOffGrid, setAiShowOffGrid] = useState(false);
+  const aiPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   const step = STEPS[idx];
   const progress = Math.round(((idx + 1) / STEPS.length) * 100);
   const autoAsked = useRef<Record<string, boolean>>({});
+
+  // Poll for AI backends when on ai_setup step
+  useEffect(() => {
+    if (step !== "ai_setup") {
+      if (aiPollRef.current) { clearInterval(aiPollRef.current); aiPollRef.current = null; }
+      return;
+    }
+    const check = async () => {
+      setAiChecking(true);
+      try {
+        const snap = await localAiEngine.checkAvailability();
+        if (snap.chatBackend !== "none") {
+          setAiDetected(true);
+          if (aiPollRef.current) { clearInterval(aiPollRef.current); aiPollRef.current = null; }
+        }
+      } finally {
+        setAiChecking(false);
+      }
+    };
+    void check();
+    aiPollRef.current = setInterval(() => { void check(); }, 4000);
+    return () => {
+      if (aiPollRef.current) { clearInterval(aiPollRef.current); aiPollRef.current = null; }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step]);
 
   useEffect(() => {
     if (autoAsked.current[step]) return;
@@ -99,6 +135,9 @@ export default function SetupWizard({ onComplete }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step]);
 
+  const ollamaInfo = useMemo(() => localAiEngine.getOllamaInstallInfo(), []);
+  const offGridInfo = useMemo(() => localAiEngine.getOffGridInstallInfo(), []);
+
   const title = useMemo(() => {
     switch (step) {
       case "welcome":
@@ -117,6 +156,8 @@ export default function SetupWizard({ onComplete }: Props) {
         return "Offline storage";
       case "hub":
         return "Mesh hub (PC)";
+      case "ai_setup":
+        return "AI Assistant (optional)";
       case "finish":
         return "All set!";
       default:
@@ -219,6 +260,12 @@ export default function SetupWizard({ onComplete }: Props) {
         return;
       }
       saveHub();
+      setIdx((i) => i + 1);
+      return;
+    }
+
+    if (step === "ai_setup") {
+      // AI is optional — always allow advancing regardless of detection
       setIdx((i) => i + 1);
       return;
     }
@@ -466,6 +513,95 @@ export default function SetupWizard({ onComplete }: Props) {
           </div>
         )}
 
+        {step === "ai_setup" && (
+          <div className="wizard-card">
+            <div className="wizard-icon">🤖</div>
+            <p className="wizard-p">
+              <b>Offline AI</b> — chat, image generation and voice — all
+              on‑device. No account, no API key, nothing leaves your PC.
+            </p>
+
+            {/* Detection status */}
+            {aiDetected ? (
+              <div
+                className="wizard-perm-result"
+                style={{ color: "#30d158", fontWeight: 700 }}
+              >
+                ✅ AI backend detected — you're all set!
+              </div>
+            ) : (
+              <div className="wizard-perm-result" style={{ opacity: 0.65 }}>
+                {aiChecking ? "🔍 Checking…" : "⏳ Waiting for AI backend…"}
+              </div>
+            )}
+
+            {/* Ollama section */}
+            <div style={{ marginTop: 14 }}>
+              <button
+                type="button"
+                className="btn ghost"
+                style={{ width: "100%", textAlign: "left", marginBottom: 6 }}
+                onClick={() => setAiShowOllama((v) => !v)}
+              >
+                {aiShowOllama ? "▾" : "▸"} Ollama — text chat + model library
+              </button>
+              {aiShowOllama && (
+                <div className="wizard-hint" style={{ paddingLeft: 8 }}>
+                  <ol style={{ margin: "6px 0 10px", paddingLeft: 18, lineHeight: 1.7 }}>
+                    {ollamaInfo.steps.map((s, i) => (
+                      <li key={i}>{s}</li>
+                    ))}
+                  </ol>
+                  <a
+                    href={ollamaInfo.downloadUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="btn primary"
+                    style={{ display: "inline-block", textDecoration: "none" }}
+                  >
+                    Download Ollama ({ollamaInfo.os})
+                  </a>
+                </div>
+              )}
+            </div>
+
+            {/* Off Grid AI section */}
+            <div style={{ marginTop: 8 }}>
+              <button
+                type="button"
+                className="btn ghost"
+                style={{ width: "100%", textAlign: "left", marginBottom: 6 }}
+                onClick={() => setAiShowOffGrid((v) => !v)}
+              >
+                {aiShowOffGrid ? "▾" : "▸"} Off Grid AI — images + voice (Whisper/TTS)
+              </button>
+              {aiShowOffGrid && (
+                <div className="wizard-hint" style={{ paddingLeft: 8 }}>
+                  <ol style={{ margin: "6px 0 10px", paddingLeft: 18, lineHeight: 1.7 }}>
+                    {offGridInfo.steps.map((s, i) => (
+                      <li key={i}>{s}</li>
+                    ))}
+                  </ol>
+                  <a
+                    href={offGridInfo.downloadUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="btn primary"
+                    style={{ display: "inline-block", textDecoration: "none" }}
+                  >
+                    Download Off Grid AI
+                  </a>
+                </div>
+              )}
+            </div>
+
+            <p className="wizard-hint" style={{ marginTop: 14 }}>
+              AI is <b>optional</b> — tap <b>Skip</b> to continue without it.
+              You can set it up any time from the main screen.
+            </p>
+          </div>
+        )}
+
         {step === "finish" && (
           <div className="wizard-card">
             <div className="wizard-icon">✅</div>
@@ -514,7 +650,13 @@ export default function SetupWizard({ onComplete }: Props) {
           onClick={() => void onNext()}
           disabled={busy}
         >
-          {busy ? "Please wait…" : step === "finish" ? "Start GridCaller" : "Next →"}
+          {busy
+            ? "Please wait…"
+            : step === "finish"
+            ? "Start GridCaller"
+            : step === "ai_setup" && !aiDetected
+            ? "Skip →"
+            : "Next →"}
         </button>
       </div>
     </div>
