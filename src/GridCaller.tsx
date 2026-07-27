@@ -619,6 +619,7 @@ export default function GridCaller({
   const [gridchatCreateMenuOpen, setGridchatCreateMenuOpen] = useState(false);
   const [gridchatMoreMenuOpen, setGridchatMoreMenuOpen] = useState(false);
   const [gridchatSubTab, setGridchatSubTab] = useState<"chats" | "updates" | "communities" | "calls">("chats");
+  const [gridchatShowCreateForm, setGridchatShowCreateForm] = useState(false);
   const [threadSearchOpen, setThreadSearchOpen] = useState(false);
   const [threadSearchQuery, setThreadSearchQuery] = useState("");
   const [groupSearchOpen, setGroupSearchOpen] = useState(false);
@@ -4790,6 +4791,7 @@ export default function GridCaller({
     setGroupMembersInput("");
     setGridchatCreateMenuOpen(false);
     setGridchatMoreMenuOpen(false);
+    setGridchatShowCreateForm(true);
     window.setTimeout(() => {
       try {
         gridchatCreatePanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -7499,7 +7501,7 @@ export default function GridCaller({
                       </button>
                     );
                   })}
-                  <button type="button" style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.text, borderRadius: 999, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center" }}><span style={{ fontSize: 11, color: tokens.label }}>Groups {gridchatItems.filter(r => r.kind === "group").length}</span></button>
+                  <button type="button" style={{ border: `1px solid ${tokens.sep}`, background: gridchatShowCreateForm ? tokens.green : tokens.card, color: gridchatShowCreateForm ? "#fff" : tokens.text, borderRadius: 999, padding: "5px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", gap: 5 }} onClick={() => setGridchatShowCreateForm(v => !v)}>Groups {gridchatItems.filter(r => r.kind === "group").length}</button>
                   <button type="button" onClick={openGridchatCreatePanel} style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.text, borderRadius: 999, width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}><Plus size={14} /></button>
                 </div>
 
@@ -7909,7 +7911,7 @@ export default function GridCaller({
               >
                 <Plus size={22} />
               </button>
-              <div
+              {gridchatShowCreateForm && <div
                 ref={gridchatCreatePanelRef}
                 style={{
                   margin: "10px 12px",
@@ -7979,7 +7981,7 @@ export default function GridCaller({
                 >
                   Create Gridchat
                 </button>
-              </div>
+              </div>}
 
               {activeGroup && (
                 <div
