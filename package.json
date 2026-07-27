@@ -38,6 +38,7 @@
     "@sentry/react": "^10.67.0",
     "dexie": "^4.4.4",
     "gun": "^0.2020.1241",
+    "html2canvas": "^1.4.1",
     "leaflet": "^1.9.4",
     "libp2p": "^2.7.0",
     "lucide-react": "^0.546.0",

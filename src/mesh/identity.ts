@@ -33,6 +33,14 @@ export type DeviceIdentitySnapshot = {
   note: string;
 };
 
+export function getIdentitySourceLabel(source: DeviceIdentitySource) {
+  if (source === "sim") return "SIM detected";
+  if (source === "stored-phone") return "Stored SIM number";
+  if (source === "imei") return "IMEI detected";
+  if (source === "stored-imei") return "Stored IMEI";
+  return "Peer fallback";
+}
+
 function rid(prefix = "gc") {
   return `${prefix}_${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36).slice(-4)}`;
 }
@@ -234,8 +242,8 @@ async function tryReadNativeIdentity(): Promise<{
           imei,
           nativeAvailable: true,
           note: phone
-            ? "Identity synced from the local device SIM number."
-            : "SIM number unavailable, so local device IMEI identity is locked.",
+            ? "Immutable identity synced from SIM 1 / SIM 2 line number."
+            : "SIM number unavailable, so immutable identity is locked to local device IMEI.",
         };
       }
       return {
@@ -252,7 +260,7 @@ async function tryReadNativeIdentity(): Promise<{
 
   return {
     nativeAvailable: false,
-    note: "This build has no native SIM/IMEI identity bridge, so only local stored identity is available.",
+    note: "This build has no native SIM/IMEI bridge, so only locally stored device identity is available.",
   };
 }
 
@@ -314,9 +322,9 @@ export function rememberDeviceIdentity(input: { phone?: string; imei?: string; p
     source: phone ? "stored-phone" : imei ? "stored-imei" : "peer-id-fallback",
     nativeAvailable: false,
     note: phone
-      ? "Identity is locked to the locally stored SIM number."
+      ? "Immutable identity is locked to the locally stored SIM number."
       : imei
-        ? "SIM number unavailable, so identity is locked to the locally stored IMEI."
+        ? "SIM number unavailable, so immutable identity is locked to the locally stored IMEI."
         : "No SIM/IMEI stored, so identity falls back to the local peer id hash.",
   });
   return snapshot.handle;

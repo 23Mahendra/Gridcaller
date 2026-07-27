@@ -12,7 +12,7 @@ import {
   Upload, UserPlus, X, Smartphone, Users, Menu, Map as MapIcon, Settings,
   Share2, Image as ImageIcon, IdCard, Wifi, Bluetooth, Shield, Sun, Moon, Power,
   Network, Radio, Video, VideoOff, SwitchCamera, Camera, BellOff, EllipsisVertical,
-  CalendarDays, Sparkles, Home,
+  CalendarDays, Sparkles, Home, Grid3X3,
 } from "lucide-react";
 import { bus } from "./kernel/bus";
 import { removeStorageValue, S } from "./kernel/storage";
@@ -670,6 +670,8 @@ export default function GridCaller({
   const [groupSelection, setGroupSelection] = useState<string[]>([]);
   const [meshPeersCollapsed, setMeshPeersCollapsed] = useState(false);
   const [meshShareNote, setMeshShareNote] = useState("");
+  const [meshTabFilter, setMeshTabFilter] = useState<"all" | "calls" | "messages">("all");
+  const [meshSubView, setMeshSubView] = useState<"recents" | "people" | "keypad">("recents");
   const [onlineNowCollapsed, setOnlineNowCollapsed] = useState(false);
   const [groupCallOpen, setGroupCallOpen] = useState(false);
   const [groupCallMuted, setGroupCallMuted] = useState(false);
@@ -6116,139 +6118,197 @@ export default function GridCaller({
         </div>
       )}
 
-      <div className="gc-scroll" style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", paddingBottom: 16, WebkitOverflowScrolling: "touch" as any }}>
-        {/* LIVE mesh peers — dedicated Mesh tab */}
-        {tab === "mesh" && peers.filter((p) => p.online && !isSelfPeer(p.id)).length > 0 && (
-          <div style={{ margin: "8px 12px 4px", padding: 12, borderRadius: 14, background: tokens.card, border: `1px solid ${tokens.sep}` }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: meshPeersCollapsed ? 0 : 8 }}>
-              <div style={{ fontSize: 12, fontWeight: 800, color: tokens.green }}>
-                ONLINE ON MESH ({peers.filter((p) => p.online && !isSelfPeer(p.id)).length})
-              </div>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end", alignItems: "center" }}>
-                {selectedGroupPeers.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={startMeshGroupCall}
-                    style={{ border: "none", background: tokens.blue, color: "#fff", borderRadius: 999, padding: "6px 10px", fontWeight: 700, fontSize: 11, cursor: "pointer" }}
-                  >
-                    Group ({selectedGroupPeers.length})
-                  </button>
-                )}
-                {groupSelection.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={clearGroupSelection}
-                    style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, borderRadius: 999, padding: "6px 10px", fontWeight: 700, fontSize: 11, cursor: "pointer" }}
-                  >
-                    Clear
-                  </button>
-                )}
+      {/* ═══ MESH TAB header — search + filters (mirrors Calls tab) ═══ */}
+      {tab === "mesh" && (
+        <div>
+          {/* Search + refresh + filter toggle */}
+          <div style={{ padding: "8px 16px 4px", display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: tokens.fill, borderRadius: 24, padding: "8px 14px" }}>
+              <Search size={15} color={tokens.label} />
+              <input
+                placeholder="Search mesh calls &amp; messages"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                style={{ flex: 1, border: "none", background: "transparent", outline: "none", color: tokens.text, fontSize: 14 }}
+              />
+              {q ? <button type="button" onClick={() => setQ("")} style={{ border: "none", background: "none", color: tokens.label, cursor: "pointer", padding: 0, display: "grid", placeItems: "center" }}><X size={14} /></button> : null}
+            </div>
+            <button type="button" onClick={refreshLocalLogs} style={{ border: "none", background: tokens.fill, color: tokens.text, borderRadius: 999, width: 36, height: 36, display: "grid", placeItems: "center", cursor: "pointer" }} title="Refresh"><Radio size={16} /></button>
+            <button type="button" onClick={() => setLogFiltersOpen((p) => !p)} style={{ border: "none", background: tokens.fill, color: tokens.text, borderRadius: 999, width: 36, height: 36, display: "grid", placeItems: "center", cursor: "pointer" }} title="Filters"><EllipsisVertical size={16} /></button>
+            <button type="button" onClick={() => setMeshSubView(meshSubView === "keypad" ? "recents" : "keypad")} style={{ border: "none", background: meshSubView === "keypad" ? tokens.blue : tokens.fill, color: meshSubView === "keypad" ? "#fff" : tokens.text, borderRadius: 999, width: 36, height: 36, display: "grid", placeItems: "center", cursor: "pointer" }} title="Dialpad"><Grid3X3 size={16} /></button>
+          </div>
+          {/* Filter chips */}
+          {meshSubView !== "people" && (() => {
+            const ml = localCommLog.filter((e) => classifyLogSource(e) === "mesh-network");
+            const mlCalls = ml.filter((e) => e.kind === "call").length;
+            const mlMsgs = ml.filter((e) => e.kind === "message").length;
+            const mlBlocked = ml.filter((e) => e.direction === "blocked" || e.kind === "block").length;
+            return (
+              <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px 4px", flexWrap: "wrap" }}>
+                {([
+                  { id: "all" as const, label: `All ${ml.length}` },
+                  { id: "calls" as const, label: `Calls ${mlCalls}` },
+                  { id: "messages" as const, label: `Messages ${mlMsgs}` },
+                  { id: "blocked" as const, label: `Blocked ${mlBlocked}` },
+                ]).map((item) => {
+                  const active = logFilter === item.id;
+                  return (
+                    <button key={item.id} type="button" onClick={() => setLogFilter(item.id)} style={{ border: active ? "none" : `1px solid ${tokens.sep}`, background: active ? tokens.blue : tokens.card, color: active ? "#fff" : tokens.text, borderRadius: 999, padding: "6px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                      {item.label}
+                    </button>
+                  );
+                })}
                 <button
                   type="button"
-                  onClick={() => setMeshPeersCollapsed((v) => !v)}
-                  style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, borderRadius: 999, width: 28, height: 28, display: "grid", placeItems: "center", cursor: "pointer" }}
-                  title={meshPeersCollapsed ? "Expand peers" : "Collapse peers"}
+                  onClick={() => setMeshSubView(meshSubView === "people" ? "recents" : "people")}
+                  style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.text, borderRadius: 999, padding: "6px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}
                 >
-                  {meshPeersCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+                  <Users size={12} /> People
                 </button>
               </div>
+            );
+          })()}
+          {(meshSubView === "people" || meshSubView === "keypad") && (
+            <div style={{ padding: "6px 16px 0", display: "flex", alignItems: "center", gap: 6 }}>
+              <button type="button" onClick={() => setMeshSubView("recents")} style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, borderRadius: 999, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}><Wifi size={12} /> Back to Recents</button>
             </div>
-            {groupSelection.length > 0 && (
-              <div style={{ marginBottom: 8, padding: "8px 10px", borderRadius: 10, background: `${tokens.blue}14`, color: tokens.blue, fontSize: 12, fontWeight: 700 }}>
-                Selected for mesh group: {selectedGroupPeers.map((p) => p.name).join(" · ")}
-              </div>
-            )}
-            {!meshPeersCollapsed && peers
-              .filter((p) => p.online && !isSelfPeer(p.id))
-              .map((p) => {
-                const selected = groupSelection.includes(p.id);
+          )}
+          {meshSubView === "recents" && logFiltersOpen ? renderLogFilterPanel(true) : null}
+        </div>
+      )}
+
+      <div className="gc-scroll" style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", paddingBottom: 16, WebkitOverflowScrolling: "touch" as any }}>
+        {/* ═══ MESH TAB — Calls-style UI for mesh network calls + messages ═══ */}
+        {tab === "mesh" && (() => {
+          const onlinePeers = peers.filter((p) => p.online && !isSelfPeer(p.id));
+          const meshLog = localCommLog.filter((e) => classifyLogSource(e) === "mesh-network");
+
+          // Apply full filter stack (same as Calls tab) but always pre-filtered to mesh-network
+          const filteredMeshLog = meshLog.filter((e) => {
+            const isBlocked = e.direction === "blocked" || e.kind === "block";
+            if (logFilter === "calls" && e.kind !== "call") return false;
+            if (logFilter === "messages" && e.kind !== "message") return false;
+            if (logFilter === "blocked" && !isBlocked) return false;
+            if (q.trim()) {
+              const sq = q.toLowerCase();
+              if (!((e.peerName || "").toLowerCase().includes(sq) || (e.peerNumber || "").toLowerCase().includes(sq) || (e.peerId || "").toLowerCase().includes(sq))) return false;
+            }
+            if (e.kind === "call") return callDirectionFilters.includes(getCallDirectionFilter(e));
+            if (e.kind === "message") return messageDirectionFilters.includes(getMessageDirectionFilter(e));
+            return true;
+          });
+
+          // People sub-view — full mesh peer list with call/msg buttons
+          if (meshSubView === "people") {
+            return (
+              <>
+                {onlinePeers.length === 0 ? (
+                  <CardList>
+                    <EmptyState title="No online mesh peers" body="When nearby or linked peers come online, they will appear here." />
+                  </CardList>
+                ) : (
+                  <div style={{ padding: "4px 0 16px" }}>
+                    {onlinePeers.map((p) => {
+                      const selected = groupSelection.includes(p.id);
+                      return (
+                        <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 16px", borderBottom: `1px solid ${tokens.sep}` }}>
+                          <div style={{ width: 44, height: 44, borderRadius: 22, background: selected ? `${tokens.blue}22` : `${tokens.green}18`, color: selected ? tokens.blue : tokens.green, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 15, flexShrink: 0 }}>
+                            {initials(p.name)}
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontWeight: 700, color: tokens.text, fontSize: 14 }}>{p.name}{p.handle ? <span style={{ color: tokens.blue, fontWeight: 600 }}> · @{p.handle}</span> : null}</div>
+                            <div style={{ fontSize: 11, color: tokens.label, marginTop: 2 }}>{p.phone ? `📞 ${p.phone} · ` : ""}{p.id?.slice(0, 14)}</div>
+                            <div style={{ display: "flex", gap: 5, marginTop: 4 }}>
+                              <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 999, background: `${tokens.green}18`, color: tokens.green }}>Online</span>
+                              <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 999, background: `${tokens.blue}16`, color: tokens.blue }}>Mesh</span>
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", gap: 6 }}>
+                            <button type="button" onClick={() => toggleGroupSelection(p.id)} style={{ border: "none", background: selected ? `${tokens.orange}18` : tokens.fill, color: selected ? tokens.orange : tokens.text, borderRadius: 10, width: 32, height: 32, display: "grid", placeItems: "center", cursor: "pointer" }} title={selected ? "Deselect" : "Select"}>{selected ? <CheckCircle2 size={15} /> : <Circle size={15} />}</button>
+                            <button type="button" onClick={() => void placeCallLocal(p.id, p.name)} style={{ border: "none", background: tokens.green, color: "#041510", borderRadius: 10, width: 32, height: 32, display: "grid", placeItems: "center", cursor: "pointer" }} title="Call"><Phone size={14} /></button>
+                            <button type="button" onClick={() => msgMeshNetwork(p.id, p.name)} style={{ border: "none", background: tokens.blue, color: "#fff", borderRadius: 10, width: 32, height: 32, display: "grid", placeItems: "center", cursor: "pointer" }} title="Message"><MessageCircle size={14} /></button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {selectedGroupPeers.length > 0 && (
+                      <div style={{ padding: "10px 16px 0", display: "flex", gap: 8 }}>
+                        <button type="button" onClick={startMeshGroupCall} style={{ border: "none", background: tokens.blue, color: "#fff", borderRadius: 999, padding: "8px 16px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Group call ({selectedGroupPeers.length})</button>
+                        <button type="button" onClick={clearGroupSelection} style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, borderRadius: 999, padding: "8px 16px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Clear selection</button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            );
+          }
+
+          // Recents sub-view — recent callers strip + log entries
+          return (
+            <>
+              {/* Online now — horizontal strip */}
+              {onlinePeers.length > 0 && (
+                <div style={{ padding: "12px 16px 6px", borderBottom: `1px solid ${tokens.sep}` }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: tokens.green, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>Online now · {onlinePeers.length}</div>
+                  <div style={{ display: "flex", gap: 14, overflowX: "auto", paddingBottom: 4 }}>
+                    {onlinePeers.slice(0, 10).map((p) => (
+                      <button key={p.id} type="button" onClick={() => void placeCallLocal(p.id, p.name)} style={{ flex: "0 0 auto", display: "flex", flexDirection: "column", alignItems: "center", gap: 4, border: "none", background: "transparent", cursor: "pointer" }}>
+                        <div style={{ position: "relative" }}>
+                          <div style={{ width: 50, height: 50, borderRadius: 25, background: hue(p.id), color: "#fff", display: "grid", placeItems: "center", fontWeight: 800, fontSize: 15 }}>{initials(p.name)}</div>
+                          <span style={{ position: "absolute", bottom: -3, right: -3, width: 13, height: 13, borderRadius: 999, background: tokens.green, border: `2px solid ${tokens.bg}` }} />
+                        </div>
+                        <div style={{ fontSize: 11, color: tokens.text, fontWeight: 600, maxWidth: 54, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name.split(" ")[0]}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Recent mesh callers strip */}
+              {(() => {
+                const seen = new Set<string>();
+                const recents = meshLog.filter((e) => e.kind === "call").filter((e) => {
+                  const key = e.peerId || e.peerName || "";
+                  if (!key || seen.has(key)) return false;
+                  seen.add(key); return true;
+                }).slice(0, 8);
+                if (!recents.length) return null;
                 return (
-                  <div
-                    key={p.id}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                      padding: "10px 0",
-                      borderBottom: `1px solid ${tokens.sep}`,
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: 40,
-                        height: 40,
-                        borderRadius: 20,
-                        background: selected ? `${tokens.blue}22` : `${tokens.green}18`,
-                        color: selected ? tokens.blue : tokens.green,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        fontWeight: 800,
-                        fontSize: 14,
-                        flexShrink: 0,
-                      }}
-                    >
-                      {initials(p.name)}
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontWeight: 700, color: tokens.text }}>
-                        {p.name}
-                        {p.handle ? (
-                          <span style={{ color: tokens.blue, fontWeight: 600 }}> · @{p.handle}</span>
-                        ) : null}
-                      </div>
-                      <div style={{ fontSize: 11, color: tokens.label, marginTop: 2, wordBreak: "break-all" }}>
-                        {p.phone ? `📞 ${p.phone}` : ""}
-                        {p.phone && p.id ? " · " : ""}
-                        {p.id}
-                      </div>
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
-                        <span style={{ fontSize: 10, fontWeight: 700, padding: "3px 8px", borderRadius: 999, background: `${tokens.green}18`, color: tokens.green }}>Online</span>
-                        <span style={{ fontSize: 10, fontWeight: 700, padding: "3px 8px", borderRadius: 999, background: `${tokens.blue}16`, color: tokens.blue }}>Mesh-ready</span>
-                        {p.phone ? <span style={{ fontSize: 10, fontWeight: 700, padding: "3px 8px", borderRadius: 999, background: `${tokens.orange}16`, color: tokens.orange }}>Mobile</span> : null}
-                      </div>
-                    </div>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, auto)", gap: 6 }}>
-                      <button
-                        type="button"
-                        onClick={() => toggleGroupSelection(p.id)}
-                        style={{ border: "none", background: selected ? `${tokens.orange}18` : `${tokens.fill}`, color: selected ? tokens.orange : tokens.text, borderRadius: 10, width: 32, height: 32, display: "grid", placeItems: "center", cursor: "pointer" }}
-                        title={selected ? "Remove selection" : "Select peer"}
-                      >
-                        {selected ? <CheckCircle2 size={15} /> : <Circle size={15} />}
+                  <div style={{ display: "flex", gap: 14, overflowX: "auto", padding: "8px 16px 6px", borderBottom: `1px solid ${tokens.sep}` }}>
+                    {recents.map((e) => (
+                      <button key={e.id} type="button" onClick={() => e.peerId ? void placeCallLocal(e.peerId, e.peerName || "") : undefined} style={{ flex: "0 0 auto", display: "flex", flexDirection: "column", alignItems: "center", gap: 4, border: "none", background: "transparent", cursor: "pointer" }}>
+                        <div style={{ position: "relative" }}>
+                          <div style={{ width: 50, height: 50, borderRadius: 25, background: hue(e.peerId || e.peerName || e.id), color: "#fff", display: "grid", placeItems: "center", fontWeight: 800, fontSize: 15 }}>{initials(e.peerName || "?")}</div>
+                          <span style={{ position: "absolute", bottom: -4, left: "50%", transform: "translateX(-50%)", background: e.direction === "missed" ? tokens.red : tokens.green, color: "#fff", borderRadius: 999, fontSize: 9, fontWeight: 700, padding: "1px 5px", whiteSpace: "nowrap" }}>{timeLabel(e.ts)}</span>
+                        </div>
+                        <div style={{ fontSize: 11, color: tokens.text, fontWeight: 600, maxWidth: 60, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 6 }}>{(e.peerName || "Unknown").split(" ")[0]}</div>
+                        <div style={{ fontSize: 10, color: tokens.green }}>Mesh</div>
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          void placeCallLocal(p.id, p.name);
-                        }}
-                        style={{ border: "none", background: tokens.green, color: "#041510", borderRadius: 10, width: 32, height: 32, display: "grid", placeItems: "center", cursor: "pointer" }}
-                        title="Call"
-                      >
-                        <Phone size={14} />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => msgMeshNetwork(p.id, p.name)}
-                        style={{ border: "none", background: tokens.blue, color: "#fff", borderRadius: 10, width: 32, height: 32, display: "grid", placeItems: "center", cursor: "pointer" }}
-                        title="Message"
-                      >
-                        <MessageCircle size={14} />
-                      </button>
-                    </div>
+                    ))}
                   </div>
                 );
-              })}
-          </div>
-        )}
-        {tab === "mesh" && peers.filter((p) => p.online && !isSelfPeer(p.id)).length === 0 && (
-          <CardList>
-            <EmptyState
-              title="No online mesh peers"
-              body="When nearby or linked peers come online, they will appear here."
-            />
-          </CardList>
-        )}
+              })()}
+
+              {/* Log entries */}
+              {filteredMeshLog.length === 0 ? (
+                <CardList>
+                  <EmptyState
+                    title={meshLog.length === 0 ? "No mesh activity yet" : "No entries match the filter"}
+                    body={meshLog.length === 0 ? "Mesh calls and messages will appear here once you connect to a peer on the mesh network." : "Try changing the filter or search query."}
+                  />
+                </CardList>
+              ) : (
+                <div style={{ padding: "4px 0 16px" }}>
+                  {filteredMeshLog.map((row) => (
+                    <div key={row.id} style={{ margin: "8px 12px 0" }}>
+                      {renderLogRow(row, true)}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          );
+        })()}
         {tab === "logs" && logsSubView === "recents" && (
           <CardList>
             {latestLocalCommLog.length === 0 ? (
@@ -6492,7 +6552,7 @@ export default function GridCaller({
           </>
         )}
 
-        {(tab === "keypad" || (tab === "logs" && logsSubView === "keypad")) && (
+        {(tab === "keypad" || (tab === "logs" && logsSubView === "keypad") || (tab === "mesh" && meshSubView === "keypad")) && (
           <div style={{ padding: "20px 16px 12px", textAlign: "center" }}>
             <div style={{ fontSize: 13, color: tokens.secondary, marginBottom: 8, fontWeight: 600 }}>
               Enter number or ID
@@ -8532,7 +8592,7 @@ export default function GridCaller({
       </div>
 
       {/* Bottom navigation */}
-      <div style={{ display: "flex", background: tokens.card, borderTop: `1px solid ${tokens.sep}`, flexShrink: 0, paddingBottom: "env(safe-area-inset-bottom, 0px)" }}>
+      <div style={{ display: "flex", background: tokens.card, borderTop: `1px solid ${tokens.sep}`, flexShrink: 0, paddingBottom: "env(safe-area-inset-bottom, 0px)", position: "relative", zIndex: 150 }}>
         {tab === "groups" ? (
           // WhatsApp-style nav for Gridchat tab
           [{ id: "chats", label: "Chats", icon: <MessageCircle size={22} />, badge: gridchatUnreadTotal > 0 ? gridchatUnreadTotal : 0 },
@@ -8543,7 +8603,7 @@ export default function GridCaller({
               key={item.id}
               type="button"
               onClick={() => {
-                if (item.id === "calls") { setTab("logs"); return; }
+                if (item.id === "calls") { setMenuOpen(false); setMenuFullscreen(false); setTab("logs"); return; }
                 setGridchatSubTab(item.id as any);
               }}
               style={{ flex: 1, border: "none", background: "transparent", padding: "10px 4px 8px", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, color: gridchatSubTab === item.id ? tokens.green : tokens.label, cursor: "pointer", position: "relative" }}
@@ -8559,7 +8619,7 @@ export default function GridCaller({
           ([
             { id: "logs" as Tab, label: "Calls", icon: <Phone size={22} /> },
             { id: "sms" as Tab, label: "Messages", icon: <MessageCircle size={22} /> },
-            { id: "radio" as "radio", label: "Radio", icon: <Radio size={22} /> },
+            { id: "keypad" as Tab, label: "Dialpad", icon: <Grid3X3 size={22} /> },
             { id: "groups" as Tab, label: "Gridchat", icon: <MessageSquare size={22} /> },
             { id: "mesh" as Tab, label: "Mesh", icon: <Wifi size={22} /> },
           ] as const).map((t) => (
@@ -8567,14 +8627,16 @@ export default function GridCaller({
               key={t.id}
               type="button"
               onClick={() => {
-                if (t.id === "radio") { setMenuView("radio"); setMenuOpen(true); return; }
+                if (t.id === "radio") { openMenuFeature("radio"); return; }
+                setMenuOpen(false);
+                setMenuFullscreen(false);
                 setTab(t.id as Tab);
                 if (t.id === "logs") setLogsSubView("recents");
               }}
-              style={{ flex: 1, border: "none", background: "transparent", padding: "10px 4px 8px", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, color: tab === t.id ? tokens.blue : tokens.label, cursor: "pointer" }}
+              style={{ flex: 1, border: "none", background: "transparent", padding: "10px 4px 8px", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, color: (tab === t.id || (t.id === "radio" && menuOpen && menuView === "radio")) ? tokens.blue : tokens.label, cursor: "pointer" }}
             >
               {t.icon}
-              <span style={{ fontSize: 10, fontWeight: tab === t.id ? 700 : 500 }}>{t.label}</span>
+              <span style={{ fontSize: 10, fontWeight: (tab === t.id || (t.id === "radio" && menuOpen && menuView === "radio")) ? 700 : 500 }}>{t.label}</span>
             </button>
           ))
         )}
