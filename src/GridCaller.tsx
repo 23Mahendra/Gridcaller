@@ -636,6 +636,13 @@ export default function GridCaller({
   const [directSelectedMessageIds, setDirectSelectedMessageIds] = useState<string[]>([]);
   const [groupSelectMode, setGroupSelectMode] = useState(false);
   const [groupSelectedMessageIds, setGroupSelectedMessageIds] = useState<string[]>([]);
+  const [smsThreadSelectMode, setSmsThreadSelectMode] = useState(false);
+  const [selectedSmsThreadIds, setSelectedSmsThreadIds] = useState<string[]>([]);
+  const [gridchatListSelectMode, setGridchatListSelectMode] = useState(false);
+  const [selectedGridchatRowIds, setSelectedGridchatRowIds] = useState<string[]>([]);
+  const [logsSelectMode, setLogsSelectMode] = useState(false);
+  const [selectedLogIds, setSelectedLogIds] = useState<string[]>([]);
+  const [logSeenState, setLogSeenState] = useState<Record<string, boolean>>(() => S.get("gridcaller_log_seen_state", {}));
   const [threadShowStarredOnly, setThreadShowStarredOnly] = useState(false);
   const [groupShowStarredOnly, setGroupShowStarredOnly] = useState(false);
   const [gridchatReportLog, setGridchatReportLog] = useState<{ peerId: string; name: string; source: "direct" | "group"; ts: number }[]>(() => {
@@ -985,6 +992,22 @@ export default function GridCaller({
   }, [callDirectionFilters, callLogSourceFilter, localCommLog, logFilter, messageDirectionFilters, messageLogSourceFilter]);
 
   const latestLocalCommLog = useMemo(() => visibleLocalCommLog.slice().reverse(), [visibleLocalCommLog]);
+  const visibleMeshCommLog = useMemo(() => {
+    const meshLog = localCommLog.filter((e) => classifyLogSource(e) === "mesh-network");
+    return meshLog.filter((e) => {
+      const isBlocked = e.direction === "blocked" || e.kind === "block";
+      if (logFilter === "calls" && e.kind !== "call") return false;
+      if (logFilter === "messages" && e.kind !== "message") return false;
+      if (logFilter === "blocked" && !isBlocked) return false;
+      if (q.trim()) {
+        const sq = q.toLowerCase();
+        if (!((e.peerName || "").toLowerCase().includes(sq) || (e.peerNumber || "").toLowerCase().includes(sq) || (e.peerId || "").toLowerCase().includes(sq))) return false;
+      }
+      if (e.kind === "call") return callDirectionFilters.includes(getCallDirectionFilter(e));
+      if (e.kind === "message") return messageDirectionFilters.includes(getMessageDirectionFilter(e));
+      return true;
+    });
+  }, [callDirectionFilters, localCommLog, logFilter, messageDirectionFilters, q]);
 
   const logStats = useMemo(() => {
     const calls = localCommLog.filter((row) => row.kind === "call").length;
@@ -1178,6 +1201,8 @@ export default function GridCaller({
 
   const renderLogRow = (row: LocalCommLogEntry, compact = false) => {
     const accent = row.direction === "blocked" ? tokens.red : classifyLogSource(row) === "mesh-network" ? tokens.green : tokens.blue;
+    const isSelected = selectedLogIds.includes(row.id);
+    const isSeen = !!logSeenState[row.id];
     return (
       <div
         key={row.id}
@@ -1185,12 +1210,16 @@ export default function GridCaller({
           e.preventDefault();
           runLogLongPressAction(row.id);
         }}
+        onClick={() => {
+          if (logsSelectMode) toggleLogSelection(row.id);
+        }}
         style={{
           margin: compact ? "8px 12px 0" : "0 0 8px",
           padding: 12,
           borderRadius: 14,
           background: tokens.card,
-          border: `1px solid ${tokens.sep}`,
+          border: logsSelectMode && isSelected ? `2px solid ${tokens.blue}` : `1px solid ${tokens.sep}`,
+          cursor: logsSelectMode ? "pointer" : "default",
         }}
       >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
@@ -1201,6 +1230,7 @@ export default function GridCaller({
                 <span>{row.peerName || row.peerNumber || row.peerId || "Unknown"}</span>
               </span>
               <span style={{ color: accent, fontSize: 11 }}>{logDirectionCopy(row)}</span>
+              <span style={{ color: isSeen ? tokens.label : tokens.orange, fontSize: 11, fontWeight: 700 }}>{isSeen ? "Read" : "Unread"}</span>
             </div>
             <div style={{ fontSize: 11, color: tokens.label, marginTop: 3 }}>
               {fullDateTime(row.ts)} {row.folder ? `· ${row.folder}` : ""} {row.method ? `· ${row.method}` : ""}
@@ -1407,6 +1437,7 @@ export default function GridCaller({
   useEffect(() => S.set("gridcaller_status_views", statusViews.slice(-4000)), [statusViews]);
   useEffect(() => S.set("gridcaller_starred_messages", starredMessageIds.slice(0, 3000)), [starredMessageIds]);
   useEffect(() => S.set("gridcaller_report_log", gridchatReportLog.slice(0, 500)), [gridchatReportLog]);
+  useEffect(() => S.set("gridcaller_log_seen_state", logSeenState), [logSeenState]);
   useEffect(() => S.set("gridcaller_blocked", blocked), [blocked]);
   useEffect(() => {
     void deviceVault.put("gridcaller.sms", sms.slice(0, 400)).catch(() => {});
@@ -3799,6 +3830,14 @@ export default function GridCaller({
   }, [groupChats, groupMessages, globalPeers, gridchatFavourites, gridchatFilter, gridchatLastSeen, gridchatMuted, gridchatSearch, peers, sms]);
 
   const gridchatUnreadTotal = useMemo(() => gridchatItems.reduce((acc, row) => acc + row.unread, 0), [gridchatItems]);
+  const visibleSmsThreadIds = useMemo(() => smsThreads.map((row) => row.peerId), [smsThreads]);
+  const visibleGridchatRowIds = useMemo(() => gridchatItems.map((row) => row.id), [gridchatItems]);
+  const visibleLogIds = useMemo(() => {
+    if (tab === "mesh" && meshSubView === "recents") return visibleMeshCommLog.map((row) => row.id);
+    if (tab === "logs" && logsSubView === "recents") return latestLocalCommLog.map((row) => row.id);
+    if (menuOpen && menuView === "logs") return latestLocalCommLog.map((row) => row.id);
+    return [];
+  }, [latestLocalCommLog, logsSubView, menuOpen, menuView, meshSubView, tab, visibleMeshCommLog]);
 
   const gridchatStatusUsers = useMemo(() => {
     const activityById = new Map<string, number>();
@@ -4124,28 +4163,17 @@ export default function GridCaller({
   };
 
   const runThreadLongPressAction = (peerId: string, label: string) => {
-    const action = String(prompt(`Action for ${label}: archive or delete`, "archive") || "").trim().toLowerCase();
-    if (action === "archive") {
-      moveSmsThreadToFolder(peerId, "trash");
-      setContactBusy("Thread moved to archive");
-      setTimeout(() => setContactBusy(""), 1500);
-      return;
-    }
-    if (action === "delete") {
-      deleteMessageThread(peerId);
-      setContactBusy("Thread deleted");
-      setTimeout(() => setContactBusy(""), 1500);
-    }
+    setSmsThreadSelectMode(true);
+    setSelectedSmsThreadIds((prev) => (prev.includes(peerId) ? prev : [...prev, peerId]));
+    setContactBusy(`${label} selected`);
+    setTimeout(() => setContactBusy(""), 1000);
   };
 
   const runLogLongPressAction = (id: string) => {
-    const action = String(prompt("Log action: archive or delete", "archive") || "").trim().toLowerCase();
-    if (action === "delete") {
-      deleteLocalLogEntry(id);
-      return;
-    }
-    setContactBusy("Log archived in private device history");
-    setTimeout(() => setContactBusy(""), 1500);
+    setLogsSelectMode(true);
+    setSelectedLogIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
+    setContactBusy("Log selected");
+    setTimeout(() => setContactBusy(""), 1000);
   };
 
   const sendDirectQuickText = (peerId: string, peerName: string, text: string) => {
@@ -4333,6 +4361,106 @@ export default function GridCaller({
     setGroupMessages((prev) => prev.filter((m) => !groupSelectedMessageIds.includes(m.id)));
     setGroupSelectedMessageIds([]);
     setGroupSelectMode(false);
+  };
+
+  const toggleSmsThreadSelection = (peerId: string) => {
+    if (!peerId) return;
+    setSelectedSmsThreadIds((prev) => (prev.includes(peerId) ? prev.filter((id) => id !== peerId) : [...prev, peerId]));
+  };
+
+  const markSmsThreadsReadState = (peerIds: string[], read: boolean) => {
+    if (!peerIds.length) return;
+    const at = read ? Date.now() : 0;
+    setGridchatLastSeen((prev) => {
+      const next = { ...prev };
+      for (const id of peerIds) next[`d:${id}`] = at;
+      return next;
+    });
+  };
+
+  const deleteSelectedSmsThreads = () => {
+    if (!selectedSmsThreadIds.length) return;
+    if (!confirm(`Delete ${selectedSmsThreadIds.length} selected conversation(s)?`)) return;
+    setSms((prev) => {
+      const pick = new Set(selectedSmsThreadIds);
+      const next = prev.map((m) => (pick.has(m.peerId) ? { ...m, folder: "deleted" as MessageFolder } : m));
+      S.set("gridcaller_sms", next);
+      return next;
+    });
+    if (thread && selectedSmsThreadIds.includes(thread)) setThread(null);
+    setSelectedSmsThreadIds([]);
+    setSmsThreadSelectMode(false);
+    setContactBusy("Selected conversations deleted");
+    setTimeout(() => setContactBusy(""), 1500);
+  };
+
+  const toggleGridchatRowSelection = (rowId: string) => {
+    if (!rowId) return;
+    setSelectedGridchatRowIds((prev) => (prev.includes(rowId) ? prev.filter((id) => id !== rowId) : [...prev, rowId]));
+  };
+
+  const markGridchatRowsReadState = (rowIds: string[], read: boolean) => {
+    if (!rowIds.length) return;
+    const at = read ? Date.now() : 0;
+    setGridchatLastSeen((prev) => {
+      const next = { ...prev };
+      for (const id of rowIds) next[id] = at;
+      return next;
+    });
+  };
+
+  const deleteSelectedGridchatRows = () => {
+    if (!selectedGridchatRowIds.length) return;
+    if (!confirm(`Delete ${selectedGridchatRowIds.length} selected chat(s)?`)) return;
+    const selected = new Set(selectedGridchatRowIds);
+    const directPeerIds = gridchatItems.filter((row) => selected.has(row.id) && row.kind === "direct" && row.peerId).map((row) => row.peerId as string);
+    const groupIds = gridchatItems.filter((row) => selected.has(row.id) && row.kind === "group" && row.groupId).map((row) => row.groupId as string);
+    if (directPeerIds.length) {
+      const directSet = new Set(directPeerIds);
+      setSms((prev) => {
+        const next = prev.map((m) => (directSet.has(m.peerId) ? { ...m, folder: "deleted" as MessageFolder } : m));
+        S.set("gridcaller_sms", next);
+        return next;
+      });
+    }
+    if (groupIds.length) {
+      const groupSet = new Set(groupIds);
+      setGroupMessages((prev) => prev.filter((m) => !groupSet.has(m.groupId)));
+      setGroupChats((prev) => prev.filter((g) => !groupSet.has(g.id)));
+      if (groupViewId && groupSet.has(groupViewId)) setGroupViewId(null);
+    }
+    setSelectedGridchatRowIds([]);
+    setGridchatListSelectMode(false);
+    setContactBusy("Selected chats deleted");
+    setTimeout(() => setContactBusy(""), 1500);
+  };
+
+  const toggleLogSelection = (logId: string) => {
+    if (!logId) return;
+    setSelectedLogIds((prev) => (prev.includes(logId) ? prev.filter((id) => id !== logId) : [...prev, logId]));
+  };
+
+  const markLogSeenState = (logIds: string[], seen: boolean) => {
+    if (!logIds.length) return;
+    setLogSeenState((prev) => {
+      const next = { ...prev };
+      for (const id of logIds) next[id] = seen;
+      return next;
+    });
+  };
+
+  const deleteSelectedLogs = () => {
+    if (!selectedLogIds.length) return;
+    if (!confirm(`Delete ${selectedLogIds.length} selected log entr${selectedLogIds.length === 1 ? "y" : "ies"}?`)) return;
+    let removed = 0;
+    for (const id of selectedLogIds) {
+      if (gridNumberRegistry.deleteLocalCommLogEntry(id)) removed += 1;
+    }
+    refreshLocalLogs();
+    setSelectedLogIds([]);
+    setLogsSelectMode(false);
+    setContactBusy(`Deleted ${removed} log${removed === 1 ? "" : "s"}`);
+    setTimeout(() => setContactBusy(""), 1500);
   };
 
   const runGroupChatMenuAction = (action: string, groupId: string, groupName: string) => {
@@ -4906,6 +5034,15 @@ export default function GridCaller({
   }, [groupViewId]);
 
   useEffect(() => {
+    setLogsSelectMode(false);
+    setSelectedLogIds([]);
+    setSmsThreadSelectMode(false);
+    setSelectedSmsThreadIds([]);
+    setGridchatListSelectMode(false);
+    setSelectedGridchatRowIds([]);
+  }, [tab]);
+
+  useEffect(() => {
     const closeHeaderMenus = (event: MouseEvent | TouchEvent) => {
       if (!gridchatHeaderRef.current) return;
       const target = event.target as Node | null;
@@ -5446,6 +5583,13 @@ export default function GridCaller({
             <div style={{ display: "flex", gap: 8 }}>
               <button
                 type="button"
+                onClick={() => setDirectSelectedMessageIds(visibleThreadMsgs.map((m) => m.id))}
+                style={{ border: "none", background: "transparent", color: tokens.blue, fontWeight: 700, cursor: "pointer" }}
+              >
+                Select all
+              </button>
+              <button
+                type="button"
                 onClick={() => {
                   setDirectSelectMode(false);
                   setDirectSelectedMessageIds([]);
@@ -5515,6 +5659,11 @@ export default function GridCaller({
                 </button>
               )}
               <div
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setDirectSelectMode(true);
+                  toggleDirectMessageSelection(m.id);
+                }}
                 onClick={() => {
                   if (directSelectMode) toggleDirectMessageSelection(m.id);
                 }}
@@ -6248,6 +6397,20 @@ export default function GridCaller({
       )}
 
       <div className="gc-scroll" style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", paddingBottom: 16, WebkitOverflowScrolling: "touch" as any }}>
+        {logsSelectMode && visibleLogIds.length > 0 ? (
+          <div style={{ margin: "8px 12px", padding: "8px 10px", borderRadius: 12, border: `1px solid ${tokens.sep}`, background: tokens.fill, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: tokens.text }}>{selectedLogIds.length} selected</div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <button type="button" onClick={() => setSelectedLogIds(visibleLogIds)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Select all</button>
+              <button type="button" onClick={() => markLogSeenState(visibleLogIds, true)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Read all</button>
+              <button type="button" onClick={() => markLogSeenState(visibleLogIds, false)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Unread all</button>
+              <button type="button" onClick={() => markLogSeenState(selectedLogIds, true)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Read selected</button>
+              <button type="button" onClick={() => markLogSeenState(selectedLogIds, false)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Unread selected</button>
+              <button type="button" onClick={deleteSelectedLogs} style={{ ...compactActionBtn(tokens), padding: "5px 9px", color: tokens.red }}>Delete</button>
+              <button type="button" onClick={() => { setLogsSelectMode(false); setSelectedLogIds([]); }} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Cancel</button>
+            </div>
+          </div>
+        ) : null}
         {/* ═══ MESH TAB — Calls-style UI for mesh network calls + messages ═══ */}
         {tab === "mesh" && (() => {
           const onlinePeers = peers.filter((p) => p.online && !isSelfPeer(p.id));
@@ -7200,6 +7363,20 @@ export default function GridCaller({
             {contactBusy ? (
               <div style={{ padding: "6px 16px 0", fontSize: 12, color: tokens.green, fontWeight: 600 }}>{contactBusy}</div>
             ) : null}
+            {smsThreadSelectMode && (
+              <div style={{ margin: "8px 12px 0", padding: "8px 10px", borderRadius: 12, border: `1px solid ${tokens.sep}`, background: tokens.fill, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: tokens.text }}>{selectedSmsThreadIds.length} selected</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  <button type="button" onClick={() => setSelectedSmsThreadIds(visibleSmsThreadIds)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Select all</button>
+                  <button type="button" onClick={() => markSmsThreadsReadState(visibleSmsThreadIds, true)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Read all</button>
+                  <button type="button" onClick={() => markSmsThreadsReadState(visibleSmsThreadIds, false)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Unread all</button>
+                  <button type="button" onClick={() => markSmsThreadsReadState(selectedSmsThreadIds, true)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Read selected</button>
+                  <button type="button" onClick={() => markSmsThreadsReadState(selectedSmsThreadIds, false)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Unread selected</button>
+                  <button type="button" onClick={deleteSelectedSmsThreads} style={{ ...compactActionBtn(tokens), padding: "5px 9px", color: tokens.red }}>Delete</button>
+                  <button type="button" onClick={() => { setSmsThreadSelectMode(false); setSelectedSmsThreadIds([]); }} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Cancel</button>
+                </div>
+              </div>
+            )}
             {composeOpen && (
               <div
                 style={{
@@ -7376,17 +7553,25 @@ export default function GridCaller({
               {smsThreads.length === 0 && !composeOpen && (
                 <EmptyState title="No messages" body="This folder is empty. Start a conversation or save a draft." />
               )}
-              {smsThreads.map((t) => (
+              {smsThreads.map((t) => {
+                const threadSelected = selectedSmsThreadIds.includes(t.peerId);
+                const threadUnread = sms.some((m) => m.peerId === t.peerId && !m.mine && m.ts > Number(gridchatLastSeen[`d:${t.peerId}`] || 0));
+                return (
                 <div
                   key={t.peerId}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     runThreadLongPressAction(t.peerId, t.name || t.peerId);
                   }}
+                  onClick={() => {
+                    if (smsThreadSelectMode) toggleSmsThreadSelection(t.peerId);
+                  }}
                   style={{
                     borderBottom: `0.5px solid ${tokens.sep}`,
-                    background: tokens.card,
+                    background: smsThreadSelectMode && threadSelected ? `${tokens.blue}14` : tokens.card,
                     padding: "12px 14px",
+                    border: smsThreadSelectMode && threadSelected ? `1px solid ${tokens.blue}` : "none",
+                    cursor: smsThreadSelectMode ? "pointer" : "default",
                   }}
                 >
                   <div
@@ -7424,7 +7609,10 @@ export default function GridCaller({
                       >
                         {t.text || summarizeGroupAttachment(t.attachment) || "Attachment"}
                       </div>
-                      <div style={{ fontSize: 11, color: tokens.label, marginTop: 3 }}>{fullDateTime(t.ts)}</div>
+                      <div style={{ fontSize: 11, color: tokens.label, marginTop: 3, display: "flex", alignItems: "center", gap: 8 }}>
+                        <span>{fullDateTime(t.ts)}</span>
+                        <span style={{ color: threadUnread ? tokens.green : tokens.label, fontWeight: 700 }}>{threadUnread ? "Unread" : "Read"}</span>
+                      </div>
                     </div>
                   </div>
                   <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
@@ -7493,7 +7681,7 @@ export default function GridCaller({
                     </button>
                   </div>
                 </div>
-              ))}
+              );})}
             </CardList>
             </div>
 
@@ -7957,6 +8145,20 @@ export default function GridCaller({
               </div>
 
               {gridchatSubTab === "chats" && <>
+              {gridchatListSelectMode && (
+                <div style={{ margin: "6px 12px 8px", padding: "8px 10px", borderRadius: 12, border: `1px solid ${tokens.sep}`, background: tokens.fill, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: tokens.text }}>{selectedGridchatRowIds.length} selected</div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    <button type="button" onClick={() => setSelectedGridchatRowIds(visibleGridchatRowIds)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Select all</button>
+                    <button type="button" onClick={() => markGridchatRowsReadState(visibleGridchatRowIds, true)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Read all</button>
+                    <button type="button" onClick={() => markGridchatRowsReadState(visibleGridchatRowIds, false)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Unread all</button>
+                    <button type="button" onClick={() => markGridchatRowsReadState(selectedGridchatRowIds, true)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Read selected</button>
+                    <button type="button" onClick={() => markGridchatRowsReadState(selectedGridchatRowIds, false)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Unread selected</button>
+                    <button type="button" onClick={deleteSelectedGridchatRows} style={{ ...compactActionBtn(tokens), padding: "5px 9px", color: tokens.red }}>Delete</button>
+                    <button type="button" onClick={() => { setGridchatListSelectMode(false); setSelectedGridchatRowIds([]); }} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Cancel</button>
+                  </div>
+                </div>
+              )}
               {/* Archived row - WhatsApp style */}
               <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 16px", borderBottom: `0.5px solid ${tokens.sep}`, cursor: "pointer" }} onClick={() => {}}>
                 <div style={{ width: 46, height: 46, borderRadius: 23, background: tokens.fill, display: "grid", placeItems: "center", flexShrink: 0 }}>
@@ -7970,9 +8172,24 @@ export default function GridCaller({
                 {gridchatItems.length === 0 ? (
                   <EmptyState title="No Gridchat users/chats yet" body="Create a group or message an online user to start chatting." />
                 ) : (
-                  gridchatItems.map((row) => (
-                    <div key={row.id} style={{ padding: "12px 14px", borderBottom: `0.5px solid ${tokens.sep}` }}>
-                      <div onClick={() => openGridchatRow(row)} style={{ display: "flex", gap: 10, cursor: "pointer" }}>
+                  gridchatItems.map((row) => {
+                    const rowSelected = selectedGridchatRowIds.includes(row.id);
+                    return (
+                    <div
+                      key={row.id}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        setGridchatListSelectMode(true);
+                        toggleGridchatRowSelection(row.id);
+                      }}
+                      style={{
+                        padding: "12px 14px",
+                        borderBottom: `0.5px solid ${tokens.sep}`,
+                        background: gridchatListSelectMode && rowSelected ? `${tokens.green}16` : "transparent",
+                        borderLeft: gridchatListSelectMode && rowSelected ? `3px solid ${tokens.green}` : "3px solid transparent",
+                      }}
+                    >
+                      <div onClick={() => (gridchatListSelectMode ? toggleGridchatRowSelection(row.id) : openGridchatRow(row))} style={{ display: "flex", gap: 10, cursor: "pointer" }}>
                         <div
                           style={{
                             width: 46,
@@ -7994,7 +8211,7 @@ export default function GridCaller({
                               {row.alias}
                             </div>
                             <div style={{ fontSize: 11, color: row.unread ? tokens.green : tokens.label, whiteSpace: "nowrap", fontWeight: row.unread ? 700 : 500 }}>
-                              {row.ts ? timeLabel(row.ts) : "new"}
+                              {row.ts ? fullDateTime(row.ts) : "new"}
                             </div>
                           </div>
                           <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
@@ -8107,7 +8324,7 @@ export default function GridCaller({
                         </button>
                       </div>
                     </div>
-                  ))
+                  );})
                 )}
               </CardList>
 
@@ -8344,6 +8561,13 @@ export default function GridCaller({
                       <div style={{ display: "flex", gap: 8 }}>
                         <button
                           type="button"
+                          onClick={() => setGroupSelectedMessageIds(visibleGroupMsgs.map((m) => m.id))}
+                          style={{ border: "none", background: "transparent", color: tokens.blue, fontWeight: 700, cursor: "pointer" }}
+                        >
+                          Select all
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => {
                             setGroupSelectMode(false);
                             setGroupSelectedMessageIds([]);
@@ -8383,6 +8607,11 @@ export default function GridCaller({
                         return (
                         <div key={m.id} style={{ marginBottom: 8, display: "flex", justifyContent: m.mine ? "flex-end" : "flex-start" }}>
                           <div
+                            onContextMenu={(e) => {
+                              e.preventDefault();
+                              setGroupSelectMode(true);
+                              toggleGroupMessageSelection(m.id);
+                            }}
                             onClick={() => {
                               if (groupSelectMode) toggleGroupMessageSelection(m.id);
                             }}
@@ -9293,6 +9522,18 @@ export default function GridCaller({
                       );
                     })}
                   </div>
+                  {logsSelectMode ? (
+                    <div style={{ marginBottom: 12, padding: "8px 10px", borderRadius: 10, border: `1px solid ${tokens.sep}`, background: tokens.fill, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: tokens.text, marginRight: 6 }}>{selectedLogIds.length} selected</div>
+                      <button type="button" onClick={() => setSelectedLogIds(visibleLogIds)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Select all</button>
+                      <button type="button" onClick={() => markLogSeenState(visibleLogIds, true)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Read all</button>
+                      <button type="button" onClick={() => markLogSeenState(visibleLogIds, false)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Unread all</button>
+                      <button type="button" onClick={() => markLogSeenState(selectedLogIds, true)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Read selected</button>
+                      <button type="button" onClick={() => markLogSeenState(selectedLogIds, false)} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Unread selected</button>
+                      <button type="button" onClick={deleteSelectedLogs} style={{ ...compactActionBtn(tokens), padding: "5px 9px", color: tokens.red }}>Delete</button>
+                      <button type="button" onClick={() => { setLogsSelectMode(false); setSelectedLogIds([]); }} style={{ ...compactActionBtn(tokens), padding: "5px 9px" }}>Cancel</button>
+                    </div>
+                  ) : null}
                   {latestLocalCommLog.length === 0 ? (
                     <div style={{ fontSize: 13, color: tokens.label }}>No local logs yet.</div>
                   ) : (
@@ -11038,6 +11279,7 @@ export default function GridCaller({
                       freeRadio.messages.slice(-30).map((m) => (
                         <div key={m.id} style={{ marginBottom: 6, color: tokens.text }}>
                           <b style={{ color: tokens.blue }}>{m.fromName}</b>: {m.text}
+                          <div style={{ fontSize: 10, color: tokens.label }}>{fullDateTime(m.ts)}</div>
                         </div>
                       ))
                     )}
