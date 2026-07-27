@@ -336,8 +336,9 @@ class SoftTowerEngine {
     try {
       const list = meshComms.getPeers?.() || meshComms.nearbyPeers || [];
       for (const peer of list) {
-        const pid = peer.peerId || peer.id;
-        const phone = digitsOnly(peer.phone || peer.userPhone || "");
+        const p_ = peer as any;
+        const pid = peer.peerId || p_.id;
+        const phone = digitsOnly(peer.phone || p_.userPhone || "");
         for (const p of perms) {
           if (
             pid === p ||

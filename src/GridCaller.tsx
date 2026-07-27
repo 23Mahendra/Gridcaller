@@ -1257,7 +1257,7 @@ export default function GridCaller({
       setCallMethod(s.method || (ph === "outgoing" ? "Calling…" : ""));
       setSecs(s.secs || 0);
       if (s.error) setErr(s.error);
-      else if (ph !== "idle") setErr("");
+      else setErr("");
       activeCallIdRef.current = s.callId || "";
       activePeerIdRef.current = s.peerId || "";
       if (ph === "active") startedAt.current = Date.now() - (s.secs || 0) * 1000;
@@ -1733,7 +1733,7 @@ export default function GridCaller({
       if (msg?.type === "GRID_GROUP_SYNC" && msg.data?.group) {
         const g = msg.data.group;
         const members = normalizeGroupMembers(g.members || []);
-        if (!members.some((m) => isAddressedToMe(m))) return;
+        if (!members.some((m) => isCallAddressedToMe(m))) return;
         const row: GroupChat = {
           id: String(g.id || ""),
           name: String(g.name || "Group").slice(0, 40),
@@ -1754,7 +1754,7 @@ export default function GridCaller({
       if (msg?.type === "GRID_GROUP_MESSAGE" && msg.data?.groupId) {
         if (!msg.from || msg.from === MeshEngine.localId) return;
         const members = normalizeGroupMembers(msg.data.members || []);
-        if (members.length && !members.some((m: string) => isAddressedToMe(m))) return;
+        if (members.length && !members.some((m: string) => isCallAddressedToMe(m))) return;
         const row: GroupMessage = {
           id: String(msg.data.id || `${msg.time || Date.now()}_${msg.from}`),
           groupId: String(msg.data.groupId),
@@ -1772,7 +1772,7 @@ export default function GridCaller({
       if (msg?.type === "GRID_GROUP_CALL_INVITE" && msg.data?.groupId) {
         if (!msg.from || msg.from === MeshEngine.localId) return;
         const members = normalizeGroupMembers(msg.data.members || []);
-        if (!members.some((m: string) => isAddressedToMe(m))) return;
+        if (!members.some((m: string) => isCallAddressedToMe(m))) return;
         const sys: GroupMessage = {
           id: `sys_${msg.time || Date.now()}_${msg.from}`,
           groupId: String(msg.data.groupId),
@@ -2201,7 +2201,8 @@ export default function GridCaller({
     (async () => {
       try {
         const L = (await import("leaflet")).default;
-        // @ts-expect-error css side-effect
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore css side-effect
         await import("leaflet/dist/leaflet.css");
         if (cancelled || !mapBoxRef.current) return;
         if (mapObjRef.current) {
@@ -2330,6 +2331,21 @@ export default function GridCaller({
     setTimeout(() => setIdSaveMsg(""), 3000);
   };
 
+  /** Save a global call handle (phone/alias) and persist to identity storage. */
+  const applyHandleSave = (handle: string): { ok: boolean; display?: string; error?: string } => {
+    const h = String(handle || "").trim().replace(/^@/, "");
+    if (!h) return { ok: false, error: "Handle cannot be empty" };
+    S.set("global_call_handle", h);
+    try {
+      (globalCall as any).callHandle = h;
+    } catch {}
+    try {
+      rememberDeviceIdentity({ phone: h.replace(/\D/g, "") || undefined });
+    } catch {}
+    refreshIdentityUi?.();
+    return { ok: true, display: h };
+  };
+
   const clearAllMessages = () => {
     if (sms.length === 0) {
       setContactBusy("No messages to clear");
@@ -2393,6 +2409,9 @@ export default function GridCaller({
 
   const parseGroupMemberTokens = (raw: string) =>
     Array.from(new Set(raw.split(/[,\n]/).map((x) => x.trim()).filter(Boolean))).slice(0, 63);
+
+  const normalizeGroupMembers = (tokens: string[]): string[] =>
+    tokens.map((t) => String(t).trim()).filter(Boolean);
 
   const createGroupChat = () => {
     const name = String(groupNameInput || "").trim();
@@ -2575,7 +2594,7 @@ export default function GridCaller({
   const startGroupCall = async (groupId: string, mode: "audio" | "video") => {
     const g = groupChats.find((x) => x.id === groupId);
     if (!g) return;
-    const targets = g.members.filter((m) => !isAddressedToMe(m) && !blocked.includes(m));
+    const targets = g.members.filter((m) => !isCallAddressedToMe(m) && !blocked.includes(m));
     if (!targets.length) {
       setErr("No valid members to call");
       return;
@@ -4115,7 +4134,7 @@ export default function GridCaller({
       return;
     }
     if (action === "report") {
-      setGridchatReportLog((prev) => [{ peerId, name: peerName, source: "direct", ts: Date.now() }, ...prev].slice(0, 500));
+      setGridchatReportLog((prev) => [{ peerId, name: peerName, source: "direct" as const, ts: Date.now() }, ...prev].slice(0, 500));
       setContactBusy(`${peerName} reported`);
       setTimeout(() => setContactBusy(""), 1500);
       return;

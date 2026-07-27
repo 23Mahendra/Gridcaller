@@ -268,6 +268,7 @@ async function connectBluetoothNative(): Promise<{
     });
 
     const picks = found.slice(0, MAX_BT_LINKS);
+    const primaryPick = picks[0];
 
     for (const pick of picks) {
       try {
@@ -285,7 +286,9 @@ async function connectBluetoothNative(): Promise<{
     try {
       softTowerHop.start(S.get("user_name", "Node") || "Node");
     } catch {}
-    bus.emit("deviceConnect:bt", { name: pick.name, id: pick.deviceId, native: true });
+    if (primaryPick) {
+      bus.emit("deviceConnect:bt", { name: primaryPick.name, id: primaryPick.deviceId, native: true });
+    }
     return {
       ok: true,
       name: `${picks.map((pick) => pick.name).join(", ")} (${found.length} nearby · multi-link ready)`,

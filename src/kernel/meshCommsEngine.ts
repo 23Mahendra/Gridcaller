@@ -1500,7 +1500,7 @@ Message: "${message}"`,
     const device = conn.device;
     if (!device?.gatt) return false;
     if (device.gatt.connected) {
-      this.updateBleDeviceEntry({ id: deviceId, name: device.name || conn.device.id, rssi: conn.device.rssi || -60, connected: true, services: conn.services, device });
+      this.updateBleDeviceEntry({ id: deviceId, name: device.name || conn.device.id, rssi: (conn.device as any).rssi || -60, connected: true, services: conn.services, device });
       return true;
     }
 
@@ -1508,7 +1508,7 @@ Message: "${message}"`,
       const server = await device.gatt.connect();
       const services = await server.getPrimaryServices().then((list) => list.map((s) => s.uuid));
       this.bleConnections.set(deviceId, { device, server, services, connected: true, lastSeen: Date.now() });
-      this.updateBleDeviceEntry({ id: deviceId, name: device.name || `BLE Device`, rssi: conn.device.rssi || -60, connected: true, services, device });
+      this.updateBleDeviceEntry({ id: deviceId, name: device.name || `BLE Device`, rssi: (conn.device as any).rssi || -60, connected: true, services, device });
       bus.emit("mesh_comms:ble_connected", { id: deviceId, name: device.name, services, timestamp: Date.now() });
       return true;
     } catch (err) {

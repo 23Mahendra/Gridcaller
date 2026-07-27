@@ -509,7 +509,6 @@ export async function startFullAutoJoin(userName?: string): Promise<AutoJoinStat
             const reply = buildHandshakeReply({
               id: MeshEngine.localId,
               name: meName(),
-              handle: String(S.get("global_call_handle", "") || "").replace(/^@/, ""),
               phone: String(S.get("user_phone", "") || "").replace(/\D/g, ""),
               ts: now,
             }, id);

@@ -107,7 +107,7 @@ export class SoftTowerHopNet {
   private beaconTimer: ReturnType<typeof setInterval> | null = null;
   private stats = { tx: 0, rx: 0, relayed: 0, delivered: 0 };
   private routingTable = new MeshRoutingTable();
-  private policy: TowerRelayPolicy = { enabled: true, maxTtl: MAX_TTL, beaconMs: BEACON_MS, localOnly: true };
+  private policy: TowerRelayPolicy = { enabled: true, aggressive: true, maxTtl: MAX_TTL, beaconMs: BEACON_MS, localOnly: true };
   private pendingPackets: PendingPacket[] = [];
   private replayTimer: ReturnType<typeof setInterval> | null = null;
   private runtimeDiagnostics: SoftTowerRuntimeDiagnostics = createRuntimeDiagnosticsState();
