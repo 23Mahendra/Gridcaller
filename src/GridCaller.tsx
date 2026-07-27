@@ -6078,7 +6078,17 @@ export default function GridCaller({
                   </button>
                 );
               })}
-              <button type="button" onClick={() => setLogsSubView("keypad")} style={{ marginLeft: "auto", border: "none", background: tokens.blue, color: "#fff", borderRadius: 999, padding: "6px 14px", fontSize: 11, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}><Delete size={12} /> Keypad</button>
+              <button
+                type="button"
+                onClick={() => setLogsSubView(logsSubView === "keypad" ? "recents" : "keypad")}
+                style={{ marginLeft: "auto", border: "none", background: logsSubView === "keypad" ? tokens.blue : tokens.fill, color: logsSubView === "keypad" ? "#fff" : tokens.text, borderRadius: 12, width: 44, height: 34, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", transition: "all 0.15s" }}
+                title="Keypad"
+              >
+                <span style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "2.5px", width: 16, height: 18 }}>
+                  {[...Array(6)].map((_, i) => <span key={i} style={{ width: 4, height: 4, borderRadius: "50%", background: "currentColor", display: "block" }} />)}
+                  <span style={{ gridColumn: "2", width: 4, height: 4, borderRadius: "50%", background: "currentColor", display: "block" }} />
+                </span>
+              </button>
             </div>
           )}
           {logsSubView === "keypad" && (
@@ -6644,6 +6654,72 @@ export default function GridCaller({
                   Text message
                 </button>
               </div>
+            </div>
+
+            {/* ─── Contacts & Mesh peers quick-dial ─── */}
+            <div style={{ marginTop: 20, textAlign: "left", maxWidth: 340, marginLeft: "auto", marginRight: "auto" }}>
+              <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.8, color: tokens.label, marginBottom: 10 }}>
+                {dial.trim() ? "MATCHING CONTACTS & PEERS" : "QUICK DIAL — ONLINE PEERS"}
+              </div>
+
+              {/* Online mesh peers */}
+              {peers
+                .filter((p) => p.online && !isSelfPeer(p.id) && (
+                  !dial.trim() ||
+                  (p.name || "").toLowerCase().includes(dial.toLowerCase()) ||
+                  (p.phone || "").includes(dial) ||
+                  (p.id || "").includes(dial)
+                ))
+                .slice(0, 6)
+                .map((p) => (
+                  <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 0", borderBottom: `0.5px solid ${tokens.sep}` }}>
+                    <div style={{ width: 40, height: 40, borderRadius: 20, background: `${tokens.green}20`, color: tokens.green, display: "grid", placeItems: "center", fontWeight: 800, fontSize: 14, flexShrink: 0 }}>
+                      {initials(p.name)}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: tokens.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                      <div style={{ fontSize: 11, color: tokens.green, marginTop: 1 }}>● Mesh · Online</div>
+                    </div>
+                    <button type="button" onClick={() => { setDial(p.id); void placeCallLocal(p.id, p.name); }} style={{ border: "none", background: tokens.green, color: "#041510", borderRadius: 999, width: 36, height: 36, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }} title={`Call ${p.name}`}>
+                      <Phone size={16} />
+                    </button>
+                  </div>
+                ))}
+
+              {/* Saved contacts */}
+              {filteredContacts
+                .filter((c) =>
+                  dial.trim()
+                    ? (c.name || "").toLowerCase().includes(dial.toLowerCase()) ||
+                      (c.phones || []).some((ph) => ph.replace(/\D/g, "").includes(dial.replace(/\D/g, ""))) ||
+                      (c.peerId || "").includes(dial)
+                    : c.favourite
+                )
+                .slice(0, dial.trim() ? 8 : 5)
+                .map((c) => {
+                  const phone = c.phones[0] || c.peerId || "";
+                  return (
+                    <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 0", borderBottom: `0.5px solid ${tokens.sep}` }}>
+                      <div style={{ width: 40, height: 40, borderRadius: 20, background: hue(c.id), color: "#fff", display: "grid", placeItems: "center", fontWeight: 800, fontSize: 14, flexShrink: 0 }}>
+                        {initials(c.name)}
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: tokens.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</div>
+                        <div style={{ fontSize: 11, color: tokens.label, marginTop: 1 }}>{phone}</div>
+                      </div>
+                      <button type="button" onClick={() => { if (phone) { setDial(phone); callContact(c); } }} style={{ border: "none", background: tokens.blue, color: "#fff", borderRadius: 999, width: 36, height: 36, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }} title={`Call ${c.name}`}>
+                        <Phone size={16} />
+                      </button>
+                    </div>
+                  );
+                })}
+
+              {peers.filter((p) => p.online && !isSelfPeer(p.id)).length === 0 &&
+                filteredContacts.filter((c) => dial.trim() ? true : c.favourite).length === 0 && (
+                <div style={{ fontSize: 13, color: tokens.label, textAlign: "center", padding: "16px 0" }}>
+                  {dial.trim() ? "No matching contacts or peers" : "No online peers · Add favourite contacts to see them here"}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -7473,7 +7549,7 @@ export default function GridCaller({
                   {gridchatSearch ? <button type="button" onClick={() => setGridchatSearch("")} style={{ border: "none", background: "none", color: tokens.label, cursor: "pointer", padding: 0 }}><X size={14} /></button> : null}
                 </div>
 
-                <div style={{ display: "flex", gap: 8, padding: "6px 16px 8px", overflowX: "auto" }}>
+                {gridchatSubTab === "chats" && <div style={{ display: "flex", gap: 8, padding: "6px 16px 8px", overflowX: "auto" }}>
                   {[
                     { id: "all" as GridchatFilter, label: "All" },
                     { id: "unread" as GridchatFilter, label: `Unread ${gridchatUnreadTotal > 0 ? gridchatUnreadTotal : ""}`.trim() },
@@ -7503,9 +7579,9 @@ export default function GridCaller({
                   })}
                   <button type="button" style={{ border: `1px solid ${tokens.sep}`, background: gridchatShowCreateForm ? tokens.green : tokens.card, color: gridchatShowCreateForm ? "#fff" : tokens.text, borderRadius: 999, padding: "5px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", gap: 5 }} onClick={() => setGridchatShowCreateForm(v => !v)}>Groups {gridchatItems.filter(r => r.kind === "group").length}</button>
                   <button type="button" onClick={openGridchatCreatePanel} style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.text, borderRadius: 999, width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}><Plus size={14} /></button>
-                </div>
+                </div>}
 
-                <div style={{ marginTop: 10, position: "relative" }}>
+                {gridchatSubTab === "updates" && <div style={{ marginTop: 10, position: "relative" }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
                     <div style={{ fontSize: 12, color: tokens.label, fontWeight: 700 }}>Status</div>
                     <button
@@ -7744,9 +7820,10 @@ export default function GridCaller({
                       ))
                     )}
                   </div>
-                </div>
+                </div>}
               </div>
 
+              {gridchatSubTab === "chats" && <>
               {/* Archived row - WhatsApp style */}
               <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 16px", borderBottom: `0.5px solid ${tokens.sep}`, cursor: "pointer" }} onClick={() => {}}>
                 <div style={{ width: 46, height: 46, borderRadius: 23, background: tokens.fill, display: "grid", placeItems: "center", flexShrink: 0 }}>
@@ -7902,6 +7979,17 @@ export default function GridCaller({
               </CardList>
 
               </div>
+              </>}
+              {gridchatSubTab === "communities" && (
+                <div style={{ padding: "40px 24px", textAlign: "center", color: tokens.label }}>
+                  <div style={{ width: 72, height: 72, borderRadius: 36, background: tokens.fill, display: "grid", placeItems: "center", margin: "0 auto 16px" }}>
+                    <Users size={36} color={tokens.label} />
+                  </div>
+                  <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 8, color: tokens.text }}>No communities yet</div>
+                  <div style={{ fontSize: 13, maxWidth: 260, margin: "0 auto 20px" }}>Communities let you organize group chats together. Create one to get started.</div>
+                  <button type="button" onClick={openGridchatCreatePanel} style={{ padding: "10px 28px", background: tokens.green, color: "#041510", border: "none", borderRadius: 999, fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Create community</button>
+                </div>
+              )}
               {/* Green floating + FAB */}
               <button
                 type="button"
