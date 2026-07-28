@@ -156,7 +156,7 @@ export default function SetupWizard({ onComplete }: Props) {
       case "perm_storage":
         return "Offline storage";
       case "hub":
-        return "Mesh hub (PC)";
+        return "PC Hub (optional)";
       case "ai_setup":
         return "AI Assistant (optional)";
       case "finish":
@@ -256,11 +256,9 @@ export default function SetupWizard({ onComplete }: Props) {
     }
 
     if (step === "hub") {
-      if (!hub.trim() || !signal.trim()) {
-        setErr("Enter Hub URL and Signal WebSocket (your PC IP)");
-        return;
-      }
-      saveHub();
+      // Hub is optional — save whatever was entered (even empty) and continue.
+      // Devices discover each other via WebRTC swarm, LAN broadcast, and BLE.
+      if (hub.trim()) saveHub();
       setIdx((i) => i + 1);
       return;
     }
@@ -320,17 +318,19 @@ export default function SetupWizard({ onComplete }: Props) {
         {step === "welcome" && (
           <div className="wizard-card">
             <p className="wizard-p">
-              First-time setup after install — tap <b>Next</b> on each step.
-              The system will request required permissions (Microphone, Notifications,
-              Nearby, Camera, Storage).
+              GridCaller works <b>without any central server</b>. Every device becomes
+              a mesh node — calls, messages, and relay all happen peer-to-peer.
             </p>
             <ul className="wizard-list">
-              <li>Mesh call + chat (no SIM required)</li>
-              <li>Share APK over Wi‑Fi / Bluetooth</li>
-              <li>Optional GitHub hub + GridAlive bridge</li>
+              <li>🌐 Internet swarm (WebRTC P2P) — works globally, no hub</li>
+              <li>📶 LAN / Wi‑Fi mesh — auto-discovery on same network</li>
+              <li>🔵 Bluetooth nearby — auto-connect in range</li>
+              <li>🔗 QR invite — scan to join mesh offline</li>
+              <li>📦 All data stored locally on this device</li>
             </ul>
             <p className="wizard-hint">
-              When a permission dialog appears, choose <b>Allow</b>.
+              No SIM required · No account · No server · Tap <b>Next</b> to grant
+              permissions so mesh paths activate automatically.
             </p>
           </div>
         )}
@@ -476,28 +476,33 @@ export default function SetupWizard({ onComplete }: Props) {
         {step === "hub" && (
           <div className="wizard-card">
             <p className="wizard-p">
-              On your PC run <b>START.bat</b> or <code>npm run hub</code>. Enter the{" "}
-              <b>PC LAN IP</b> below (phone on the same Wi‑Fi or hotspot).
+              <b>Hub is optional.</b> GridCaller discovers peers via WebRTC swarm, LAN
+              broadcast, and Bluetooth automatically — <b>no hub required</b>.
             </p>
-            <label className="wizard-label">Hub HTTP</label>
+            <p className="wizard-hint">
+              Only enter a hub URL if you are running the optional PC relay server
+              (<code>npm run hub</code> or <code>docker compose up</code>) for enterprise
+              or offline-only deployments.
+            </p>
+            <label className="wizard-label" style={{ marginTop: 8 }}>
+              Hub HTTP <span style={{ fontWeight: 400, opacity: 0.6 }}>(optional)</span>
+            </label>
             <input
               className="field"
               value={hub}
               onChange={(e) => setHub(e.target.value)}
-              placeholder="http://192.168.1.8:8765"
+              placeholder="http://192.168.1.8:8765 (leave blank for swarm-only)"
             />
             <label className="wizard-label" style={{ marginTop: 12 }}>
-              Mesh WebSocket (/mesh-ws)
+              Mesh WebSocket{" "}
+              <span style={{ fontWeight: 400, opacity: 0.6 }}>(optional)</span>
             </label>
             <input
               className="field"
               value={signal}
               onChange={(e) => setSignal(e.target.value)}
-              placeholder="ws://192.168.1.8:8765/mesh-ws"
+              placeholder="ws://192.168.1.8:8765/mesh-ws (leave blank for swarm-only)"
             />
-            <p className="wizard-hint">
-              Mesh bus path: <code>/mesh-ws</code> — example PC IP 192.168.1.8
-            </p>
             <button
               type="button"
               className="btn ghost"
@@ -609,7 +614,8 @@ export default function SetupWizard({ onComplete }: Props) {
           <div className="wizard-card">
             <div className="wizard-icon">✅</div>
             <p className="wizard-p">
-              Setup complete. Tap <b>Start GridCaller</b> to connect to the mesh.
+              Setup complete. GridCaller will now automatically discover nearby peers
+              via <b>WebRTC swarm, LAN, and Bluetooth</b> — no server required.
             </p>
             <div className="wizard-summary">
               <div>
@@ -619,7 +625,8 @@ export default function SetupWizard({ onComplete }: Props) {
                 <b>Room:</b> {room || "gridcaller"}
               </div>
               <div>
-                <b>Hub:</b> {hub}
+                <b>Hub:</b>{" "}
+                {hub ? hub : <span style={{ opacity: 0.55 }}>None — using swarm mesh</span>}
               </div>
               <div style={{ marginTop: 8 }}>
                 {Object.values(results).map((r) => (
@@ -657,7 +664,7 @@ export default function SetupWizard({ onComplete }: Props) {
             ? "Please wait…"
             : step === "finish"
             ? "Start GridCaller"
-            : step === "ai_setup" && !aiDetected
+            : (step === "ai_setup" && !aiDetected) || (step === "hub" && !hub.trim())
             ? "Skip →"
             : "Next →"}
         </button>

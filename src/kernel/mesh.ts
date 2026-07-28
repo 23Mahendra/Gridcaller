@@ -442,6 +442,11 @@ export const MeshEngine: MeshEngineAPI = {
           body: JSON.stringify(envelope),
         }).catch(() => {});
       } catch {}
+      // 4) Trystero swarm — serverless relay when hub is unavailable
+      //    Every device is a node; no central server required.
+      try {
+        (window as any).__gc_trystero_relay?.(type, base, this.localId, fromName);
+      } catch {}
       // DO NOT deliver outbound to local listeners (that was self-msg / self-call)
     } catch (e) {
       console.warn("[MeshEngine] broadcast failed", type, e);

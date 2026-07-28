@@ -21,12 +21,14 @@ import { startWifiMemory } from "./kernel/wifiMemory";
 import { bridgeMeshRuntimeEvent, startMeshKeepAlive, startMeshVpn, stopMeshVpn } from "./plugins/meshCallNative";
 import { startMeshDirectory } from "./kernel/meshDirectory";
 import { startNetworkHandoff } from "./kernel/networkHandoff";
-import { ensureMeshIdentity, setDisplayName, setHubHttp, setSignalUrl, syncLocalDeviceIdentity } from "./mesh/identity";
+import { ensureMeshIdentity, getMeshHandle, setDisplayName, setHubHttp, setSignalUrl, syncLocalDeviceIdentity } from "./mesh/identity";
 import { ConsentGate } from "./ui/ConsentGate";
 import { getConsentState } from "./kernel/consent";
 import SetupWizard, { isWizardDone } from "./setup/SetupWizard";
 import { isPermsDone } from "./setup/permissions";
 import localAiEngine from "./kernel/localAiEngine";
+import { mesh as pairingMesh } from "./mesh/engine";
+import { QRPairingModal } from "./ui/QRPairingModal";
 
 function userFromStorage() {
   return {
@@ -60,6 +62,7 @@ export default function App() {
   const [otaInfo, setOtaInfo] = useState<UpdateInfo | null>(null);
   const [pathNote, setPathNote] = useState("");
   const [autoJoinNote, setAutoJoinNote] = useState("Auto-joining mesh");
+  const [pairingOpen, setPairingOpen] = useState(false);
 
   // Start background AI monitoring as soon as app is ready
   useEffect(() => {
@@ -387,6 +390,36 @@ export default function App() {
         >
           <GridCaller user={user} />
         </div>
+        {consentReady && wizardDone ? (
+          <button
+            type="button"
+            onClick={() => setPairingOpen(true)}
+            style={{
+              position: "absolute",
+              right: 14,
+              bottom: 14,
+              zIndex: 90,
+              border: "none",
+              borderRadius: 999,
+              width: 52,
+              height: 52,
+              background: "#0a84ff",
+              color: "#fff",
+              fontWeight: 800,
+              cursor: "pointer",
+            }}
+            aria-label="Open QR pairing"
+            title="Open QR pairing"
+          >
+            QR
+          </button>
+        ) : null}
+        <QRPairingModal
+          open={pairingOpen}
+          onClose={() => setPairingOpen(false)}
+          handle={getMeshHandle()}
+          engine={pairingMesh}
+        />
       </div>
     </ConsentGate>
   );

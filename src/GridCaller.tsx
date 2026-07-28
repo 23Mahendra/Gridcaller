@@ -6331,12 +6331,16 @@ export default function GridCaller({
                   "No number set"}
               </div>
               <div style={{ fontSize: 11, marginTop: 3, fontWeight: 600 }}>
-                <span style={{ color: hubStatus.connected || autoMeshStatus?.trysteroOk ? tokens.green : tokens.red }}>
+                <span style={{ color: (hubStatus.connected || (autoMeshStatus?.trysteroOk && peers.filter((p) => p.online && !isSelfPeer(p.id)).length > 0)) ? tokens.green : tokens.orange }}>
                   {hubStatus.connected
-                    ? "● PC + phones mesh ON"
-                    : autoMeshStatus?.trysteroOk
-                      ? "● Swarm mesh ON"
-                      : "○ Connecting mesh…"}
+                    ? "● Hub + swarm mesh ON"
+                    : (autoMeshStatus?.trysteroOk && peers.filter((p) => p.online && !isSelfPeer(p.id)).length > 0)
+                      ? "● Swarm mesh ON — no server needed"
+                      : autoMeshStatus?.trysteroOk
+                        ? "◉ Local node active"
+                        : autoMeshStatus?.started
+                          ? "◌ Joining swarm mesh…"
+                          : "◌ Starting mesh…"}
                 </span>
                 <span style={{ color: tokens.label }}>
                   {" · "}
@@ -6350,8 +6354,12 @@ export default function GridCaller({
               <div style={{ fontSize: 10, color: tokens.label, marginTop: 2 }}>
                 My ID: <b style={{ color: tokens.text }}>{MeshEngine.localId}</b>
               </div>
-              <div style={{ fontSize: 10, color: tokens.green, marginTop: 2, lineHeight: 1.3 }}>
-                Mesh ready
+              <div style={{ fontSize: 10, marginTop: 2, lineHeight: 1.3 }}>
+                {hubStatus.connected || (autoMeshStatus?.trysteroOk && peers.filter((p) => p.online && !isSelfPeer(p.id)).length > 0)
+                  ? <span style={{ color: tokens.green }}>This device is a mesh node · ready to call &amp; relay</span>
+                  : autoMeshStatus?.trysteroOk
+                    ? <><span style={{ color: tokens.orange }}>Searching for nearby peers…</span><br /><span style={{ color: tokens.label }}>No central server required</span></>
+                    : <span style={{ color: tokens.label }}>Searching for nearby nodes…</span>}
               </div>
             </div>
           </div>
@@ -6658,7 +6666,7 @@ export default function GridCaller({
               <>
                 {onlinePeers.length === 0 ? (
                   <CardList>
-                    <EmptyState title="No online mesh peers" body="When nearby or linked peers come online, they will appear here." />
+                    <EmptyState title="Searching for mesh peers…" body="Broadcasting identity on swarm, LAN, and Bluetooth. When another GridCaller node enters range it will appear here automatically — no server needed." />
                   </CardList>
                 ) : (
                   <div style={{ padding: "4px 0 16px" }}>
@@ -6748,7 +6756,7 @@ export default function GridCaller({
                 <CardList>
                   <EmptyState
                     title={meshLog.length === 0 ? "No mesh activity yet" : "No entries match the filter"}
-                    body={meshLog.length === 0 ? "Mesh calls and messages will appear here once you connect to a peer on the mesh network." : "Try changing the filter or search query."}
+                    body={meshLog.length === 0 ? "Mesh calls and messages appear here after your first peer-to-peer session. Swarm is active — waiting for nodes." : "Try changing the filter or search query."}
                   />
                 </CardList>
               ) : (
@@ -6762,7 +6770,7 @@ export default function GridCaller({
         {tab === "logs" && logsSubView === "recents" && (
           <CardList>
             {latestLocalCommLog.length === 0 ? (
-              <EmptyState title="No local logs yet" body="Calls, inbox, sent, missed, and blocked actions will appear here on this device only." />
+              <EmptyState title="No local logs yet" body="Calls, messages, and mesh events will appear here. All stored locally on this device — no server required." />
             ) : (
               renderLogsWithDateSeparators(latestLocalCommLog, true)
             )}
@@ -6846,8 +6854,8 @@ export default function GridCaller({
             <CardList>
               {filteredContacts.length === 0 && (
                 <EmptyState
-                  title="No contacts"
-                  body="Tap Add to create one."
+                  title="No contacts yet"
+                  body="Contacts are saved locally on this device. Tap Add to create one, or mesh peers you call/message are auto-saved."
                 />
               )}
               {filteredContacts.map((c) => {
@@ -7263,7 +7271,7 @@ export default function GridCaller({
               {peers.filter((p) => p.online && !isSelfPeer(p.id)).length === 0 &&
                 filteredContacts.filter((c) => dial.trim() ? true : c.favourite).length === 0 && (
                 <div style={{ fontSize: 13, color: tokens.label, textAlign: "center", padding: "16px 0" }}>
-                  {dial.trim() ? "No matching contacts or peers" : "No online peers · Add favourite contacts to see them here"}
+                  {dial.trim() ? "No matching contacts or peers" : "Searching mesh for nearby nodes… Add favourite contacts to see them here"}
                 </div>
               )}
             </div>
@@ -7801,7 +7809,7 @@ export default function GridCaller({
             )}
             <CardList>
               {smsThreads.length === 0 && !composeOpen && (
-                <EmptyState title="No messages" body="This folder is empty. Start a conversation or save a draft." />
+                <EmptyState title="No messages yet" body="Messages sync over the mesh — stored locally on this device. Tap compose to start a conversation with any mesh peer or phone number." />
               )}
               {smsThreads.map((t) => {
                 const threadSelected = selectedSmsThreadIds.includes(t.peerId);
@@ -8420,7 +8428,7 @@ export default function GridCaller({
               <div style={{ position: "relative" }}>
               <CardList>
                 {gridchatItems.length === 0 ? (
-                  <EmptyState title="No Gridchat users/chats yet" body="Create a group or message an online user to start chatting." />
+                  <EmptyState title="No Gridchat groups yet" body="Groups sync over the mesh with no central server. Create a group to start — members join as they come online." />
                 ) : (
                   gridchatItems.map((row) => {
                     const rowSelected = selectedGridchatRowIds.includes(row.id);
@@ -9307,7 +9315,7 @@ export default function GridCaller({
                   >
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
                       <Users size={18} color={tokens.green} />
-                      <span style={{ fontWeight: 700, color: tokens.text }}>Online</span>
+                      <span style={{ fontWeight: 700, color: tokens.text }}>Mesh nodes online</span>
                     </div>
                     <div style={{ fontSize: 28, fontWeight: 800, color: tokens.blue }}>{networkPeopleCount}</div>
                     <div style={{ fontSize: 13, color: tokens.label }}>
@@ -9315,8 +9323,12 @@ export default function GridCaller({
                       {globalPeers.filter((p) => p.online).length}
                       {meshMapPeers.length ? ` · Map ${meshMapPeers.length}` : ""}
                     </div>
-                    <div style={{ fontSize: 12, color: tokens.green, marginTop: 6, fontWeight: 700 }}>
-                      Nearby devices are ready
+                    <div style={{ fontSize: 12, color: networkPeopleCount > 1 ? tokens.green : tokens.orange, marginTop: 6, fontWeight: 700 }}>
+                      {networkPeopleCount > 1
+                        ? `${networkPeopleCount} nodes in range — call, message, relay`
+                        : autoMeshStatus?.trysteroOk || hubStatus.connected
+                          ? "Broadcasting identity · listening for peers…"
+                          : "Joining swarm mesh · no server needed…"}
                     </div>
                     {(() => {
                       const cd = listConnectedDevices({
@@ -9327,9 +9339,24 @@ export default function GridCaller({
                         <div style={{ fontSize: 11, color: tokens.label, marginTop: 6 }}>
                           Devices: {cd.onlineCount} online / {cd.count} total
                           {isPrivacyMode() ? " · Privacy on" : ""}
+                          {autoMeshStatus?.trysteroOk ? " · Swarm active" : ""}
+                          {hubStatus.connected ? " · Hub active" : ""}
                         </div>
                       );
                     })()}
+                    {/* Mesh path indicators */}
+                    <div style={{ display: "flex", gap: 4, marginTop: 8, flexWrap: "wrap" }}>
+                      {(autoMeshStatus?.trysteroOk || hubStatus.connected) && (
+                        <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 999, background: `${tokens.blue}18`, color: tokens.blue }}>🌐 WebRTC swarm</span>
+                      )}
+                      {peers.filter((p) => p.online).length > 0 && (
+                        <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 999, background: `${tokens.green}18`, color: tokens.green }}>📶 LAN mesh</span>
+                      )}
+                      {hubStatus.connected && (
+                        <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 999, background: `${tokens.orange}18`, color: tokens.orange }}>🖥 Hub relay</span>
+                      )}
+                      <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 999, background: `${tokens.fill}`, color: tokens.label }}>📲 This device = node</span>
+                    </div>
                   </div>
 
                   {(
@@ -10164,7 +10191,9 @@ export default function GridCaller({
                         </div>
                         {cd.devices.length <= 1 ? (
                           <div style={{ fontSize: 13, color: tokens.label, marginBottom: 12, lineHeight: 1.45 }}>
-                            No nearby peers yet.
+                            {autoMeshStatus?.trysteroOk || hubStatus.connected
+                              ? "Broadcasting identity · listening for nearby nodes via swarm, LAN, and Bluetooth…"
+                              : "Starting mesh discovery · no server needed · searching for nodes…"}
                           </div>
                         ) : (
                           cd.devices.map((d) => (
@@ -10457,8 +10486,8 @@ export default function GridCaller({
                       >
                         <div style={{ fontSize: 28, fontWeight: 800, color: tokens.blue }}>{h.softTowers}</div>
                         <div style={{ fontSize: 13, color: tokens.label }}>Devices (you + nearby)</div>
-                        <div style={{ fontSize: 12, color: tokens.green, marginTop: 8, fontWeight: 700 }}>
-                          Nearby devices are connected
+                        <div style={{ fontSize: 12, color: h.softTowers > 1 ? tokens.green : tokens.orange, marginTop: 8, fontWeight: 700 }}>
+                          {h.softTowers > 1 ? "Peers in range — relaying mesh traffic" : "This device is a mesh node · searching for peers…"}
                         </div>
                         <div style={{ fontSize: 13, color: tokens.green, marginTop: 6, fontWeight: 600 }}>
                           {h.estimatedRangeLabel}
@@ -10502,7 +10531,7 @@ export default function GridCaller({
                     <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${tokens.sep}` }}>
                       <div style={{ fontWeight: 700, marginBottom: 4 }}>Peer route history</div>
                       {Object.entries(hopDiagnostics.peerRoutes || {}).length === 0 ? (
-                        <div style={{ color: tokens.label }}>No peer route history yet.</div>
+                        <div style={{ color: tokens.label }}>No peer routes yet · broadcasting identity on swarm…</div>
                       ) : (
                         Object.entries(hopDiagnostics.peerRoutes || {}).slice(0, 6).map(([peerId, route]) => (
                           <div key={peerId} style={{ color: tokens.label, marginTop: 2 }}>
