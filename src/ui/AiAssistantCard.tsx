@@ -9,6 +9,14 @@ import localAiEngine, {
   type AiPullProgress,
   type AiStatusSnapshot,
 } from "../kernel/localAiEngine";
+import {
+  addRagDoc,
+  buildRagContext,
+  clearRagDocs,
+  listRagDocs,
+  removeRagDoc,
+  type RagDocMeta,
+} from "../kernel/localRag";
 
 // Starter model to pull when Ollama is present but has no models
 const STARTER_MODEL = "llama3.2:1b";
@@ -57,6 +65,12 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
   const [chatBusy, setChatBusy] = useState(false);
   const chatAbort = useRef<AbortController | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const [ragEnabled, setRagEnabled] = useState(true);
+  const [ragDocs, setRagDocs] = useState<RagDocMeta[]>(() => listRagDocs());
+  const [ragTitle, setRagTitle] = useState("");
+  const [ragInput, setRagInput] = useState("");
+  const [ragBusy, setRagBusy] = useState(false);
+  const [ragError, setRagError] = useState("");
 
   // Image
   const [imgPrompt, setImgPrompt] = useState("");
@@ -109,13 +123,23 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
       { id: assistantId, role: "assistant", content: "", streaming: true },
     ]);
 
-    const history: AiChatMessage[] = [
-      ...messages.map((m) => ({ role: m.role, content: m.content })),
-      { role: "user", content: text },
-    ];
-
     chatAbort.current = new AbortController();
     try {
+      const rag = ragEnabled ? await buildRagContext(text).catch(() => null) : null;
+      const history: AiChatMessage[] = [
+        ...(rag?.context
+          ? [
+              {
+                role: "system" as const,
+                content:
+                  "Use the local knowledge context below when relevant. If context is not relevant, answer normally.\n\n" +
+                  rag.context,
+              },
+            ]
+          : []),
+        ...messages.map((m) => ({ role: m.role, content: m.content })),
+        { role: "user", content: text },
+      ];
       let full = "";
       await localAiEngine.chatStream(
         history,
@@ -151,7 +175,7 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
     } finally {
       setChatBusy(false);
     }
-  }, [chatInput, chatBusy, messages]);
+  }, [chatInput, chatBusy, messages, ragEnabled]);
 
   const stopChat = () => {
     chatAbort.current?.abort();
@@ -246,6 +270,24 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
       setPullError(err?.message || "Download failed.");
     } finally {
       setPulling(false);
+    }
+  };
+
+  const addKnowledge = async () => {
+    if (ragBusy) return;
+    const text = ragInput.trim();
+    if (!text) return;
+    setRagBusy(true);
+    setRagError("");
+    try {
+      await addRagDoc(ragTitle.trim() || "Knowledge Note", text);
+      setRagDocs(listRagDocs());
+      setRagInput("");
+      setRagTitle("");
+    } catch (err: any) {
+      setRagError(err?.message || "Could not index knowledge.");
+    } finally {
+      setRagBusy(false);
     }
   };
 
@@ -510,6 +552,139 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
         {/* ── CHAT TAB ── */}
         {tab === "chat" && !noBackend && status.chatModels.length > 0 && (
           <>
+            <div
+              style={{
+                background: T.card,
+                borderRadius: 10,
+                padding: "9px 10px",
+                display: "flex",
+                flexDirection: "column",
+                gap: 7,
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 8,
+                }}
+              >
+                <label style={{ display: "flex", alignItems: "center", gap: 6, color: T.text, fontSize: 12 }}>
+                  <input
+                    type="checkbox"
+                    checked={ragEnabled}
+                    onChange={(e) => setRagEnabled(e.target.checked)}
+                  />
+                  RAG mode
+                </label>
+                <div style={{ color: T.label, fontSize: 11 }}>
+                  {ragDocs.length} docs · local-only
+                </div>
+              </div>
+              <input
+                value={ragTitle}
+                onChange={(e) => setRagTitle(e.target.value)}
+                placeholder="Knowledge title"
+                style={{
+                  background: T.inputBg,
+                  color: T.text,
+                  border: `1px solid ${T.sep}`,
+                  borderRadius: 8,
+                  padding: "6px 8px",
+                  fontSize: 12,
+                  outline: "none",
+                }}
+              />
+              <textarea
+                value={ragInput}
+                onChange={(e) => setRagInput(e.target.value)}
+                placeholder="Paste local SOP, notes, docs for retrieval..."
+                rows={2}
+                style={{
+                  resize: "vertical",
+                  background: T.inputBg,
+                  color: T.text,
+                  border: `1px solid ${T.sep}`,
+                  borderRadius: 8,
+                  padding: "7px 8px",
+                  fontSize: 12,
+                  fontFamily: "inherit",
+                  outline: "none",
+                }}
+              />
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  onClick={() => void addKnowledge()}
+                  disabled={ragBusy || !ragInput.trim()}
+                  style={{
+                    border: "none",
+                    borderRadius: 8,
+                    padding: "6px 10px",
+                    background: ragBusy || !ragInput.trim() ? T.sep : T.blue,
+                    color: "#fff",
+                    fontSize: 12,
+                    fontWeight: 700,
+                    cursor: ragBusy || !ragInput.trim() ? "default" : "pointer",
+                  }}
+                >
+                  {ragBusy ? "Indexing…" : "Add Knowledge"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearRagDocs();
+                    setRagDocs([]);
+                  }}
+                  disabled={ragBusy || ragDocs.length === 0}
+                  style={{
+                    border: "none",
+                    borderRadius: 8,
+                    padding: "6px 10px",
+                    background: ragBusy || ragDocs.length === 0 ? T.sep : T.red + "22",
+                    color: ragBusy || ragDocs.length === 0 ? T.label : T.red,
+                    fontSize: 12,
+                    fontWeight: 700,
+                    cursor: ragBusy || ragDocs.length === 0 ? "default" : "pointer",
+                  }}
+                >
+                  Clear
+                </button>
+              </div>
+              {ragError && <div style={{ color: T.red, fontSize: 11 }}>{ragError}</div>}
+              {ragDocs.length > 0 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {ragDocs.slice(0, 4).map((d) => (
+                    <button
+                      key={d.id}
+                      type="button"
+                      onClick={() => {
+                        removeRagDoc(d.id);
+                        setRagDocs(listRagDocs());
+                      }}
+                      title="Remove document"
+                      style={{
+                        border: `1px solid ${T.sep}`,
+                        background: "transparent",
+                        color: T.label,
+                        borderRadius: 99,
+                        padding: "2px 8px",
+                        fontSize: 11,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {d.title} ×
+                    </button>
+                  ))}
+                  {ragDocs.length > 4 && (
+                    <div style={{ color: T.label, fontSize: 11, alignSelf: "center" }}>
+                      +{ragDocs.length - 4} more
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
             <div
               style={{
                 flex: 1,

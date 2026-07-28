@@ -15,6 +15,7 @@ import path from "path";
 import os from "os";
 import { createHash } from "crypto";
 import { fileURLToPath } from "url";
+import { Readable } from "stream";
 import { WebSocketServer } from "ws";
 import { PeerServer } from "peer";
 import {
@@ -37,6 +38,8 @@ const DATA = path.join(ROOT, "data");
 const USAGE_LEDGER_FILE = path.join(DATA, "usage-ledger.json");
 const PORT = Number(process.env.PORT || 8765);
 const PEER_PORT = Number(process.env.PEER_PORT || 9000);
+const OLLAMA_BASE_URL = String(process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
+const OFFGRID_BASE_URL = String(process.env.OFFGRID_BASE_URL || "http://127.0.0.1:7878/v1").replace(/\/$/, "");
 
 for (const d of [SHARE, TRANSFER, DATA, defaultWorkDir()]) {
   fs.mkdirSync(d, { recursive: true });
@@ -77,7 +80,7 @@ function appendUsageEntry(entry) {
 }
 
 function getWebRtcConfig() {
-  const stunCsv = String(process.env.STUN_URLS || "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302");
+  const stunCsv = String(process.env.STUN_URLS || "");
   const turnCsv = String(process.env.TURN_URLS || process.env.TURN_URL || "");
   const turnUsername = String(process.env.TURN_USERNAME || "");
   const turnCredential = String(process.env.TURN_CREDENTIAL || "");
@@ -174,6 +177,69 @@ function readJson(req) {
         resolve(raw ? JSON.parse(raw) : {});
       } catch (e) {
         reject(e);
+      }
+
+      async function readBodyBuffer(req) {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        return Buffer.concat(chunks);
+      }
+
+      function mergeProxyHeaders(upstreamHeaders = {}) {
+        const out = {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+          "Cache-Control": "no-store",
+        };
+        for (const [k, v] of Object.entries(upstreamHeaders)) {
+          if (typeof v !== "string") continue;
+          const key = String(k).toLowerCase();
+          if (key === "transfer-encoding") continue;
+          out[k] = v;
+        }
+        return out;
+      }
+
+      async function proxyLocalApi(req, res, pathname, search, routePrefix, targetBase) {
+        const upstreamPath = pathname.startsWith(routePrefix)
+          ? pathname.slice(routePrefix.length) || "/"
+          : pathname;
+        const targetUrl = `${targetBase}${upstreamPath}${search || ""}`;
+        const method = String(req.method || "GET").toUpperCase();
+        const headers = {};
+        for (const [k, v] of Object.entries(req.headers || {})) {
+          if (k.toLowerCase() === "host" || k.toLowerCase() === "content-length") continue;
+          if (Array.isArray(v)) {
+            headers[k] = v.join(", ");
+          } else if (typeof v === "string") {
+            headers[k] = v;
+          }
+        }
+        const body =
+          method === "GET" || method === "HEAD" || method === "OPTIONS"
+            ? undefined
+            : await readBodyBuffer(req);
+
+        const upstream = await fetch(targetUrl, {
+          method,
+          headers,
+          body,
+          signal: AbortSignal.timeout(300000),
+        });
+        const responseHeaders = mergeProxyHeaders(Object.fromEntries(upstream.headers.entries()));
+        res.writeHead(upstream.status, responseHeaders);
+        if (!upstream.body) {
+          res.end();
+          return;
+        }
+        const stream = Readable.fromWeb(upstream.body);
+        stream.on("error", () => {
+          try {
+            res.end();
+          } catch {}
+        });
+        stream.pipe(res);
       }
     });
     req.on("error", reject);
@@ -325,6 +391,16 @@ const server = http.createServer(async (req, res) => {
   const { pathname } = url;
 
   try {
+    if (pathname === "/api/ollama" || pathname.startsWith("/api/ollama/")) {
+      await proxyLocalApi(req, res, pathname, url.search, "/api/ollama", OLLAMA_BASE_URL);
+      return;
+    }
+
+    if (pathname === "/api/offgrid" || pathname.startsWith("/api/offgrid/")) {
+      await proxyLocalApi(req, res, pathname, url.search, "/api/offgrid", OFFGRID_BASE_URL);
+      return;
+    }
+
     if (pathname === "/api/webrtc/config") {
       const cfg = getWebRtcConfig();
       return send(
