@@ -6331,14 +6331,16 @@ export default function GridCaller({
                   "No number set"}
               </div>
               <div style={{ fontSize: 11, marginTop: 3, fontWeight: 600 }}>
-                <span style={{ color: hubStatus.connected || autoMeshStatus?.trysteroOk ? tokens.green : tokens.orange }}>
+                <span style={{ color: (hubStatus.connected || (autoMeshStatus?.trysteroOk && peers.filter((p) => p.online && !isSelfPeer(p.id)).length > 0)) ? tokens.green : tokens.orange }}>
                   {hubStatus.connected
                     ? "● Hub + swarm mesh ON"
-                    : autoMeshStatus?.trysteroOk
+                    : (autoMeshStatus?.trysteroOk && peers.filter((p) => p.online && !isSelfPeer(p.id)).length > 0)
                       ? "● Swarm mesh ON — no server needed"
-                      : autoMeshStatus?.started
-                        ? "◌ Joining swarm mesh…"
-                        : "◌ Starting mesh…"}
+                      : autoMeshStatus?.trysteroOk
+                        ? "◉ Local node active"
+                        : autoMeshStatus?.started
+                          ? "◌ Joining swarm mesh…"
+                          : "◌ Starting mesh…"}
                 </span>
                 <span style={{ color: tokens.label }}>
                   {" · "}
@@ -6352,10 +6354,12 @@ export default function GridCaller({
               <div style={{ fontSize: 10, color: tokens.label, marginTop: 2 }}>
                 My ID: <b style={{ color: tokens.text }}>{MeshEngine.localId}</b>
               </div>
-              <div style={{ fontSize: 10, color: tokens.green, marginTop: 2, lineHeight: 1.3 }}>
-                {autoMeshStatus?.trysteroOk || hubStatus.connected
-                  ? "This device is a mesh node · ready to call & relay"
-                  : "Searching for nearby nodes…"}
+              <div style={{ fontSize: 10, marginTop: 2, lineHeight: 1.3 }}>
+                {hubStatus.connected || (autoMeshStatus?.trysteroOk && peers.filter((p) => p.online && !isSelfPeer(p.id)).length > 0)
+                  ? <span style={{ color: tokens.green }}>This device is a mesh node · ready to call &amp; relay</span>
+                  : autoMeshStatus?.trysteroOk
+                    ? <><span style={{ color: tokens.orange }}>Searching for nearby peers…</span><br /><span style={{ color: tokens.label }}>No central server required</span></>
+                    : <span style={{ color: tokens.label }}>Searching for nearby nodes…</span>}
               </div>
             </div>
           </div>
