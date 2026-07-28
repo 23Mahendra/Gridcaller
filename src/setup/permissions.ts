@@ -143,6 +143,33 @@ export async function requestBluetoothNearby(): Promise<PermResult> {
   const label = "Bluetooth / Nearby";
   const loc = await requestLocation();
   const nav = navigator as any;
+
+  // Native Android (Capacitor WebView): initialize BLE so Android 12+ BLUETOOTH_SCAN
+  // and BLUETOOTH_CONNECT permissions are surfaced by the OS immediately during setup.
+  try {
+    const { Capacitor } = await import("@capacitor/core");
+    if (Capacitor.isNativePlatform()) {
+      const { BleClient } = await import("@capacitor-community/bluetooth-le");
+      await BleClient.initialize({ androidNeverForLocation: false });
+      // A brief scan request triggers the runtime grant dialog on Android 12+
+      try {
+        await BleClient.requestLEScan({ allowDuplicates: false }, () => {});
+        await new Promise((r) => setTimeout(r, 500));
+        await BleClient.stopLEScan();
+      } catch {
+        /* scan may fail if BT disabled — permission dialog was still shown */
+      }
+      return {
+        id,
+        label,
+        status: loc.status === "granted" ? "granted" : loc.status,
+        detail: "Bluetooth initialized — nearby devices will auto-connect",
+      };
+    }
+  } catch {
+    /* non-native or BLE unavailable */
+  }
+
   if (!nav.bluetooth) {
     return {
       id,

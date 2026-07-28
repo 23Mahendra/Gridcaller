@@ -14,9 +14,9 @@ import {
 } from "../mesh/identity";
 import {
   markPermsDone,
+  requestBluetoothNearby,
   requestCamera,
   requestClipboard,
-  requestLocation,
   requestMicrophone,
   requestNotifications,
   requestStorage,
@@ -122,7 +122,7 @@ export default function SetupWizard({ onComplete }: Props) {
         await runPerm("notifications", requestNotifications);
       } else if (step === "perm_nearby") {
         autoAsked.current[step] = true;
-        await runPerm("location", requestLocation);
+        await runPerm("bluetooth_nearby", requestBluetoothNearby);
       } else if (step === "perm_camera") {
         autoAsked.current[step] = true;
         await runPerm("camera", requestCamera);
@@ -237,7 +237,7 @@ export default function SetupWizard({ onComplete }: Props) {
     }
 
     if (step === "perm_nearby") {
-      await runPerm("location", requestLocation);
+      await runPerm("bluetooth_nearby", requestBluetoothNearby);
       setIdx((i) => i + 1);
       return;
     }
@@ -409,13 +409,13 @@ export default function SetupWizard({ onComplete }: Props) {
           <div className="wizard-card">
             <div className="wizard-icon">📡</div>
             <p className="wizard-p">
-              <b>Location / Nearby</b> — Android often requires this for Bluetooth, Nearby
-              Share, and Wi‑Fi mesh.
+              <b>Location / Bluetooth / Nearby</b> — Android requires Location for Bluetooth
+              scan and Nearby mesh. This also initializes Bluetooth so devices auto-connect.
             </p>
-            {perm("location") && (
+            {perm("bluetooth_nearby") && (
               <div className="wizard-perm-result">
-                {statusEmoji(perm("location")!.status)} {perm("location")!.status}
-                {perm("location")!.detail ? ` — ${perm("location")!.detail}` : ""}
+                {statusEmoji(perm("bluetooth_nearby")!.status)} {perm("bluetooth_nearby")!.status}
+                {perm("bluetooth_nearby")!.detail ? ` — ${perm("bluetooth_nearby")!.detail}` : ""}
               </div>
             )}
             <button
@@ -423,9 +423,9 @@ export default function SetupWizard({ onComplete }: Props) {
               className="btn ghost"
               style={{ width: "100%", marginTop: 12 }}
               disabled={busy}
-              onClick={() => void runPerm("location", requestLocation)}
+              onClick={() => void runPerm("bluetooth_nearby", requestBluetoothNearby)}
             >
-              Allow location / nearby
+              Allow location / Bluetooth / nearby
             </button>
           </div>
         )}

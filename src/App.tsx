@@ -21,7 +21,7 @@ import { startWifiMemory } from "./kernel/wifiMemory";
 import { bridgeMeshRuntimeEvent, startMeshKeepAlive, startMeshVpn, stopMeshVpn } from "./plugins/meshCallNative";
 import { startMeshDirectory } from "./kernel/meshDirectory";
 import { startNetworkHandoff } from "./kernel/networkHandoff";
-import { ensureMeshIdentity, syncLocalDeviceIdentity } from "./mesh/identity";
+import { ensureMeshIdentity, setDisplayName, setHubHttp, setSignalUrl, syncLocalDeviceIdentity } from "./mesh/identity";
 import { ConsentGate } from "./ui/ConsentGate";
 import { getConsentState } from "./kernel/consent";
 import SetupWizard, { isWizardDone } from "./setup/SetupWizard";
@@ -172,8 +172,10 @@ export default function App() {
       await setupNativeChrome();
       installViewportFit();
       try {
-        if (!isPermsDone()) {
-          // First launch (before/during setup wizard): request all permissions once.
+        // Only request permissions if the setup wizard already ran and granted them.
+        // If the wizard hasn't run yet, it will request permissions itself — avoid
+        // duplicate OS dialogs on first launch.
+        if (isPermsDone() && isWizardDone()) {
           const r = await requestAllAppPermissions();
           if (Capacitor.isNativePlatform()) {
             const missing: string[] = [];
@@ -192,7 +194,7 @@ export default function App() {
             S.set("gc_perm_summary", r);
           }
         }
-        // Always (re-)start auto-join after every launch so devices stay interconnected
+        // Always (re-)start auto-join on every launch so devices stay interconnected
         // without requiring any further permission dialogs.
         void startFullAutoJoin(S.get("user_name") || S.get("mesh_name") || "GridUser");
         void startMeshKeepAlive();
@@ -227,6 +229,37 @@ export default function App() {
       } catch {}
     };
   }, [consentReady]);
+
+  // After the setup wizard completes: permissions are now granted.
+  // Re-trigger full auto-join so BLE / Location / Mic are all active.
+  useEffect(() => {
+    if (!wizardDone) return;
+    void (async () => {
+      try {
+        // Wizard just granted all permissions — confirm native grants if on device
+        if (Capacitor.isNativePlatform()) {
+          const r = await requestAllAppPermissions();
+          S.set("gc_perm_summary", r);
+          const missing: string[] = [];
+          if (!r.microphone) missing.push("Microphone");
+          if (!r.camera) missing.push("Camera");
+          if (!r.location) missing.push("Location");
+          if (!r.bluetooth) missing.push("Bluetooth");
+          setPermNote(
+            missing.length
+              ? `Tap Allow for: ${missing.join(", ")} to enable all mesh paths`
+              : `v${APP_VERSION_NAME} · All set — devices will auto-connect`
+          );
+          if (!missing.length) setTimeout(() => setPermNote(""), 5000);
+        }
+        // Full auto-join now has Location + BLE — pick up all available paths
+        void startFullAutoJoin(S.get("user_name") || S.get("mesh_name") || "GridUser");
+        void startAutoMesh(S.get("user_name") || S.get("mesh_name") || "GridUser");
+        void startMeshKeepAlive();
+        void startMeshVpn("gateway", navigator.onLine).catch(() => {});
+      } catch {}
+    })();
+  }, [wizardDone]);
 
   return (
     <ConsentGate onAccepted={() => setConsentReady(true)}>
@@ -263,7 +296,26 @@ export default function App() {
             }}
           >
             <SetupWizard
-              onComplete={() => {
+              onComplete={({ name, hub, signal }) => {
+                // Persist what the wizard collected into kernel storage so the
+                // mesh engines, call stack, and directory all see them immediately.
+                if (name) {
+                  S.set("user_name", name);
+                  S.set("mesh_name", name);
+                  try { setDisplayName(name); } catch {}
+                }
+                if (hub) {
+                  try { setHubHttp(hub); } catch {}
+                  try {
+                    localStorage.setItem("gc_hub_http", hub);
+                  } catch {}
+                }
+                if (signal) {
+                  try { setSignalUrl(signal); } catch {}
+                  try {
+                    localStorage.setItem("gc_signal_url", signal);
+                  } catch {}
+                }
                 setWizardDone(true);
               }}
             />
