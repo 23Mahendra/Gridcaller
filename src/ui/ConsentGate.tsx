@@ -1,7 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { getConsentState, saveConsentState, CONSENT_VERSION } from "../kernel/consent";
-import { requestAllAppPermissions } from "../kernel/nativePermissions";
-import { Capacitor } from "@capacitor/core";
 
 export function ConsentGate({ children, onAccepted }: { children: ReactNode; onAccepted?: () => void }) {
   const [consent, setConsent] = useState(getConsentState());
@@ -13,11 +11,10 @@ export function ConsentGate({ children, onAccepted }: { children: ReactNode; onA
     setConsent(getConsentState());
   }, []);
 
-  const accept = async () => {
+  const accept = () => {
     setBusy(true);
     setError("");
     try {
-      const permissions = await requestAllAppPermissions();
       const next = saveConsentState({
         agreed: true,
         agreedAt: Date.now(),
@@ -25,16 +22,6 @@ export function ConsentGate({ children, onAccepted }: { children: ReactNode; onA
         userAgent: navigator.userAgent,
         purpose: "Educational testing and research only. This app is not offered as a business service, product, or commercial platform.",
       });
-      if (Capacitor.isNativePlatform()) {
-        const missing = [] as string[];
-        if (!permissions.microphone) missing.push("Microphone");
-        if (!permissions.camera) missing.push("Camera");
-        if (!permissions.location) missing.push("Location");
-        if (!permissions.bluetooth) missing.push("Bluetooth");
-        if (missing.length) {
-          setError(`Permissions were requested, but ${missing.join(", ")} still need your confirmation in the system prompt.`);
-        }
-      }
       setConsent(next);
       setChecked(true);
       onAccepted?.();

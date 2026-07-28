@@ -7,7 +7,8 @@
 import * as Sentry from '@sentry/react';
 import { env } from '../env';
 
-const SENTRY_DSN = env.sentryDsn || import.meta.env.VITE_SENTRY_DSN;
+const viteEnv = ((import.meta as any)?.env || {}) as Record<string, any>;
+const SENTRY_DSN = env.sentryDsn || viteEnv.VITE_SENTRY_DSN;
 
 export const initSentry = () => {
   if (!SENTRY_DSN) {
@@ -17,11 +18,11 @@ export const initSentry = () => {
 
   Sentry.init({
     dsn: SENTRY_DSN,
-    environment: import.meta.env.MODE || 'development',
-    release: `gridalive@${import.meta.env.VITE_APP_VERSION || '1.0.0'}`,
+    environment: viteEnv.MODE || 'development',
+    release: `gridalive@${viteEnv.VITE_APP_VERSION || '1.0.0'}`,
     
     // Performance Monitoring
-    tracesSampleRate: import.meta.env.PROD ? 0.1 : 1.0,
+    tracesSampleRate: viteEnv.PROD ? 0.1 : 1.0,
     
     // Session Replay (limited for privacy)
     replaysSessionSampleRate: 0.01,

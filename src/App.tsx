@@ -21,7 +21,7 @@ import { startWifiMemory } from "./kernel/wifiMemory";
 import { bridgeMeshRuntimeEvent, startMeshKeepAlive, startMeshVpn, stopMeshVpn } from "./plugins/meshCallNative";
 import { startMeshDirectory } from "./kernel/meshDirectory";
 import { startNetworkHandoff } from "./kernel/networkHandoff";
-import { ensureMeshIdentity, rememberDeviceIdentity } from "./mesh/identity";
+import { ensureMeshIdentity, syncLocalDeviceIdentity } from "./mesh/identity";
 import { ConsentGate } from "./ui/ConsentGate";
 import { getConsentState } from "./kernel/consent";
 import SetupWizard, { isWizardDone } from "./setup/SetupWizard";
@@ -117,11 +117,7 @@ export default function App() {
     // Critical for APK: hub must be PC LAN IP, not localhost
     ensureHubDefaults();
     const identity = ensureMeshIdentity();
-    rememberDeviceIdentity({
-      phone: S.get("user_phone", "") || "",
-      imei: S.get("gc_device_imei", "") || "",
-      peerId: identity.peerId,
-    });
+    void syncLocalDeviceIdentity({ peerId: identity.peerId }).catch(() => {});
     unifyLocalIdentity();
     try {
       (MeshEngine as any).start?.();

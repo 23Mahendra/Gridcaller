@@ -20,6 +20,14 @@ import freeRadio from "./radioMesh";
 import softTowerHop from "./softTowerHopNet";
 
 const KEY = "gc_privacy_mode_v1";
+const BACKUP_KEY = "gc_privacy_mode_prev_state_v1";
+
+type PrivacyPreviousState = {
+  forceLocalMesh: boolean;
+  allowCloudGun: boolean;
+  radioOn: boolean;
+  softTowerRunning: boolean;
+};
 
 export type PrivacyStatus = {
   on: boolean;
@@ -36,9 +44,39 @@ export function isPrivacyMode(): boolean {
   return S.get(KEY, false) === true;
 }
 
+function readPreviousState(): PrivacyPreviousState | null {
+  const raw = S.get(BACKUP_KEY, null);
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    forceLocalMesh: raw.forceLocalMesh === true,
+    allowCloudGun: raw.allowCloudGun === true,
+    radioOn: raw.radioOn === true,
+    softTowerRunning: raw.softTowerRunning === true,
+  };
+}
+
+function savePreviousState(): PrivacyPreviousState {
+  const prev: PrivacyPreviousState = {
+    forceLocalMesh: getForceLocalMesh(),
+    allowCloudGun: S.get("gc_allow_cloud_gun", false) === true,
+    radioOn: freeRadio.enabled,
+    softTowerRunning: softTowerHop.ready,
+  };
+  S.set(BACKUP_KEY, prev);
+  return prev;
+}
+
+function clearPreviousState() {
+  S.set(BACKUP_KEY, null);
+}
+
 export async function setPrivacyMode(on: boolean, operatorName = "Operator"): Promise<PrivacyStatus> {
-  S.set(KEY, on);
+  const wasOn = isPrivacyMode();
   if (on) {
+    if (!wasOn) {
+      savePreviousState();
+    }
+    S.set(KEY, true);
     enableFreeRadioMeshDefaults();
     setForceLocalMesh(true);
     S.set("gc_allow_cloud_gun", false);
@@ -51,7 +89,32 @@ export async function setPrivacyMode(on: boolean, operatorName = "Operator"): Pr
     } catch {}
     bus.emit("privacy:on", {});
   } else {
-    // leave local mesh as user had it — only clear privacy flag
+    if (!wasOn) {
+      clearPreviousState();
+      return getPrivacyStatus();
+    }
+    const prev = readPreviousState();
+    if (prev) {
+      setForceLocalMesh(prev.forceLocalMesh);
+      S.set("gc_allow_cloud_gun", prev.allowCloudGun);
+      try {
+        await freeRadio.enable(prev.radioOn);
+      } catch {}
+      try {
+        if (prev.softTowerRunning) softTowerHop.start(operatorName);
+        else softTowerHop.stop();
+      } catch {}
+      clearPreviousState();
+    } else {
+      try {
+        await freeRadio.enable(false);
+      } catch {}
+      try {
+        softTowerHop.stop();
+      } catch {}
+      setForceLocalMesh(false);
+    }
+    S.set(KEY, false);
     bus.emit("privacy:off", {});
   }
   return getPrivacyStatus();

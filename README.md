@@ -18,7 +18,7 @@ This repository is not positioned as a commercial telephony service. It is a tec
 
 ## What the project includes
 
-- a phone-like interface for calls, recents, contacts, and messaging flows
+- a phone-like interface for calls, contacts, keypad, messaging, and Gridchat flows
 - local mesh discovery and connectivity over Wi-Fi, swarm, hop, and nearby Bluetooth paths
 - permission-aware onboarding and an explicit consent gate before startup
 - self-hosted hub and bridge components for local deployment

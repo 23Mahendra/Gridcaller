@@ -61,6 +61,7 @@ let connectedAt = 0;
 let hasRemoteDesc = false;
 let callGen = 0; // ignore stale async from previous call
 let lifecycleListenerRegistered = false;
+let lastIncomingAlertCallId = "";
 
 let state: CallUiState = {
   phase: "idle",
@@ -189,6 +190,7 @@ function cleanupMedia() {
   pendingOffer = null;
   pendingIce = [];
   hasRemoteDesc = false;
+  lastIncomingAlertCallId = "";
   if (ringTimeout) {
     clearTimeout(ringTimeout);
     ringTimeout = null;
@@ -425,28 +427,31 @@ function showIncoming(peerId: string, peerName: string, callId: string, video: b
   resumeAudioContext();
   const cid = callId || state.callId || `in_${Date.now()}`;
   const who = peerName || peerId || "GridCaller";
-  try {
-    startRingtone();
-  } catch {}
-  try {
-    navigator.vibrate?.([500, 120, 500, 120, 500, 120, 500]);
-  } catch {}
-  // Full-screen + notification + vibrate even when app background / screen off
-  void nativeIncomingCall(who, cid);
-  try {
-    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
-      new Notification("Incoming GridCaller", {
-        body: who,
-        tag: "gc-call",
-        requireInteraction: true,
-      });
-    } else if (typeof Notification !== "undefined" && Notification.permission === "default") {
-      void Notification.requestPermission();
-    }
-  } catch {}
-  try {
-    document.title = "📞 Incoming — " + who;
-  } catch {}
+  if (lastIncomingAlertCallId !== cid) {
+    lastIncomingAlertCallId = cid;
+    try {
+      startRingtone();
+    } catch {}
+    try {
+      navigator.vibrate?.([500, 120, 500, 120, 500, 120, 500]);
+    } catch {}
+    // Full-screen + notification + vibrate even when app background / screen off
+    void nativeIncomingCall(who, cid);
+    try {
+      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+        new Notification("Incoming GridCaller", {
+          body: who,
+          tag: "gc-call",
+          requireInteraction: true,
+        });
+      } else if (typeof Notification !== "undefined" && Notification.permission === "default") {
+        void Notification.requestPermission();
+      }
+    } catch {}
+    try {
+      document.title = "📞 Incoming — " + who;
+    } catch {}
+  }
   setState({
     phase: "incoming",
     peerId,

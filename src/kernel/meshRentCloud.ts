@@ -13,11 +13,10 @@ import { S } from "./storage";
 import { bus } from "./bus";
 import { MeshEngine } from "./mesh";
 import { meshEconomy } from "./meshEconomy";
-import { gunStore } from "../plugins/gunStore";
 import { deviceVault } from "./deviceVault";
 import { compressBytes, decompressBytes, formatBytes } from "./compress";
-import { ollamaEngine } from "./ollamaEngine";
 import omniMesh from "./omniMeshEngine";
+import { ollamaEngine } from "./ollamaEngine";
 import {
   applyRentSplit,
   getPoolBalances,
@@ -82,6 +81,7 @@ export interface TrainContribution {
   steps: number;
   samples: number;
   loss?: number;
+  lossSource?: "reported" | "proxy";
   nodeId: string;
   rewardGC: number;
   ts: number;
@@ -104,6 +104,23 @@ const KEYS = {
   balance: "mesh_earn_balance_gc",
   accepting: "mesh_rent_accepting",
 };
+
+type GunStoreLike = {
+  ensure?: () => unknown;
+  put: (path: string, data: any) => void;
+  once: (path: string) => Promise<any>;
+};
+
+let gunStorePromise: Promise<GunStoreLike | null> | null = null;
+
+async function getGunStore(): Promise<GunStoreLike | null> {
+  if (!gunStorePromise) {
+    gunStorePromise = import("../plugins/gunStore")
+      .then((mod) => mod.gunStore as GunStoreLike)
+      .catch(() => null);
+  }
+  return gunStorePromise;
+}
 
 function uid(p = "x") {
   return `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -155,6 +172,8 @@ function fromB64(s: string) {
 class MeshRentCloud {
   private started = false;
   private unsubMesh: (() => void) | null = null;
+  private advertiseTimer: ReturnType<typeof setInterval> | null = null;
+  private rebalanceTimer: ReturnType<typeof setInterval> | null = null;
 
   start() {
     if (this.started) return;
@@ -177,11 +196,11 @@ class MeshRentCloud {
     });
 
     // Advertise + auto re-measure capacity periodically
-    setInterval(() => {
+    this.rebalanceTimer = setInterval(() => {
       this.advertiseOffer();
       if (getAutoRentConfig().enabled) void this.runAutoRent();
     }, 60000);
-    setInterval(() => this.advertiseOffer(), 12000);
+    this.advertiseTimer = setInterval(() => this.advertiseOffer(), 12000);
     this.advertiseOffer();
 
     bus.emit("meshRent:ready", this.getStatus());
@@ -210,6 +229,21 @@ class MeshRentCloud {
       honesty:
         "Auto-rent free capacity. Gross GC split: Public 60% · Owner 20% · Maintenance 10% · Mesh reserve 10%. Browser work units: WebGPU/Ollama/encrypted storage.",
     };
+  }
+
+  stop() {
+    this.started = false;
+    if (this.advertiseTimer) clearInterval(this.advertiseTimer);
+    if (this.rebalanceTimer) clearInterval(this.rebalanceTimer);
+    this.advertiseTimer = null;
+    this.rebalanceTimer = null;
+    try {
+      this.unsubMesh?.();
+    } catch {}
+    this.unsubMesh = null;
+    try {
+      meshEconomy.stop();
+    } catch {}
   }
 
   getOffer(): RentOffer {
@@ -282,13 +316,18 @@ class MeshRentCloud {
     try {
       MeshEngine.broadcast("MESH_RENT_OFFER", offer);
     } catch {}
-    try {
-      gunStore.ensure?.();
-      gunStore.put(`gridalive.rent.offers.${offer.nodeId}`, offer);
-    } catch {}
-    try {
-      void omniMesh.send("MESH_RENT_OFFER", offer, { priority: "presence", ttl: 8 });
-    } catch {}
+    void (async () => {
+      try {
+        const store = await getGunStore();
+        store?.ensure?.();
+        store?.put(`gridalive.rent.offers.${offer.nodeId}`, offer);
+      } catch {}
+    })();
+    void (async () => {
+      try {
+        void omniMesh.send("MESH_RENT_OFFER", offer, { priority: "presence", ttl: 8 });
+      } catch {}
+    })();
   }
 
   /**
@@ -410,15 +449,16 @@ class MeshRentCloud {
     const CHUNK = 4000;
     const n = Math.ceil(b64data.length / CHUNK);
     try {
-      gunStore.ensure?.();
+      const store = await getGunStore();
+      store?.ensure?.();
       for (let i = 0; i < n; i++) {
-        gunStore.put(`gridalive.cloud.blob.${id}.${i}`, {
+        store?.put(`gridalive.cloud.blob.${id}.${i}`, {
           i,
           n,
           d: b64data.slice(i * CHUNK, (i + 1) * CHUNK),
         });
       }
-      gunStore.put(`gridalive.cloud.meta.${id}`, {
+      store?.put(`gridalive.cloud.meta.${id}`, {
         id,
         name,
         n,
@@ -473,10 +513,11 @@ class MeshRentCloud {
     const meta = (S.get(KEYS.cloudIndex, []) as CloudObjectMeta[]).find((m) => m.id === id);
     let b64data = "";
     try {
-      gunStore.ensure?.();
+      const store = await getGunStore();
+      store?.ensure?.();
       const n = meta?.shards || 1;
       for (let i = 0; i < n; i++) {
-        const part = await gunStore.once(`gridalive.cloud.blob.${id}.${i}`);
+        const part = store ? await store.once(`gridalive.cloud.blob.${id}.${i}`) : null;
         if (part?.d) b64data += part.d;
       }
     } catch {}
@@ -510,10 +551,13 @@ class MeshRentCloud {
     const jobs = S.get(KEYS.jobs, []) as ClusterJob[];
     S.set(KEYS.jobs, [full, ...jobs].slice(0, 100));
     MeshEngine.broadcast("MESH_CLUSTER_JOB", full);
-    gunStore.ensure?.();
-    try {
-      gunStore.put(`gridalive.cluster.jobs.${full.id}`, full);
-    } catch {}
+    void (async () => {
+      try {
+        const store = await getGunStore();
+        store?.ensure?.();
+        store?.put(`gridalive.cluster.jobs.${full.id}`, full);
+      } catch {}
+    })();
     // Try local worker immediately
     void this.tryWorkJob(full);
     return full;
@@ -526,8 +570,9 @@ class MeshRentCloud {
   private async tryWorkJob(job: ClusterJob) {
     if (!S.get(KEYS.accepting, false)) return;
     const offer = this.getOffer();
-    if (job.type === "inference" || job.type === "train_step") {
-      if (!offer.gpuShare && job.type === "train_step") return;
+    if (job.type === "train_step") {
+      // Local Ollama CPU workers are valid trainers even when the browser exposes no GPU.
+      if (!offer.gpuShare && !ollamaEngine.available) return;
     }
     job.status = "running";
     job.workerId = nodeId();
@@ -545,7 +590,7 @@ class MeshRentCloud {
                 role: "system",
                 content:
                   job.type === "train_step"
-                    ? "You are a training assistant. Given the following text, provide concise feedback on its quality and suggest one concrete improvement."
+                    ? "You are a training helper. Summarize optimization feedback in one short line."
                     : "Answer briefly.",
               },
               { role: "user", content: String(job.payload?.prompt || job.payload?.text || "ok") },
@@ -554,17 +599,15 @@ class MeshRentCloud {
           });
           result = { text: r.message?.content, model, evalCount: r.evalCount };
           if (job.type === "train_step") {
-            // Compute a real proxy loss: nanoseconds-per-token derived from Ollama's actual
-            // timing. Faster / more decisive responses → lower loss proxy (higher quality).
-            // Clamped to [0.01, 1.99] to match the expected loss range in the UI ledger.
-            const nsPerToken = r.totalDuration / Math.max(1, r.evalCount);
-            const proxyLoss = Math.max(0.01, Math.min(1.99, nsPerToken / 5e8));
+            const rawLoss = Number(job.payload?.loss);
+            const loss = Number.isFinite(rawLoss) && rawLoss >= 0 ? rawLoss : undefined;
             const tc: TrainContribution = {
               id: uid("tr"),
               modelName: model,
               steps: 1,
               samples: Number(job.payload?.samples || 1),
-              loss: proxyLoss,
+              loss,
+              lossSource: loss === undefined ? undefined : "reported",
               nodeId: nodeId(),
               rewardGC: job.rewardGC,
               ts: Date.now(),
@@ -572,35 +615,55 @@ class MeshRentCloud {
             const log = S.get(KEYS.train, []) as TrainContribution[];
             S.set(KEYS.train, [tc, ...log].slice(0, 200));
             this.credit(job.rewardGC, "train", `Train step on ${model}`);
+            result = {
+              ...result,
+              train: {
+                samples: tc.samples,
+                steps: tc.steps,
+                reportedLoss: tc.loss ?? null,
+                lossSource: tc.lossSource || "none",
+              },
+            };
           } else {
             this.credit(job.rewardGC, "gpu_job", `Inference job ${job.id}`);
           }
         } else {
-          result = { text: "No local model — job deferred", deferred: true };
+          result = {
+            text: "No local model available on this worker",
+            deferred: true,
+            reason: "ollama-unavailable",
+          };
         }
       } else if (job.type === "embed") {
-        const embedText = String(job.payload?.text || job.payload?.prompt || "");
-        if (embedText && ollamaEngine.available) {
-          // Try the job-specified model first, then nomic-embed-text, then the default model.
-          const candidates = [job.model, "nomic-embed-text", ollamaEngine.defaultModel].filter(Boolean) as string[];
-          let embedding: number[] | null = null;
-          let usedModel = "";
-          for (const candidate of candidates) {
-            try {
-              embedding = await ollamaEngine.embed(embedText, candidate);
-              usedModel = candidate;
-              break;
-            } catch { /* try next candidate */ }
-          }
-          if (embedding) {
-            result = { embedding, model: usedModel, dims: embedding.length };
-          } else {
-            result = { error: "No embedding model available — install nomic-embed-text via Ollama" };
-          }
+        const text = String(job.payload?.text || job.payload?.prompt || "").trim();
+        const model = String(job.model || "nomic-embed-text").trim();
+        if (!text) {
+          result = {
+            ok: false,
+            deferred: true,
+            reason: "empty-input",
+            model,
+          };
+        } else if (!ollamaEngine.available) {
+          result = {
+            ok: false,
+            deferred: true,
+            reason: "ollama-unavailable",
+            model,
+          };
         } else {
-          result = { error: "No Ollama model available for embedding" };
+          const embedding = await ollamaEngine.embed(text, model);
+          if (!Array.isArray(embedding) || embedding.length === 0) {
+            throw new Error("embedding failed");
+          }
+          result = {
+            ok: true,
+            model,
+            dimensions: embedding.length,
+            vectorPreview: embedding.slice(0, 8),
+          };
+          this.credit(job.rewardGC, "gpu_job", `Embed job ${job.id} (${model})`);
         }
-        this.credit(Math.max(1, job.rewardGC / 2), "gpu_job", "Embed job");
       } else if (job.type === "compress") {
         const raw = String(job.payload?.text || "");
         const packed = await compressBytes(raw);
@@ -642,8 +705,7 @@ class MeshRentCloud {
   private async onMesh(msg: any) {
     if (!msg?.type) return;
     if (msg.type === "MESH_CLOUD_PIN" && S.get(KEYS.accepting, false) && msg.data?.id) {
-      // Pin announce — credit tiny host intent
-      this.credit(0.5, "cloud_host", `Pin offer ${msg.data.name || msg.data.id}`);
+      // Pin intent is not billable until actual storage work is executed.
     }
     if (msg.type === "MESH_CLUSTER_JOB" && msg.data?.id && msg.from !== nodeId()) {
       const job = msg.data as ClusterJob;
@@ -654,16 +716,9 @@ class MeshRentCloud {
     }
   }
 
-  /** Simulate daily rent accrual for offered capacity (heartbeat earnings) */
+  /** No passive simulated rent accrual; earnings require executed work. */
   tickRentAccrual() {
-    if (!S.get(KEYS.accepting, false)) return;
-    const offer = this.getOffer();
-    const rates = getNetworkRates();
-    // Continuous earn from owner-published rates
-    const storageEarn = (offer.storageMB / 1024) * (rates.rateStoragePerMbDay / 24 / 60);
-    const ramEarn = (offer.ramMB / 512) * (rates.rateRamPerMbHour / 60);
-    const total = Math.max(rates.minRewardGC, storageEarn + ramEarn + rates.rateOnlineTickBase);
-    this.credit(Math.round(total * 100) / 100, "rent_storage", "Online capacity rent tick");
+    return;
   }
 }
 

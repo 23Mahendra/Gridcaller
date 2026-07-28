@@ -40,6 +40,25 @@ export default defineConfig({
     commonjsOptions: {
       transformMixedEsModules: true,
     },
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          const normalized = id.replace(/\\/g, "/");
+          if (!normalized.includes("/node_modules/")) return;
+          if (/\/node_modules\/(react|react-dom|scheduler)\//.test(normalized)) return "vendor-react";
+          if (normalized.includes("/node_modules/@capacitor/")) return "vendor-capacitor";
+          if (normalized.includes("/node_modules/leaflet/")) return "vendor-maps";
+          if (normalized.includes("/node_modules/gun/")) return "vendor-gun";
+          if (/\/node_modules\/(peerjs|simple-peer|trystero|libp2p|peer|uuid|ws)\//.test(normalized)) {
+            return "vendor-mesh";
+          }
+          if (normalized.includes("/node_modules/@sentry/")) return "vendor-sentry";
+          if (normalized.includes("/node_modules/lucide-react/")) return "vendor-icons";
+          return "vendor-misc";
+        },
+      },
+    },
+    chunkSizeWarningLimit: 700,
   },
   optimizeDeps: {
     include: ["peerjs", "gun/gun", "trystero", "qrcode"],

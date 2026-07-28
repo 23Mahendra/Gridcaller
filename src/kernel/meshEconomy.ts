@@ -9,6 +9,7 @@ import { S } from "./storage";
 import { bus } from "./bus";
 import { MeshEngine } from "./mesh";
 import { applyRentSplit, RENT_SPLIT, getActiveSplit } from "./rentProfitSplit";
+import { resolveHubHttp } from "./meshHubConfig";
 
 // ─── Types ───────────────────────────────────
 
@@ -459,6 +460,7 @@ class MeshEconomyEngine {
   private _revenueConfig: RevenueConfig;
   private _resourceLimits: ResourceLimits;
   private _resourcePool: ResourcePool;
+  private usageAccountingEnabled = true;
 
   constructor() {
     // Load persisted state
@@ -566,7 +568,6 @@ class MeshEconomyEngine {
     this.uptimeTimer = setInterval(() => {
       this.nodeStats.uptime += 60;
       this.updateTier();
-      this.tickPassiveEarnings();
       this.persist();
     }, 60_000);
 
@@ -710,40 +711,49 @@ class MeshEconomyEngine {
 
   // ─── Passive Earnings (per-minute tick) ──────
 
-  /** Auto-earn from always-on resource services */
+  /** Passive synthetic accrual is disabled; only executed work can earn. */
   private tickPassiveEarnings() {
-    const res = this._deviceResources;
+    return;
+  }
 
-    // RAM sharing: earn per MB·minute
-    if (this.activeServices.has("ram_share") && res.ramSharedMB > 0) {
-      const mbMinutes = res.ramSharedMB / 60; // convert to MB·hour rate
-      this.recordContribution("ram_share", mbMinutes, "mesh_pool");
-      this.nodeStats.ramSharedMB += res.ramSharedMB;
-    }
+  private async hashUsagePayload(payload: any): Promise<string> {
+    const txt = JSON.stringify(payload);
+    try {
+      if (crypto?.subtle) {
+        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(txt));
+        return Array.from(new Uint8Array(digest))
+          .map((b) => b.toString(16).padStart(2, "0"))
+          .join("");
+      }
+    } catch {}
+    let h = 0;
+    for (let i = 0; i < txt.length; i++) h = (h * 31 + txt.charCodeAt(i)) >>> 0;
+    return `fallback_${h.toString(16)}`;
+  }
 
-    // Disk lease: earn per GB·minute (fraction of monthly rate)
-    if (this.activeServices.has("disk_lease") && res.storageLeasedMB > 0) {
-      const gbMonthFraction = (res.storageLeasedMB / 1024) / (30 * 24 * 60);
-      this.recordContribution("disk_lease", gbMonthFraction, "mesh_pool");
-      this.nodeStats.diskLeasedMB = res.storageLeasedMB;
-    }
-
-    // GPU cluster: if shared, earn per minute
-    if (this.activeServices.has("gpu_cluster") && res.gpuShared) {
-      this.recordContribution("gpu_cluster", 1, "mesh_pool");
-      this.nodeStats.gpuTasksCompleted += 1;
-    }
-
-    // Bandwidth selling: earn per MB passively when online
-    if (this.activeServices.has("bandwidth_sell") && res.isOnline && res.bandwidthUpMbps > 0) {
-      const mbPerMinute = (res.bandwidthUpMbps * 60) / 8 * 0.05; // ~5% utilization
-      this.recordContribution("bandwidth_sell", mbPerMinute, "mesh_pool");
-      this.nodeStats.bandwidthSoldMB += mbPerMinute;
-      res.bandwidthSoldMB += mbPerMinute;
-      res.bandwidthEarned = this.contributions
-        .filter(c => c.serviceId === "bandwidth_sell")
-        .reduce((s, c) => s + c.coinsEarned, 0);
-    }
+  private async pushUsageReceipt(serviceId: MeshService, units: number, peerId: string, amountCredited: number) {
+    if (!this.usageAccountingEnabled || units <= 0 || amountCredited <= 0) return;
+    const payload = {
+      nodeId: this.nodeStats.nodeId,
+      serviceId,
+      units: Math.round(units * 1000000) / 1000000,
+      amountCredited: Math.round(amountCredited * 1000000) / 1000000,
+      currency: "usage_credits",
+      executed: true,
+      peerId,
+      ts: Date.now(),
+      nonce: crypto.randomUUID(),
+    };
+    const receiptHash = await this.hashUsagePayload(payload);
+    try {
+      const hub = resolveHubHttp().replace(/\/$/, "");
+      await fetch(`${hub}/api/accounting/usage/record`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...payload, receiptHash }),
+        signal: AbortSignal.timeout(5000),
+      });
+    } catch {}
   }
 
   // ─── Service Management ──────────────────────
@@ -1039,6 +1049,8 @@ class MeshEconomyEngine {
       platformCoins,
       totalEarnings: this.getTotalEarnings(),
     }, "meshEconomy");
+
+    void this.pushUsageReceipt(serviceId, units, peerId, userCoins);
 
     return userCoins;
   }

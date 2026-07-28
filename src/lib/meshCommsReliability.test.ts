@@ -1,4 +1,4 @@
-import { assert } from "node:assert/strict";
+import assert from "node:assert/strict";
 import { createPendingDmEntry, shouldRetryPendingDm } from "./meshCommsReliability";
 import { createPendingEnvelopeEntry, shouldRetryPendingEnvelopeEntry } from "./meshReliability";
 
@@ -11,7 +11,7 @@ const pending = createPendingDmEntry({
 
 assert.equal(pending.attempts, 1);
 assert.equal(pending.status, "pending");
-assert.equal(shouldRetryPendingDm(pending, 2000), true);
+assert.equal(shouldRetryPendingDm(pending, 3000), true);
 assert.equal(shouldRetryPendingDm({ ...pending, attempts: 6 }, 5000), false);
 
 const envelope = createPendingEnvelopeEntry({

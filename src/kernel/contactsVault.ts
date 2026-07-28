@@ -8,6 +8,7 @@
 
 import { S } from "./storage";
 import { bus } from "./bus";
+import { deviceVault } from "./deviceVault";
 
 export type ContactSource = "manual" | "device" | "mesh" | "import";
 
@@ -28,6 +29,14 @@ export interface GridContact {
 }
 
 const KEY = "gridcaller_contacts_v1";
+const DB_KEY = "gridcaller.contacts";
+
+function mirrorToDeviceVault(key: string, value: unknown) {
+  if (typeof window === "undefined" || typeof indexedDB === "undefined") return;
+  try {
+    void deviceVault.put(key, value).catch(() => {});
+  } catch {}
+}
 
 function uid() {
   return `ct_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -82,6 +91,8 @@ function sortPhones(phones: string[]) {
 }
 
 class ContactsVault {
+  private hydrated = false;
+
   getPrimaryPhone(contact: GridContact | null | undefined): string {
     if (!contact) return "";
     return sortPhones(contact.phones || [])[0] || "";
@@ -99,7 +110,29 @@ class ContactsVault {
 
   private save(rows: GridContact[]) {
     S.set(KEY, rows);
+    mirrorToDeviceVault(DB_KEY, rows);
     bus.emit("contacts:changed", { count: rows.length });
+  }
+
+  async initLocalDb() {
+    if (this.hydrated) return this.list();
+    this.hydrated = true;
+    try {
+      await deviceVault.init();
+    } catch {
+      deviceVault.ensure();
+    }
+    try {
+      const stored = await deviceVault.get<GridContact[]>(DB_KEY);
+      if (Array.isArray(stored) && stored.length) {
+        const current = (S.get(KEY, []) as GridContact[]) || [];
+        if (!current.length) {
+          S.set(KEY, stored);
+          bus.emit("contacts:changed", { count: stored.length });
+        }
+      }
+    } catch {}
+    return this.list();
   }
 
   get(id: string): GridContact | null {
@@ -232,16 +265,16 @@ class ContactsVault {
         const count = this.importMany(mapped, "device");
         return { ok: true, count };
       }
-      return {
-        ok: false,
-        count: 0,
-        error: "Contacts import is unavailable on this browser.",
-      };
+      return await this.importFromFileFallback();
     } catch (e: any) {
       if (e?.name === "InvalidStateError" || /cancel/i.test(String(e?.message))) {
         return { ok: false, count: 0, error: "Cancelled" };
       }
-      return { ok: false, count: 0, error: e?.message || "Import failed" };
+      try {
+        return await this.importFromFileFallback();
+      } catch {
+        return { ok: false, count: 0, error: e?.message || "Import failed" };
+      }
     }
   }
 
@@ -274,6 +307,95 @@ class ContactsVault {
     } catch (e: any) {
       return { ok: false, count: 0, error: e?.message || "Parse error" };
     }
+  }
+
+  private async pickImportFile(): Promise<File | null> {
+    return await new Promise((resolve) => {
+      try {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = ".json,.csv,.vcf,.vcard,text/csv,text/vcard,application/json";
+        input.onchange = () => resolve(input.files?.[0] || null);
+        input.oncancel = () => resolve(null as File | null);
+        input.click();
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  private parseCsv(raw: string) {
+    const lines = raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (lines.length < 2) return [] as Array<{ name?: string; phones?: string[]; email?: string | string[] }>;
+    const headers = lines[0].split(",").map((h) => h.trim().toLowerCase());
+    const nameIndex = headers.findIndex((h) => h === "name" || h === "full name" || h === "displayname");
+    const phoneIndex = headers.findIndex((h) => h === "phone" || h === "mobile" || h === "tel" || h === "number");
+    const emailIndex = headers.findIndex((h) => h === "email" || h === "e-mail");
+    return lines.slice(1).map((line) => {
+      const cells = line.split(",").map((cell) => cell.trim().replace(/^"|"$/g, ""));
+      return {
+        name: nameIndex >= 0 ? cells[nameIndex] : cells[0],
+        phones: phoneIndex >= 0 && cells[phoneIndex] ? [cells[phoneIndex]] : [],
+        email: emailIndex >= 0 ? cells[emailIndex] : undefined,
+      };
+    });
+  }
+
+  private parseVcard(raw: string) {
+    const cards = raw.split(/END:VCARD/i);
+    const rows: Array<{ name?: string; phones?: string[]; email?: string[] }> = [];
+    for (const card of cards) {
+      const block = card.trim();
+      if (!block) continue;
+      const lines = block.split(/\r?\n/).map((line) => line.trim());
+      let name = "";
+      const phones: string[] = [];
+      const emails: string[] = [];
+      for (const line of lines) {
+        if (!name && /^FN[:;]/i.test(line)) {
+          name = line.split(":").slice(1).join(":").trim();
+          continue;
+        }
+        if (!name && /^N[:;]/i.test(line)) {
+          const parts = line.split(":").slice(1).join(":").split(";").filter(Boolean);
+          name = parts.reverse().join(" ").trim();
+          continue;
+        }
+        if (/^TEL/i.test(line)) {
+          const value = line.split(":").slice(1).join(":").trim();
+          if (value) phones.push(value);
+          continue;
+        }
+        if (/^EMAIL/i.test(line)) {
+          const value = line.split(":").slice(1).join(":").trim();
+          if (value) emails.push(value);
+        }
+      }
+      if (name || phones.length || emails.length) {
+        rows.push({ name: name || "Unknown", phones, email: emails });
+      }
+    }
+    return rows;
+  }
+
+  private async importFromFileFallback(): Promise<{ ok: boolean; count: number; error?: string }> {
+    const file = await this.pickImportFile();
+    if (!file) return { ok: false, count: 0, error: "Cancelled" };
+    const raw = await file.text();
+    const lower = file.name.toLowerCase();
+    if (lower.endsWith(".json")) return this.importJson(raw);
+    if (lower.endsWith(".vcf") || lower.endsWith(".vcard")) {
+      const count = this.importMany(this.parseVcard(raw), "import");
+      return { ok: true, count };
+    }
+    if (lower.endsWith(".csv")) {
+      const count = this.importMany(this.parseCsv(raw), "import");
+      return { ok: true, count };
+    }
+    return { ok: false, count: 0, error: "Unsupported contact file. Use JSON, CSV, or VCF." };
   }
 
   /** Sync mesh online peers into contacts (non-destructive merge; skip unchanged) */

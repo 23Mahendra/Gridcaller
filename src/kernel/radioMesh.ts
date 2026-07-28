@@ -12,13 +12,14 @@
 
 import { S } from "./storage";
 import { MeshEngine } from "./mesh";
-import { setForceLocalMesh } from "./offlineMode";
+import { getForceLocalMesh, setForceLocalMesh } from "./offlineMode";
 import { bus } from "./bus";
 
 const CH_KEY = "gc_radio_channel";
 const SECRET_KEY = "gc_radio_secret";
 const RADIO_ON_KEY = "gc_radio_mode";
 const RADIO_ID_KEY = "gc_radio_id";
+const RADIO_PREV_MESH_KEY = "gc_radio_prev_mesh_mode_v1";
 
 export type RadioPeer = {
   id: string;
@@ -125,9 +126,17 @@ class FreeRadioMesh {
   }
 
   async enable(on: boolean) {
+    const wasOn = this.on;
+    const privacyManaged = S.get("gc_privacy_mode_v1", false) === true;
     this.on = on;
     S.set(RADIO_ON_KEY, on);
     if (on) {
+      if (!wasOn && !privacyManaged) {
+        S.set(RADIO_PREV_MESH_KEY, {
+          forceLocalMesh: getForceLocalMesh(),
+          allowCloudGun: S.get("gc_allow_cloud_gun", false) === true,
+        });
+      }
       // Radio doctrine: never cloud track
       setForceLocalMesh(true);
       await this.ensureKey();
@@ -135,6 +144,16 @@ class FreeRadioMesh {
       this.startBeacon();
       this.beacon();
     } else {
+      if (wasOn && !privacyManaged) {
+        const prev = S.get(RADIO_PREV_MESH_KEY, null) as
+          | { forceLocalMesh?: boolean; allowCloudGun?: boolean }
+          | null;
+        if (prev && typeof prev === "object") {
+          setForceLocalMesh(prev.forceLocalMesh === true);
+          S.set("gc_allow_cloud_gun", prev.allowCloudGun === true);
+          S.set(RADIO_PREV_MESH_KEY, null);
+        }
+      }
       this.stopBeacon();
     }
     bus.emit("radioMesh:mode", { on });
@@ -207,6 +226,7 @@ class FreeRadioMesh {
 
   private hookMesh() {
     if (this.hooked) return;
+    if (typeof window === "undefined" && typeof localStorage === "undefined") return;
     this.hooked = true;
     MeshEngine.onMessage((msg: any) => {
       if (!this.on) return;

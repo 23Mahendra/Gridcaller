@@ -19,6 +19,9 @@
 import { bus } from "./bus";
 import { S } from "./storage";
 import { MeshEngine } from "./mesh";
+import { deviceVault } from "./deviceVault";
+import Gun from "gun/gun";
+import { gunPeersForMesh } from "./offlineMode";
 import { isOwnerUser } from "../accessPolicy";
 
 // ─── Types ───────────────────────────────────────────────────────
@@ -100,6 +103,27 @@ export interface SafetyLedgerEntry {
   purposeTag: "public_safety" | "national_security_ready" | "commerce" | "ops";
 }
 
+export interface LocalCommLogEntry {
+  id: string;
+  ts: number;
+  refId?: string;
+  kind: "call" | "message" | "block";
+  direction: "in" | "out" | "missed" | "blocked";
+  folder?: "inbox" | "sent" | "received" | "draft" | "outbox" | "deleted" | "trash" | "blocked";
+  peerId?: string;
+  peerNumber?: string;
+  peerName?: string;
+  method?: string;
+  durationSec?: number;
+  textPreview?: string;
+  attachmentName?: string;
+  attachmentKind?: string;
+  attachmentSize?: number;
+  reason?: string;
+  deviceSerial: string;
+  myNumber?: string;
+}
+
 export interface VipListing {
   number: string;
   display: string;
@@ -130,9 +154,17 @@ const KEYS = {
   localDir: "grid_number_directory",
   vipPool: "grid_vip_pool",
   ledger: "grid_safety_ledger",
+  localCommLog: "grid_local_comm_log",
   policyAck: "grid_number_policy_ack",
   issueCounter: "grid_number_issue_counter",
 };
+
+function mirrorToDeviceVault(key: string, value: unknown) {
+  if (typeof window === "undefined" || typeof indexedDB === "undefined") return;
+  try {
+    void deviceVault.put(key, value).catch(() => {});
+  } catch {}
+}
 
 const POLICY: GridNumberPolicy = {
   version: 1,
@@ -224,20 +256,26 @@ function simpleHash(text: string): string {
 
 /** Browser/device fingerprint for serial stability */
 async function deviceFingerprint(): Promise<string> {
-  const parts = [
-    navigator.userAgent || "",
-    navigator.language || "",
-    String(screen?.width || 0),
-    String(screen?.height || 0),
-    String(screen?.colorDepth || 0),
-    String((navigator as any).deviceMemory || ""),
-    String(navigator.hardwareConcurrency || ""),
-    Intl.DateTimeFormat().resolvedOptions().timeZone || "",
-    S.get("omni_node_id", "") || "",
-  ];
-  const raw = parts.join("|");
-  const hex = await sha256Hex(raw);
-  return hex.slice(0, 24);
+  try {
+    const nav = typeof navigator !== "undefined" ? navigator : ({} as Navigator);
+    const scr = typeof screen !== "undefined" ? screen : ({} as Screen);
+    const parts = [
+      nav.userAgent || "",
+      nav.language || "",
+      String((scr as any).width || 0),
+      String((scr as any).height || 0),
+      String((scr as any).colorDepth || 0),
+      String((nav as any).deviceMemory || ""),
+      String(nav.hardwareConcurrency || ""),
+      Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+      S.get("omni_node_id", "") || "",
+    ];
+    const raw = parts.join("|");
+    const hex = await sha256Hex(raw);
+    return hex.slice(0, 24);
+  } catch {
+    return "000000000000000000000000";
+  }
 }
 
 function platformLabel(): string {
@@ -301,9 +339,14 @@ class GridNumberRegistry {
 
   start(user?: { id?: string; name?: string; role?: string }) {
     if (this.started) {
-      // refresh lastSeen
-      this.touchSerial();
-      return this.getMyIdentity();
+      const serialRec = S.get(KEYS.serialRec, null) as DeviceSerialRecord | null;
+      const myNumberRec = S.get(KEYS.myNumberRec, null) as GridNumberRecord | null;
+      if (serialRec?.serial && myNumberRec?.number) {
+        // refresh lastSeen
+        this.touchSerial();
+        return this.getMyIdentity();
+      }
+      this.started = false;
     }
     this.started = true;
 
@@ -337,6 +380,17 @@ class GridNumberRegistry {
       this.listVipForSale().length
     );
     return this.getMyIdentity();
+  }
+
+  stop() {
+    this.started = false;
+    try {
+      this.gun?.off?.();
+    } catch {}
+    try {
+      this.gun?.bye?.();
+    } catch {}
+    this.gun = null;
   }
 
   acknowledgePolicy(): void {
@@ -771,7 +825,9 @@ class GridNumberRegistry {
   private saveLedger(entries: SafetyLedgerEntry[]) {
     // Cap retention roughly by count (~3 years of events at high volume still bounded)
     const max = 5000;
-    S.set(KEYS.ledger, entries.slice(-max));
+    const next = entries.slice(-max);
+    S.set(KEYS.ledger, next);
+    mirrorToDeviceVault(KEYS.ledger, next);
   }
 
   appendLedger(
@@ -804,15 +860,113 @@ class GridNumberRegistry {
     return entry;
   }
 
+  private loadLocalCommLog(): LocalCommLogEntry[] {
+    return (S.get(KEYS.localCommLog, []) as LocalCommLogEntry[]) || [];
+  }
+
+  private saveLocalCommLog(entries: LocalCommLogEntry[]) {
+    const max = 5000;
+    const next = entries.slice(-max);
+    S.set(KEYS.localCommLog, next);
+    mirrorToDeviceVault(KEYS.localCommLog, next);
+  }
+
+  private appendLocalCommLog(
+    partial: Omit<LocalCommLogEntry, "id" | "ts" | "deviceSerial" | "myNumber"> & { ts?: number }
+  ): LocalCommLogEntry {
+    const prev = this.loadLocalCommLog();
+    if (partial.refId) {
+      const existing = [...prev]
+        .reverse()
+        .find(
+          (row) =>
+            row.refId === partial.refId &&
+            row.kind === partial.kind &&
+            row.direction === partial.direction &&
+            row.folder === partial.folder
+        );
+      if (existing) return existing;
+    }
+    const me = this.getMyNumber();
+    const entry: LocalCommLogEntry = {
+      id: uid("lcl"),
+      ts: partial.ts || Date.now(),
+      refId: partial.refId,
+      kind: partial.kind,
+      direction: partial.direction,
+      folder: partial.folder,
+      peerId: partial.peerId,
+      peerNumber: partial.peerNumber,
+      peerName: partial.peerName,
+      method: partial.method,
+      durationSec: partial.durationSec,
+      textPreview: partial.textPreview,
+      attachmentName: partial.attachmentName,
+      attachmentKind: partial.attachmentKind,
+      attachmentSize: partial.attachmentSize,
+      reason: partial.reason,
+      deviceSerial: this.getDeviceSerial(),
+      myNumber: me?.number,
+    };
+    prev.push(entry);
+    this.saveLocalCommLog(prev);
+    bus.emit("gridNumber:local_comm_log", entry);
+    return entry;
+  }
+
+  getLocalCommLog(limit = 200): LocalCommLogEntry[] {
+    const serial = this.getDeviceSerial();
+    return this.loadLocalCommLog()
+      .filter((entry) => entry.deviceSerial === serial)
+      .slice(-limit);
+  }
+
+  deleteLocalCommLogEntry(id: string) {
+    if (!id) return false;
+    const serial = this.getDeviceSerial();
+    const prev = this.loadLocalCommLog();
+    const next = prev.filter((entry) => !(entry.id === id && entry.deviceSerial === serial));
+    if (next.length === prev.length) return false;
+    this.saveLocalCommLog(next);
+    bus.emit("gridNumber:local_comm_log_deleted", { id, deviceSerial: serial });
+    return true;
+  }
+
+  clearLocalCommLog() {
+    const serial = this.getDeviceSerial();
+    const prev = this.loadLocalCommLog();
+    const next = prev.filter((entry) => entry.deviceSerial !== serial);
+    if (next.length === prev.length) return 0;
+    const removed = prev.length - next.length;
+    this.saveLocalCommLog(next);
+    bus.emit("gridNumber:local_comm_log_cleared", { removed, deviceSerial: serial });
+    return removed;
+  }
+
   /** Record call for safety trail (called from GridCaller) */
   logCall(opts: {
-    dir: "out" | "in" | "missed";
+    dir: "out" | "in" | "missed" | "blocked";
     peerNumber?: string;
     peerName?: string;
     peerId?: string;
     method?: string;
     durationSec?: number;
+    reason?: string;
+    refId?: string;
   }) {
+    const localEntry = this.appendLocalCommLog({
+      refId: opts.refId,
+      kind: "call",
+      direction: opts.dir,
+      folder: opts.dir === "blocked" ? "blocked" : undefined,
+      peerId: opts.peerId,
+      peerNumber: opts.peerNumber || opts.peerId,
+      peerName: opts.peerName,
+      method: opts.method,
+      durationSec: opts.durationSec || 0,
+      reason: opts.reason,
+    });
+    if (opts.dir === "blocked") return localEntry;
     const me = this.getMyNumber();
     const type: SafetyEventType =
       opts.dir === "missed" ? "call_missed" : opts.dir === "in" ? "call_received" : "call_placed";
@@ -825,7 +979,72 @@ class GridNumberRegistry {
       peerNumber: opts.peerNumber || opts.peerId,
       peerName: opts.peerName,
       purposeTag: "public_safety",
-      meta: { method: opts.method, durationSec: opts.durationSec || 0 },
+      meta: { method: opts.method, durationSec: opts.durationSec || 0, peerId: opts.peerId, reason: opts.reason },
+    });
+  }
+
+  logMessage(opts: {
+    direction: "in" | "out" | "blocked";
+    folder?: "inbox" | "sent" | "received" | "draft" | "outbox" | "deleted" | "trash" | "blocked";
+    peerId?: string;
+    peerNumber?: string;
+    peerName?: string;
+    text?: string;
+    attachment?: { kind?: string; name?: string; size?: number } | null;
+    method?: string;
+    reason?: string;
+    refId?: string;
+    ts?: number;
+  }) {
+    const attachment = opts.attachment || undefined;
+    const localEntry = this.appendLocalCommLog({
+      refId: opts.refId,
+      ts: opts.ts,
+      kind: "message",
+      direction: opts.direction,
+      folder: opts.folder || (opts.direction === "out" ? "sent" : opts.direction === "in" ? "inbox" : "blocked"),
+      peerId: opts.peerId,
+      peerNumber: opts.peerNumber || opts.peerId,
+      peerName: opts.peerName,
+      method: opts.method,
+      textPreview: String(opts.text || "").trim().slice(0, 280),
+      attachmentName: attachment?.name,
+      attachmentKind: attachment?.kind,
+      attachmentSize: attachment?.size,
+      reason: opts.reason,
+    });
+    if (opts.direction !== "out") return localEntry;
+    const me = this.getMyNumber();
+    this.appendLedger({
+      type: "sms_sent",
+      number: me?.number,
+      deviceSerial: this.getDeviceSerial(),
+      userId: me?.userId,
+      userName: me?.userName,
+      peerNumber: opts.peerNumber || opts.peerId,
+      peerName: opts.peerName,
+      purposeTag: "public_safety",
+      meta: {
+        method: opts.method,
+        folder: opts.folder || "sent",
+        peerId: opts.peerId,
+        textLength: String(opts.text || "").length,
+        hasAttachment: !!attachment,
+      },
+    });
+    return localEntry;
+  }
+
+  logBlock(opts: { peerId?: string; peerNumber?: string; peerName?: string; action: "blocked" | "unblocked"; reason?: string }) {
+    return this.appendLocalCommLog({
+      kind: "block",
+      direction: "blocked",
+      folder: "blocked",
+      peerId: opts.peerId,
+      peerNumber: opts.peerNumber || opts.peerId,
+      peerName: opts.peerName,
+      reason: opts.reason || opts.action,
+      method: opts.action,
     });
   }
 
@@ -951,12 +1170,11 @@ class GridNumberRegistry {
   private async publishDirectory(num: GridNumberRecord | null, serial: DeviceSerialRecord) {
     if (!num) return;
     try {
-      // Reuse global gun peers if gun is available via window / dynamic
-      const Gun = (await import("gun/gun")).default;
-      const peers = [
+      const peers = gunPeersForMesh([
         "https://gun-manhattan.herokuapp.com/gun",
         "https://gunjs.herokuapp.com/gun",
-      ];
+      ]);
+      if (!peers.length) return;
       this.gun = Gun({ peers, localStorage: false, radisk: false, multicast: false });
       const payload = {
         number: num.number,
@@ -986,10 +1204,14 @@ class GridNumberRegistry {
     const local = this.resolve(d);
     if (local) return { number: local.number, name: local.userName, nodeId: local.nodeId };
     try {
+      const peers = gunPeersForMesh([
+        "https://gun-manhattan.herokuapp.com/gun",
+        "https://gunjs.herokuapp.com/gun",
+      ]);
+      if (!peers.length) return null;
       if (!this.gun) {
-        const Gun = (await import("gun/gun")).default;
         this.gun = Gun({
-          peers: ["https://gun-manhattan.herokuapp.com/gun", "https://gunjs.herokuapp.com/gun"],
+          peers,
           localStorage: false,
           radisk: false,
         });

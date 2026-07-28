@@ -21,6 +21,8 @@ export type PendingEnvelopeEntry = {
   status: "pending" | "sent" | "acked";
 };
 
+export const PENDING_OUTBOUND_MAX_AGE_MS = 10 * 60 * 1000;
+
 export function createPendingOutboundMessage(input: {
   id: string;
   type: string;
@@ -58,18 +60,20 @@ export function createPendingEnvelopeEntry(input: {
 export function shouldRetryPendingOutboundMessage(
   entry: PendingOutboundMessage,
   now: number,
-  minGapMs = 2000
+  minGapMs = 2000,
+  maxAgeMs = PENDING_OUTBOUND_MAX_AGE_MS
 ): boolean {
   if (entry.status === "sent") return false;
-  if (entry.attempts >= 6) return false;
+  if (now - entry.createdAt > maxAgeMs) return false;
   const sinceLast = now - (entry.lastAttemptAt ?? entry.createdAt);
-  return sinceLast >= minGapMs;
+  const retryGap = Math.min(30000, minGapMs * Math.max(1, entry.attempts));
+  return sinceLast >= retryGap;
 }
 
 export function shouldRetryPendingEnvelopeEntry(
   entry: PendingEnvelopeEntry,
   now: number,
-  minGapMs = 2000
+  minGapMs = 1000
 ): boolean {
   if (entry.status === "sent" || entry.status === "acked") return false;
   if (entry.attempts >= 6) return false;

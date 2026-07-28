@@ -6,6 +6,7 @@
 import { Share } from "@capacitor/share";
 import { Capacitor } from "@capacitor/core";
 import { ensureHubDefaults, getDefaultHubHttp, resolveHubHttp } from "../kernel/meshHubConfig";
+import { getHubHttp } from "./identity";
 
 export type ShareFile = {
   name: string;

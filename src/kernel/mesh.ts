@@ -8,7 +8,12 @@ import type { MeshEngineAPI } from "./types";
 import { S } from "./storage";
 import { resolveHubHttp, resolveMeshWsUrl, ensureHubDefaults } from "./meshHubConfig";
 import { endPeerConnection, tryBeginPeerConnection } from "./networkGuard";
-import { createPendingOutboundMessage, shouldRetryPendingOutboundMessage, type PendingOutboundMessage } from "../lib/meshReliability";
+import {
+  PENDING_OUTBOUND_MAX_AGE_MS,
+  createPendingOutboundMessage,
+  shouldRetryPendingOutboundMessage,
+  type PendingOutboundMessage,
+} from "../lib/meshReliability";
 import { createLocalMeshEnvelope, readLocalMeshEnvelope } from "./serverlessMesh";
 
 let meshBC: BroadcastChannel | null = null;
@@ -16,13 +21,15 @@ let meshBCListenerAttached = false;
 let meshWs: WebSocket | null = null;
 let meshWsTimer: ReturnType<typeof setTimeout> | null = null;
 let meshConnected = false;
-let pollTimer: ReturnType<typeof setInterval> | null = null;
+let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let pollAfter = 0;
 let lastRegister = 0;
 let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let wsReconnectAttempt = 0;
 let pendingOutbound: PendingOutboundMessage[] = [];
 let pendingOutboundTimer: ReturnType<typeof setInterval> | null = null;
+let httpFailureStreak = 0;
+let lastWsFailureLogAt = 0;
 
 try {
   meshBC = new BroadcastChannel("gridalive-mesh");
@@ -88,7 +95,7 @@ function myIdentity() {
 
 async function httpRegister(engine: any) {
   const now = Date.now();
-  if (now - lastRegister < 2500) return;
+  if (now - lastRegister < 2500) return false;
   lastRegister = now;
   const hub = meshHubHttp();
   const id = engine.localId;
@@ -134,9 +141,12 @@ async function httpRegister(engine: any) {
           })
         );
       } catch {}
+      return true;
     }
+    return false;
   } catch {
     /* offline */
+    return false;
   }
 }
 
@@ -153,7 +163,7 @@ async function httpPoll(engine: any) {
     const r = await fetch(`${hub}/api/mesh/poll?${q}`, {
       signal: AbortSignal.timeout(8000),
     });
-    if (!r.ok) return;
+    if (!r.ok) return false;
     const j = await r.json();
     if (Array.isArray(j.messages)) {
       for (const e of j.messages) {
@@ -208,9 +218,33 @@ async function httpPoll(engine: any) {
         );
       } catch {}
     }
+    return true;
   } catch {
     /* offline */
+    return false;
   }
+}
+
+function nextHttpBusDelay() {
+  if (httpFailureStreak <= 0) return 500;
+  if (httpFailureStreak === 1) return 1200;
+  if (httpFailureStreak === 2) return 2500;
+  return Math.min(12000, 4000 + (httpFailureStreak - 3) * 2000);
+}
+
+async function runHttpBusTick(engine: any) {
+  const [registered, polled] = await Promise.all([httpRegister(engine), httpPoll(engine)]);
+  httpFailureStreak = registered || polled ? 0 : Math.min(httpFailureStreak + 1, 8);
+  pollTimer = setTimeout(() => {
+    void runHttpBusTick(engine);
+  }, nextHttpBusDelay());
+}
+
+function logMeshWsFailure(error: unknown, url: string) {
+  const now = Date.now();
+  if (now - lastWsFailureLogAt < 30000) return;
+  lastWsFailureLogAt = now;
+  console.warn("[MeshEngine] mesh-ws failed", error, url);
 }
 
 function savePendingOutbound() {
@@ -239,6 +273,13 @@ function queuePendingOutbound(msg: any) {
 
 function flushPendingOutbound(engine: any, now = Date.now()) {
   if (!pendingOutbound.length) return;
+  const pruned = pendingOutbound.filter(
+    (entry) => entry.status !== "sent" && now - entry.createdAt <= PENDING_OUTBOUND_MAX_AGE_MS
+  );
+  if (pruned.length !== pendingOutbound.length) {
+    pendingOutbound = pruned;
+    savePendingOutbound();
+  }
   for (const entry of [...pendingOutbound]) {
     if (entry.status === "sent") continue;
     if (!shouldRetryPendingOutboundMessage(entry, now)) continue;
@@ -258,10 +299,6 @@ function flushPendingOutbound(engine: any, now = Date.now()) {
         body: JSON.stringify(entry.payload),
       }).catch(() => {});
     } catch {}
-    if (entry.attempts >= 6) {
-      entry.status = "sent";
-      savePendingOutbound();
-    }
   }
 }
 
@@ -271,13 +308,8 @@ function startHttpBus(engine: any) {
   if (!pendingOutboundTimer) {
     pendingOutboundTimer = setInterval(() => flushPendingOutbound(engine, Date.now()), 2500);
   }
-  void httpRegister(engine);
-  void httpPoll(engine);
-  // Fast poll so call signaling (OFFER/ANSWER/ICE) arrives quickly on 2 phones
-  pollTimer = setInterval(() => {
-    void httpRegister(engine);
-    void httpPoll(engine);
-  }, 500);
+  httpFailureStreak = 0;
+  void runHttpBusTick(engine);
 }
 
 function connectMeshWs(engine: any) {
@@ -295,6 +327,7 @@ function connectMeshWs(engine: any) {
     ws.onopen = () => {
       meshConnected = true;
       wsReconnectAttempt = 0;
+      httpFailureStreak = 0;
       flushPendingOutbound(engine, Date.now());
       try {
         const name = S.get("mesh_name") || S.get("user_name") || engine.localId;
@@ -346,7 +379,7 @@ function connectMeshWs(engine: any) {
       meshConnected = false;
     };
   } catch (e) {
-    console.warn("[MeshEngine] mesh-ws failed", e, url);
+    logMeshWsFailure(e, url);
     meshConnected = false;
     if (meshWsTimer) clearTimeout(meshWsTimer);
     const backoff = Math.min(20000, 3000 * Math.pow(2, wsReconnectAttempt));

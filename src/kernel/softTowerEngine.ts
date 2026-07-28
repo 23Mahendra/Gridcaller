@@ -22,9 +22,11 @@
 import { bus } from "./bus";
 import { S } from "./storage";
 import { MeshEngine } from "./mesh";
+import Gun from "gun/gun";
 import gridNumberRegistry, { normalizeGridNumber, formatGridNumber } from "./gridNumberRegistry";
 import globalCall from "./globalCallEngine";
 import meshComms from "./meshCommsEngine";
+import { gunPeersForMesh, useLocalMeshOnly } from "./offlineMode";
 
 export type SoftTowerResolve = {
   ok: boolean;
@@ -134,8 +136,6 @@ class SoftTowerEngine {
 
   private async initGun() {
     try {
-      const { gunPeersForMesh, useLocalMeshOnly } = await import("./offlineMode");
-      const Gun = (await import("gun/gun")).default;
       // Flight mode: no public Gun — local graph only (SIM not required)
       const peers = gunPeersForMesh(
         useLocalMeshOnly()
@@ -336,8 +336,9 @@ class SoftTowerEngine {
     try {
       const list = meshComms.getPeers?.() || meshComms.nearbyPeers || [];
       for (const peer of list) {
-        const pid = peer.peerId || peer.id;
-        const phone = digitsOnly(peer.phone || peer.userPhone || "");
+        const p_ = peer as any;
+        const pid = peer.peerId || p_.id;
+        const phone = digitsOnly(peer.phone || p_.userPhone || "");
         for (const p of perms) {
           if (
             pid === p ||

@@ -8,6 +8,12 @@ import { Capacitor } from "@capacitor/core";
 const DEFAULT_LAN = "192.168.1.8";
 const DEFAULT_PORT = "8765";
 const LOCALHOST_FALLBACK = "127.0.0.1";
+const PROBE_SUCCESS_CACHE_MS = 2500;
+const PROBE_FAILURE_CACHE_MS = 8000;
+
+type HubProbeResult = { ok: boolean; peers: number; meshWs: number; lan?: string[]; error?: string };
+
+const hubProbeCache = new Map<string, { at: number; result: HubProbeResult }>();
 
 export function getDefaultHubHttp(): string {
   if (typeof window !== "undefined") {
@@ -29,6 +35,17 @@ function localMeshFallback(): string {
 
 function isLocalPreviewHost(hostname: string): boolean {
   return /^(localhost|127\.0\.0\.1|0\.0\.0\.0|::1)$/i.test(hostname);
+}
+
+function normalizeHubKey(hub: string): string {
+  return String(hub || "").replace(/\/$/, "");
+}
+
+function cloneProbeResult(result: HubProbeResult): HubProbeResult {
+  return {
+    ...result,
+    lan: Array.isArray(result.lan) ? [...result.lan] : undefined,
+  };
 }
 
 /** Resolve hub HTTP for mesh register / publish / share */
@@ -127,24 +144,41 @@ export function ensureHubDefaults(): { hub: string; signal: string } {
 /** Probe hub health */
 export async function probeHub(
   hub = resolveHubHttp()
-): Promise<{ ok: boolean; peers: number; meshWs: number; lan?: string[]; error?: string }> {
+) : Promise<HubProbeResult> {
+  const key = normalizeHubKey(hub);
+  const cached = hubProbeCache.get(key);
+  const now = Date.now();
+  if (cached) {
+    const ttl = cached.result.ok ? PROBE_SUCCESS_CACHE_MS : PROBE_FAILURE_CACHE_MS;
+    if (now - cached.at < ttl) {
+      return cloneProbeResult(cached.result);
+    }
+  }
   try {
-    const r = await fetch(`${hub.replace(/\/$/, "")}/api/health`, {
+    const r = await fetch(`${key}/api/health`, {
       signal: AbortSignal.timeout(5000),
     });
-    if (!r.ok) return { ok: false, peers: 0, meshWs: 0, error: `HTTP ${r.status}` };
+    if (!r.ok) {
+      const result = { ok: false, peers: 0, meshWs: 0, error: `HTTP ${r.status}` };
+      hubProbeCache.set(key, { at: now, result });
+      return cloneProbeResult(result);
+    }
     const j = await r.json();
     const httpN = Array.isArray(j.httpMeshPeers) ? j.httpMeshPeers.length : 0;
     const wsN = Array.isArray(j.meshPeers) ? j.meshPeers.length : 0;
-    return {
+    const result = {
       ok: !!j.ok,
       // Prefer HTTP peer count (APK path) over WS-only
       peers: Math.max(httpN, wsN, Number(j.meshWsClients || 0)),
       meshWs: Number(j.meshWsClients || 0),
       lan: j.lan,
     };
+    hubProbeCache.set(key, { at: now, result });
+    return cloneProbeResult(result);
   } catch (e: any) {
-    return { ok: false, peers: 0, meshWs: 0, error: e?.message || "unreachable" };
+    const result = { ok: false, peers: 0, meshWs: 0, error: e?.message || "unreachable" };
+    hubProbeCache.set(key, { at: now, result });
+    return cloneProbeResult(result);
   }
 }
 

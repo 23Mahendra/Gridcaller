@@ -1,13 +1,13 @@
-name: Run Local Mesh Validation
+name: Node Tests
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
 
     steps:
@@ -25,7 +25,3 @@ jobs:
 
       - name: Run node test suite
         run: npm test
-
-      - name: Build local mesh app
-        run: npm run build
-

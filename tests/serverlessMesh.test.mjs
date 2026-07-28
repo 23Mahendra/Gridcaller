@@ -18,6 +18,9 @@ const tempFile = path.resolve(process.cwd(), '.tmp-serverless-mesh.mjs');
 fs.writeFileSync(tempFile, transpiled);
 
 const mod = await import(pathToFileURL(tempFile).href);
+try {
+  fs.unlinkSync(tempFile);
+} catch {}
 const { encryptText, decryptText } = mod;
 
 test('encrypts and decrypts mesh payloads locally', () => {

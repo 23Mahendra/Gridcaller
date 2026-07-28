@@ -136,6 +136,10 @@ export interface MeshEngineAPI {
   localId: string;
   peers: Record<string, any>;
   initWebRTC?: () => RTCPeerConnection | null;
+  /** Start the mesh engine (optional — not all implementations expose this) */
+  start?: (name?: string) => void;
+  /** Update the local display name (optional) */
+  setName?: (name: string) => void;
 }
 
 /** Toolbar/bottom nav item */

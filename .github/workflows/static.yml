@@ -1,0 +1,10 @@
+# This workflow is superseded by jekyll-gh-pages.yml which builds the Vite app
+# before deploying. This file is kept for reference only.
+name: Deploy static content to Pages (disabled)
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "This workflow is disabled. Use jekyll-gh-pages.yml instead."
+        required: false

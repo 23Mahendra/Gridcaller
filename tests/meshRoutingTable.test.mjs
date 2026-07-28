@@ -18,6 +18,9 @@ const tempFile = path.resolve(process.cwd(), '.tmp-mesh-routing-table.mjs');
 fs.writeFileSync(tempFile, transpiled);
 
 const mod = await import(pathToFileURL(tempFile).href);
+try {
+  fs.unlinkSync(tempFile);
+} catch {}
 const { MeshRoutingTable } = mod;
 
 test('prefers lower-cost routes and remembers direct neighbors', () => {

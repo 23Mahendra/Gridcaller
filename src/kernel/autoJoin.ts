@@ -509,7 +509,6 @@ export async function startFullAutoJoin(userName?: string): Promise<AutoJoinStat
             const reply = buildHandshakeReply({
               id: MeshEngine.localId,
               name: meName(),
-              handle: String(S.get("global_call_handle", "") || "").replace(/^@/, ""),
               phone: String(S.get("user_phone", "") || "").replace(/\D/g, ""),
               ts: now,
             }, id);
@@ -544,13 +543,4 @@ export function stopFullAutoJoin() {
   helloTimer = null;
 }
 
-// Eager boot
-try {
-  if (typeof window !== "undefined") {
-    ensureHubDefaults();
-    unifyLocalIdentity();
-    setTimeout(() => {
-      void startFullAutoJoin();
-    }, 400);
-  }
-} catch {}
+// Auto-join is started explicitly from app bootstrap after consent/runtime setup.
