@@ -91,7 +91,7 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages.length]);
 
   // ─── Chat ──────────────────────────────────────────────────────────────
 
