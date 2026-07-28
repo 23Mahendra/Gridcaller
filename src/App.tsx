@@ -24,6 +24,8 @@ import { startNetworkHandoff } from "./kernel/networkHandoff";
 import { ensureMeshIdentity, syncLocalDeviceIdentity } from "./mesh/identity";
 import { ConsentGate } from "./ui/ConsentGate";
 import { getConsentState } from "./kernel/consent";
+import SetupWizard, { isWizardDone } from "./setup/SetupWizard";
+import localAiEngine from "./kernel/localAiEngine";
 
 function userFromStorage() {
   return {
@@ -51,11 +53,19 @@ export default function App() {
   const user = userFromStorage();
   const dark = S.get("dark_mode", true) !== false;
   const [consentReady, setConsentReady] = useState(() => getConsentState().agreed);
+  const [wizardDone, setWizardDone] = useState(() => isWizardDone());
   const [permNote, setPermNote] = useState("");
   const [otaNote, setOtaNote] = useState("");
   const [otaInfo, setOtaInfo] = useState<UpdateInfo | null>(null);
   const [pathNote, setPathNote] = useState("");
   const [autoJoinNote, setAutoJoinNote] = useState("Auto-joining mesh");
+
+  // Start background AI monitoring as soon as app is ready
+  useEffect(() => {
+    if (!consentReady) return;
+    localAiEngine.startMonitoring();
+    return () => localAiEngine.stopMonitoring();
+  }, [consentReady]);
 
   useEffect(() => {
     if (!consentReady) return;
@@ -218,72 +228,95 @@ export default function App() {
       <div
         className="gc-app-shell"
         style={{
-        height: "100%",
-        width: "100%",
-        maxWidth: "100%",
-        margin: 0,
-        overflow: "hidden",
-        position: "relative",
-        background: dark ? "#000" : "#F2F2F7",
-        display: "flex",
-        flexDirection: "column",
-        minHeight: 0,
-        minWidth: 0,
-        boxSizing: "border-box",
-      }}
-    >
-      {permNote ? (
-        <div
-          style={{
-            flexShrink: 0,
-            fontSize: 11,
-            padding: "6px 12px",
-            background: "#FF950022",
-            color: dark ? "#ffd60a" : "#9a6700",
-            lineHeight: 1.35,
-            zIndex: 50,
-          }}
-        >
-          {permNote}
-        </div>
-      ) : null}
-      {otaNote ? (
-        <div
-          style={{
-            flexShrink: 0,
-            fontSize: 11,
-            padding: "6px 12px",
-            background: "#0a84ff22",
-            color: dark ? "#64d2ff" : "#0071e3",
-            lineHeight: 1.35,
-            zIndex: 50,
-            display: "flex",
-            gap: 8,
-            alignItems: "center",
-            justifyContent: "space-between",
-          }}
-        >
-          <span style={{ flex: 1 }}>{otaNote}</span>
-          {otaInfo?.available ? (
-            <button
-              type="button"
-              onClick={() => void applyUpdate(otaInfo)}
-              style={{
-                border: "none",
-                borderRadius: 8,
-                padding: "4px 10px",
-                background: "#0a84ff",
-                color: "#fff",
-                fontWeight: 700,
-                fontSize: 11,
-                cursor: "pointer",
+          height: "100%",
+          width: "100%",
+          maxWidth: "100%",
+          margin: 0,
+          overflow: "hidden",
+          position: "relative",
+          background: dark ? "#000" : "#F2F2F7",
+          display: "flex",
+          flexDirection: "column",
+          minHeight: 0,
+          minWidth: 0,
+          boxSizing: "border-box",
+        }}
+      >
+        {/* First-launch setup wizard */}
+        {consentReady && !wizardDone && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              zIndex: 999,
+              background: dark ? "#000" : "#F2F2F7",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              overflowY: "auto",
+              padding: "env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px)",
+            }}
+          >
+            <SetupWizard
+              onComplete={() => {
+                setWizardDone(true);
               }}
-            >
-              Install
-            </button>
-          ) : null}
-        </div>
-      ) : null}
+            />
+          </div>
+        )}
+
+        {permNote ? (
+          <div
+            style={{
+              flexShrink: 0,
+              fontSize: 11,
+              padding: "6px 12px",
+              background: "#FF950022",
+              color: dark ? "#ffd60a" : "#9a6700",
+              lineHeight: 1.35,
+              zIndex: 50,
+            }}
+          >
+            {permNote}
+          </div>
+        ) : null}
+        {otaNote ? (
+          <div
+            style={{
+              flexShrink: 0,
+              fontSize: 11,
+              padding: "6px 12px",
+              background: "#0a84ff22",
+              color: dark ? "#64d2ff" : "#0071e3",
+              lineHeight: 1.35,
+              zIndex: 50,
+              display: "flex",
+              gap: 8,
+              alignItems: "center",
+              justifyContent: "space-between",
+            }}
+          >
+            <span style={{ flex: 1 }}>{otaNote}</span>
+            {otaInfo?.available ? (
+              <button
+                type="button"
+                onClick={() => void applyUpdate(otaInfo)}
+                style={{
+                  border: "none",
+                  borderRadius: 8,
+                  padding: "4px 10px",
+                  background: "#0a84ff",
+                  color: "#fff",
+                  fontWeight: 700,
+                  fontSize: 11,
+                  cursor: "pointer",
+                }}
+              >
+                Install
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         <div
           style={{
             flex: 1,
