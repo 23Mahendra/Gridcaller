@@ -312,6 +312,24 @@ type Tab = "mesh" | "contacts" | "keypad" | "sms" | "groups" | "logs";
 
 type GridchatFilter = "all" | "unread" | "favourites";
 
+type MeshVisibleUser = {
+  id: string;
+  name: string;
+  online: boolean;
+  distance?: number;
+  handle?: string;
+  phone?: string;
+  displayNumber?: string;
+  lat?: number;
+  lng?: number;
+};
+
+type MeshGraphNode = MeshVisibleUser & {
+  xPct: number;
+  yPct: number;
+  hasLiveLocation: boolean;
+};
+
 function initials(n: string) {
   const p = (n || "?").trim().split(/\s+/);
   return ((p[0]?.[0] || "?") + (p[1]?.[0] || "")).toUpperCase();
@@ -561,7 +579,15 @@ export default function GridCaller({
   });
   const [q, setQ] = useState("");
   const [peers, setPeers] = useState<
-    { id: string; name: string; online: boolean; distance?: number; handle?: string; phone?: string }[]
+    {
+      id: string;
+      name: string;
+      online: boolean;
+      distance?: number;
+      handle?: string;
+      phone?: string;
+      displayNumber?: string;
+    }[]
   >([]);
   const [sms, setSms] = useState<SmsRow[]>(() => S.get("gridcaller_sms", []));
   const [blocked, setBlocked] = useState<string[]>(() => S.get("gridcaller_blocked", []));
@@ -1675,13 +1701,14 @@ export default function GridCaller({
           distance?: number;
           handle?: string;
           phone?: string;
+          displayNumber?: string;
         }[] = [];
         const seen = new Set<string>();
         const add = (
           id: string,
           name: string,
           online: boolean,
-          extra?: { handle?: string; phone?: string }
+          extra?: { handle?: string; phone?: string; displayNumber?: string }
         ) => {
           if (!id || blocked.includes(id) || seen.has(id)) return;
           if (id === "hub-pc") return; // not a call target
@@ -1706,6 +1733,7 @@ export default function GridCaller({
             online,
             handle: extra?.handle,
             phone: extra?.phone,
+            displayNumber: extra?.displayNumber,
           });
         };
 
@@ -1715,6 +1743,7 @@ export default function GridCaller({
           add(id, v?.name || id.slice(0, 12), Date.now() - (v?.lastSeen || 0) < 90000, {
             handle: v?.handle,
             phone: v?.phone,
+            displayNumber: v?.displayNumber,
           });
         }
 
@@ -1726,6 +1755,7 @@ export default function GridCaller({
             add(p.id, p.name || p.handle || p.id, online, {
               handle: p.handle,
               phone: p.phone,
+              displayNumber: p.displayNumber,
             });
           }
         } catch {}
@@ -1746,7 +1776,10 @@ export default function GridCaller({
 
         try {
           for (const p of getAutoMeshPeers()) {
-            add(p.id, p.name, p.online !== false);
+            add(p.id, p.name, p.online !== false, {
+              phone: p.phone,
+              displayNumber: p.displayNumber,
+            });
           }
         } catch {}
 
@@ -1903,6 +1936,17 @@ export default function GridCaller({
           system: !!msg.data.system,
         };
         setGroupMessages((prev) => (prev.some((x) => x.id === row.id) ? prev : [...prev, row].slice(-1200)));
+        if (!row.system) {
+          try {
+            if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+              new Notification(row.fromName, {
+                body: row.text || (row.attachment ? "📎 Attachment" : "New group message"),
+                tag: `gc-grp-${row.groupId}`,
+                silent: false,
+              });
+            }
+          } catch {}
+        }
       }
 
       if (msg?.type === "GRID_GROUP_CALL_INVITE" && msg.data?.groupId) {
@@ -1969,6 +2013,15 @@ export default function GridCaller({
             ? p
             : [...p, row]
         );
+        try {
+          if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+            new Notification(row.name, {
+              body: row.text || (row.attachment ? "📎 Attachment" : "New message"),
+              tag: `gc-msg-${row.peerId}`,
+              silent: false,
+            });
+          }
+        } catch {}
         try {
           gridNumberRegistry.logMessage({
             direction: "in",
@@ -2349,14 +2402,29 @@ export default function GridCaller({
         }
         const center: [number, number] = myGps
           ? [myGps.lat, myGps.lng]
-          : meshMapPeers[0]
-            ? [meshMapPeers[0].lat, meshMapPeers[0].lng]
+          : radarPeers[0]
+            ? [radarPeers[0].lat, radarPeers[0].lng]
             : [20.5937, 78.9629]; // India default
-        const map = L.map(mapBoxRef.current, { zoomControl: true }).setView(center, myGps || meshMapPeers.length ? 12 : 5);
+        const map = L.map(mapBoxRef.current, { zoomControl: true }).setView(center, myGps || radarPeers.length ? 12 : 5);
         L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
           attribution: "© OpenStreetMap",
           maxZoom: 19,
         }).addTo(map);
+        const popupNode = (title: string, lines: string[]) => {
+          const root = document.createElement("div");
+          const head = document.createElement("div");
+          head.textContent = title;
+          head.style.fontWeight = "700";
+          head.style.marginBottom = "4px";
+          root.appendChild(head);
+          for (const line of lines.filter(Boolean)) {
+            const row = document.createElement("div");
+            row.textContent = line;
+            row.style.fontSize = "12px";
+            root.appendChild(row);
+          }
+          return root;
+        };
         const icon = (color: string) =>
           L.divIcon({
             className: "",
@@ -2367,14 +2435,25 @@ export default function GridCaller({
         if (myGps) {
           L.marker([myGps.lat, myGps.lng], { icon: icon("#0a84ff") })
             .addTo(map)
-            .bindPopup(`You · ${myName}`);
+            .bindPopup(
+              popupNode(`You · ${myName}`, [
+                `ID: ${String(MeshEngine.localId || S.get("mesh_id", "") || "").trim() || "local-device"}`,
+                `Number: ${myGridDisplay || resolveMyPublicNumber() || "Unavailable"}`,
+              ])
+            );
         }
         const bounds: [number, number][] = [];
         if (myGps) bounds.push([myGps.lat, myGps.lng]);
-        for (const p of meshMapPeers) {
+        for (const p of radarPeers) {
           L.marker([p.lat, p.lng], { icon: icon(p.online ? "#30d158" : "#98989f") })
             .addTo(map)
-            .bindPopup(`${p.name}${p.distance != null ? ` · ${Math.round(p.distance)}m` : ""}`);
+            .bindPopup(
+              popupNode(p.name, [
+                `ID: ${p.id}`,
+                `User: ${formatMeshUserId(p)}`,
+                p.distance != null ? `Distance: ${Math.round(p.distance)}m` : "",
+              ])
+            );
           bounds.push([p.lat, p.lng]);
         }
         if (bounds.length > 1) {
@@ -2395,7 +2474,7 @@ export default function GridCaller({
       } catch {}
       mapObjRef.current = null;
     };
-  }, [menuOpen, menuView, meshMapPeers, myGps, myName]);
+  }, [menuOpen, menuView, radarPeers, myGps, myName, myGridDisplay]);
 
   const networkPeopleCount = useMemo(() => {
     // Real connected devices only (no fabric ghosts / self duplicates)
@@ -2405,6 +2484,46 @@ export default function GridCaller({
     });
     return onlineCount;
   }, [peers, globalPeers, towerTick]);
+
+  const meshVisibleUsers = useMemo<MeshVisibleUser[]>(() => {
+    const merged = new Map<string, MeshVisibleUser>();
+    const add = (entry: Partial<MeshVisibleUser> & { id?: string }) => {
+      const id = String(entry.id || "").trim();
+      if (!id || blocked.includes(id) || isSelfPeer(id)) return;
+      const prev = merged.get(id);
+      merged.set(id, {
+        id,
+        name: String(entry.name || prev?.name || id.slice(0, 12)).trim() || id.slice(0, 12),
+        online: entry.online ?? prev?.online ?? true,
+        distance: entry.distance ?? prev?.distance,
+        handle: entry.handle ?? prev?.handle,
+        phone: entry.phone ?? prev?.phone,
+        displayNumber: entry.displayNumber ?? prev?.displayNumber,
+        lat: entry.lat ?? prev?.lat,
+        lng: entry.lng ?? prev?.lng,
+      });
+    };
+
+    for (const peer of peers) add(peer);
+    for (const peer of meshMapPeers) add(peer);
+
+    return Array.from(merged.values()).sort((a, b) => {
+      if (a.online !== b.online) return a.online ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+  }, [blocked, meshMapPeers, peers]);
+
+  const radarPeers = useMemo(
+    () =>
+      meshVisibleUsers.filter(
+        (peer): peer is MeshVisibleUser & { lat: number; lng: number } =>
+          typeof peer.lat === "number" &&
+          typeof peer.lng === "number" &&
+          Number.isFinite(peer.lat) &&
+          Number.isFinite(peer.lng)
+      ),
+    [meshVisibleUsers]
+  );
 
   const refreshIdentityUi = (snapshot = getLocalDeviceIdentity()) => {
     setIdentityStatus(snapshot);
@@ -4369,6 +4488,46 @@ export default function GridCaller({
     setGroupSelectMode(false);
   };
 
+  const copyTextToClipboard = (text: string, label = "Copied") => {
+    if (!text.trim()) return;
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(
+        () => { setContactBusy(label); setTimeout(() => setContactBusy(""), 1400); },
+        () => { setErr("Copy failed — clipboard blocked"); },
+      );
+    } else {
+      try {
+        const el = document.createElement("textarea");
+        el.value = text;
+        el.style.cssText = "position:fixed;opacity:0;top:-9999px";
+        document.body.appendChild(el);
+        el.select();
+        document.execCommand("copy");
+        document.body.removeChild(el);
+        setContactBusy(label);
+        setTimeout(() => setContactBusy(""), 1400);
+      } catch {
+        setErr("Copy unavailable");
+      }
+    }
+  };
+
+  const copySelectedDirectMessages = () => {
+    if (!directSelectedMessageIds.length) return;
+    const texts = sms.filter((m) => directSelectedMessageIds.includes(m.id) && m.text).map((m) => m.text);
+    copyTextToClipboard(texts.join("\n"), `${texts.length} message${texts.length !== 1 ? "s" : ""} copied`);
+    setDirectSelectedMessageIds([]);
+    setDirectSelectMode(false);
+  };
+
+  const copySelectedGroupMessages = () => {
+    if (!groupSelectedMessageIds.length) return;
+    const texts = groupMessages.filter((m) => groupSelectedMessageIds.includes(m.id) && m.text).map((m) => `${m.fromName}: ${m.text}`);
+    copyTextToClipboard(texts.join("\n"), `${texts.length} message${texts.length !== 1 ? "s" : ""} copied`);
+    setGroupSelectedMessageIds([]);
+    setGroupSelectMode(false);
+  };
+
   const toggleSmsThreadSelection = (peerId: string) => {
     if (!peerId) return;
     setSelectedSmsThreadIds((prev) => (prev.includes(peerId) ? prev.filter((id) => id !== peerId) : [...prev, peerId]));
@@ -4594,6 +4753,22 @@ export default function GridCaller({
               {initials(peerName)}
             </div>
             <div style={{ fontSize: 20, fontWeight: 700, lineHeight: 1.1 }}>{displayId}</div>
+            <div style={{ display: "flex", justifyContent: "center", gap: 8, marginTop: 8 }}>
+              <button
+                type="button"
+                onClick={() => copyTextToClipboard(peerName, "Name copied")}
+                style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.blue, borderRadius: 999, padding: "4px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+              >
+                Copy name
+              </button>
+              <button
+                type="button"
+                onClick={() => copyTextToClipboard(displayId, "ID copied")}
+                style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.label, borderRadius: 999, padding: "4px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+              >
+                Copy ID
+              </button>
+            </div>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 8, marginBottom: 16 }}>
@@ -5629,6 +5804,13 @@ export default function GridCaller({
               </button>
               <button
                 type="button"
+                onClick={copySelectedDirectMessages}
+                style={{ border: "none", background: "transparent", color: tokens.blue, fontWeight: 700, cursor: "pointer" }}
+              >
+                Copy
+              </button>
+              <button
+                type="button"
                 onClick={deleteSelectedDirectMessages}
                 style={{ border: "none", background: "transparent", color: tokens.red, fontWeight: 700, cursor: "pointer" }}
               >
@@ -5756,35 +5938,45 @@ export default function GridCaller({
                     >
                       {isStarred ? <Star size={12} fill="#ffd54a" color="#ffd54a" /> : <StarOff size={12} />}
                     </button>
-                    {directSelectMode ? (
+                   {m.text ? (
                       <button
                         type="button"
-                        title={isSelected ? "Unselect" : "Select"}
-                        onClick={() => toggleDirectMessageSelection(m.id)}
-                        style={{ border: "none", background: "rgba(0,0,0,0.15)", color: "#fff", borderRadius: 10, padding: "2px 6px", cursor: "pointer", display: "inline-flex", alignItems: "center" }}
+                       title="Copy message"
+                       onClick={() => copyTextToClipboard(m.text, "Message copied")}
+                       style={{ border: "none", background: "rgba(0,0,0,0.15)", color: "#fff", borderRadius: 10, padding: "2px 6px", cursor: "pointer", display: "inline-flex", alignItems: "center", fontSize: 11, fontWeight: 700 }}
                       >
-                        {isSelected ? <CheckCircle2 size={12} /> : <Circle size={12} />}
+                       Copy
                       </button>
                     ) : null}
-                    {m.mine && (
+                   {directSelectMode ? (
                       <button
                         type="button"
-                        title="Delete message"
-                        onClick={() => deleteSmsMessage(m.id)}
-                        style={{
-                          border: "none",
-                          background: "rgba(0,0,0,0.15)",
-                          color: "#fff",
-                          borderRadius: 10,
-                          padding: "2px 6px",
-                          cursor: "pointer",
-                          display: "inline-flex",
-                          alignItems: "center",
-                        }}
-                      >
-                        <Trash2 size={12} />
-                      </button>
-                    )}
+                       title={isSelected ? "Unselect" : "Select"}
+                       onClick={() => toggleDirectMessageSelection(m.id)}
+                       style={{ border: "none", background: "rgba(0,0,0,0.15)", color: "#fff", borderRadius: 10, padding: "2px 6px", cursor: "pointer", display: "inline-flex", alignItems: "center" }}
+                     >
+                       {isSelected ? <CheckCircle2 size={12} /> : <Circle size={12} />}
+                     </button>
+                   ) : null}
+                   {m.mine && (
+                     <button
+                       type="button"
+                       title="Delete message"
+                       onClick={() => deleteSmsMessage(m.id)}
+                       style={{
+                         border: "none",
+                         background: "rgba(0,0,0,0.15)",
+                         color: "#fff",
+                         borderRadius: 10,
+                         padding: "2px 6px",
+                         cursor: "pointer",
+                         display: "inline-flex",
+                         alignItems: "center",
+                       }}
+                     >
+                       <Trash2 size={12} />
+                     </button>
+                   )}
                   </div>
                 </div>
               </div>
@@ -6820,6 +7012,35 @@ export default function GridCaller({
                 <span style={{ color: tokens.label, fontSize: 15, fontWeight: 500 }}>
                   Type a phone number or user ID
                 </span>
+              )}
+            </div>
+            <div style={{ display: "flex", justifyContent: "center", gap: 8, marginBottom: 8 }}>
+              <button
+                type="button"
+                title="Paste from clipboard"
+                onClick={() => {
+                  if (navigator.clipboard?.readText) {
+                    navigator.clipboard.readText().then(
+                      (text) => { const t = (text || "").trim(); if (t) setDial((p) => p + t); },
+                      () => setErr("Clipboard read blocked"),
+                    );
+                  } else {
+                    setErr("Clipboard paste not available in this browser");
+                  }
+                }}
+                style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.blue, borderRadius: 999, padding: "5px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
+              >
+                Paste
+              </button>
+              {dial && (
+                <button
+                  type="button"
+                  title="Copy dialled number"
+                  onClick={() => copyTextToClipboard(dial, "Number copied")}
+                  style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.label, borderRadius: 999, padding: "5px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
+                >
+                  Copy
+                </button>
               )}
             </div>
 
@@ -8607,6 +8828,13 @@ export default function GridCaller({
                         </button>
                         <button
                           type="button"
+                          onClick={copySelectedGroupMessages}
+                          style={{ border: "none", background: "transparent", color: tokens.blue, fontWeight: 700, cursor: "pointer" }}
+                        >
+                          Copy
+                        </button>
+                        <button
+                          type="button"
                           onClick={deleteSelectedGroupMessages}
                           style={{ border: "none", background: "transparent", color: tokens.red, fontWeight: 700, cursor: "pointer" }}
                         >
@@ -8699,6 +8927,16 @@ export default function GridCaller({
                                 >
                                   {isStarred ? <Star size={12} fill="#ffd54a" color="#ffd54a" /> : <StarOff size={12} />}
                                 </button>
+                                {m.text ? (
+                                  <button
+                                    type="button"
+                                    title="Copy message"
+                                    onClick={() => copyTextToClipboard(m.text, "Message copied")}
+                                    style={{ border: "none", background: "rgba(0,0,0,0.12)", color: tokens.text, borderRadius: 10, padding: "2px 6px", cursor: "pointer", display: "inline-flex", alignItems: "center", fontSize: 10, fontWeight: 700 }}
+                                  >
+                                    Copy
+                                  </button>
+                                ) : null}
                                 {groupSelectMode ? (
                                   <button
                                     type="button"
@@ -11432,9 +11670,11 @@ export default function GridCaller({
                   ) : (
                     <>
                       {(() => {
-                        const radarPeers = meshMapPeers.slice(0, 40);
+                        const graphUsers = meshVisibleUsers.slice(0, 24);
+                        const graphNodes = buildMeshGraphNodes(graphUsers);
+                        const liveRadarPeers = radarPeers.slice(0, 40);
                         const farthest = myGps
-                          ? radarPeers.reduce((max, p) => Math.max(max, calcDistanceMeters(myGps, p)), 0)
+                          ? liveRadarPeers.reduce((max, p) => Math.max(max, calcDistanceMeters(myGps, p)), 0)
                           : 0;
                         const radarRange = Math.max(200, Math.min(5000, Math.ceil(farthest / 100) * 100 || 300));
                         return (
@@ -11448,8 +11688,114 @@ export default function GridCaller({
                               }}
                             >
                               {myGps
-                                ? `Live nearby users: ${radarPeers.length} · range ${radarRange}m`
-                                : "Enable location to see live nearby users on radar."}
+                                ? `Mesh users visible: ${meshVisibleUsers.length} · live GPS: ${liveRadarPeers.length} · range ${radarRange}m`
+                                : `Mesh users visible: ${meshVisibleUsers.length} · enable location for live movement radar.`}
+                            </div>
+
+                            <div style={{ fontSize: 12, color: tokens.label, fontWeight: 700, marginBottom: 6 }}>
+                              Mesh contact graph
+                            </div>
+
+                            <div
+                              style={{
+                                position: "relative",
+                                width: "100%",
+                                aspectRatio: "1 / 1",
+                                maxHeight: 280,
+                                borderRadius: 14,
+                                border: `1px solid ${tokens.sep}`,
+                                background: `radial-gradient(circle at center, ${tokens.fill}, ${tokens.bg})`,
+                                overflow: "hidden",
+                                marginBottom: 12,
+                              }}
+                            >
+                              <svg
+                                viewBox="0 0 100 100"
+                                preserveAspectRatio="none"
+                                style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
+                              >
+                                {graphNodes.map((node) => (
+                                  <line
+                                    key={`graph-link-${node.id}`}
+                                    x1="50"
+                                    y1="50"
+                                    x2={node.xPct}
+                                    y2={node.yPct}
+                                    stroke={node.online ? tokens.green : tokens.label}
+                                    strokeOpacity={node.online ? 0.45 : 0.2}
+                                    strokeDasharray={node.hasLiveLocation ? "0" : "3 2"}
+                                    strokeWidth="0.7"
+                                  />
+                                ))}
+                              </svg>
+
+                              <div
+                                style={{
+                                  position: "absolute",
+                                  left: "50%",
+                                  top: "50%",
+                                  transform: "translate(-50%, -50%)",
+                                  padding: "8px 10px",
+                                  borderRadius: 12,
+                                  background: `${tokens.blue}22`,
+                                  border: `1px solid ${tokens.blue}55`,
+                                  textAlign: "center",
+                                  minWidth: 92,
+                                }}
+                              >
+                                <div style={{ fontSize: 12, fontWeight: 800, color: tokens.text }}>You</div>
+                                <div style={{ fontSize: 11, color: tokens.blue, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                  {String(MeshEngine.localId || S.get("mesh_id", "") || "local-device")}
+                                </div>
+                              </div>
+
+                              {graphNodes.map((node) => {
+                                const userId = formatMeshUserId(node);
+                                return (
+                                  <div
+                                    key={`graph-node-${node.id}`}
+                                    title={`${node.name} · ${node.id}`}
+                                    style={{
+                                      position: "absolute",
+                                      left: `${node.xPct}%`,
+                                      top: `${node.yPct}%`,
+                                      transform: "translate(-50%, -50%)",
+                                      minWidth: 92,
+                                      maxWidth: 128,
+                                      padding: "6px 8px",
+                                      borderRadius: 12,
+                                      background: tokens.card,
+                                      border: `1px solid ${node.online ? tokens.green : tokens.sep}`,
+                                      boxShadow: tokens.shadow,
+                                    }}
+                                  >
+                                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+                                      <span
+                                        style={{
+                                          width: 8,
+                                          height: 8,
+                                          borderRadius: "50%",
+                                          background: node.online ? tokens.green : tokens.label,
+                                          flexShrink: 0,
+                                        }}
+                                      />
+                                      <span style={{ fontSize: 12, fontWeight: 700, color: tokens.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                        {node.name}
+                                      </span>
+                                    </div>
+                                    <div style={{ fontSize: 10, color: tokens.label, fontFamily: "monospace", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                      ID: {node.id}
+                                    </div>
+                                    <div style={{ fontSize: 10, color: node.hasLiveLocation ? tokens.green : tokens.label, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                      {node.hasLiveLocation ? userId : `${userId} · GPS pending`}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+
+                            <div style={{ fontSize: 12, color: tokens.label, fontWeight: 700, marginBottom: 6 }}>
+                              Live movement radar
                             </div>
 
                             <div
@@ -11480,6 +11826,29 @@ export default function GridCaller({
                                 />
                               ))}
 
+                              <svg
+                                viewBox="0 0 100 100"
+                                preserveAspectRatio="none"
+                                style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
+                              >
+                                {myGps &&
+                                  liveRadarPeers.map((p) => {
+                                    const offset = projectRadarOffset(myGps, p, radarRange);
+                                    return (
+                                      <line
+                                        key={`radar-link-${p.id}`}
+                                        x1="50"
+                                        y1="50"
+                                        x2={offset.xPct}
+                                        y2={offset.yPct}
+                                        stroke={p.online ? tokens.green : tokens.label}
+                                        strokeOpacity={0.35}
+                                        strokeWidth="0.7"
+                                      />
+                                    );
+                                  })}
+                              </svg>
+
                               <div
                                 style={{
                                   position: "absolute",
@@ -11496,26 +11865,54 @@ export default function GridCaller({
                               />
 
                               {myGps &&
-                                radarPeers.map((p) => {
+                                liveRadarPeers.map((p) => {
                                   const offset = projectRadarOffset(myGps, p, radarRange);
                                   const motion = radarMotionRef.current.get(p.id);
                                   const moving = (motion?.speedMps || 0) > 0.7;
+                                  const userId = formatMeshUserId(p);
                                   return (
                                     <div
                                       key={p.id}
-                                      title={`${p.name}${p.distance != null ? ` · ${Math.round(p.distance)}m` : ""}`}
+                                      title={`${p.name} · ${p.id}`}
                                       style={{
                                         position: "absolute",
                                         left: `${offset.xPct}%`,
                                         top: `${offset.yPct}%`,
                                         transform: "translate(-50%, -50%)",
-                                        width: moving ? 12 : 9,
-                                        height: moving ? 12 : 9,
-                                        borderRadius: "50%",
-                                        background: moving ? tokens.green : tokens.orange,
-                                        boxShadow: moving ? `0 0 0 4px ${tokens.green}22` : "none",
+                                        display: "flex",
+                                        flexDirection: "column",
+                                        alignItems: "center",
                                       }}
-                                    />
+                                    >
+                                      <div
+                                        style={{
+                                          width: moving ? 12 : 9,
+                                          height: moving ? 12 : 9,
+                                          borderRadius: "50%",
+                                          background: moving ? tokens.green : tokens.orange,
+                                          boxShadow: moving ? `0 0 0 4px ${tokens.green}22` : "none",
+                                        }}
+                                      />
+                                      <div
+                                        style={{
+                                          marginTop: 6,
+                                          padding: "3px 6px",
+                                          borderRadius: 999,
+                                          background: `${tokens.card}ee`,
+                                          border: `1px solid ${tokens.sep}`,
+                                          textAlign: "center",
+                                          minWidth: 72,
+                                          maxWidth: 112,
+                                        }}
+                                      >
+                                        <div style={{ fontSize: 10, fontWeight: 700, color: tokens.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                          {p.name}
+                                        </div>
+                                        <div style={{ fontSize: 9, color: tokens.label, fontFamily: "monospace", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                          {userId}
+                                        </div>
+                                      </div>
+                                    </div>
                                   );
                                 })}
                             </div>
@@ -11527,16 +11924,22 @@ export default function GridCaller({
                             )}
 
                             <div style={{ fontSize: 12, color: tokens.label, fontWeight: 700, marginBottom: 6 }}>
-                              Nearby users
+                              Visible mesh users
                             </div>
-                            {radarPeers.length === 0 ? (
-                              <div style={{ fontSize: 13, color: tokens.label }}>Waiting for nearby GridCaller users.</div>
+                            {meshVisibleUsers.length === 0 ? (
+                              <div style={{ fontSize: 13, color: tokens.label }}>Waiting for live GridCaller users.</div>
                             ) : (
-                              radarPeers.map((p) => {
-                                const dist = myGps ? calcDistanceMeters(myGps, p) : p.distance ?? null;
+                              meshVisibleUsers.map((p) => {
+                                const hasLiveLocation =
+                                  typeof p.lat === "number" &&
+                                  typeof p.lng === "number" &&
+                                  Number.isFinite(p.lat) &&
+                                  Number.isFinite(p.lng);
+                                const dist = myGps && hasLiveLocation ? calcDistanceMeters(myGps, p as { lat: number; lng: number }) : p.distance ?? null;
                                 const motion = radarMotionRef.current.get(p.id);
                                 const speedMps = motion?.speedMps || 0;
                                 const moving = speedMps > 0.7;
+                                const userId = formatMeshUserId(p);
                                 return (
                                   <div
                                     key={p.id}
@@ -11553,14 +11956,22 @@ export default function GridCaller({
                                       <div style={{ fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                                         {p.online ? "●" : "○"} {p.name}
                                       </div>
+                                      <div style={{ color: tokens.label, fontSize: 11, fontFamily: "monospace", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                        ID: {p.id}
+                                      </div>
+                                      <div style={{ color: tokens.label, fontSize: 11, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                        {userId}
+                                      </div>
                                       <div style={{ color: tokens.label, fontSize: 11 }}>
-                                        {moving
-                                          ? `Moving · ${(speedMps * 3.6).toFixed(1)} km/h`
-                                          : "Stable"}
+                                        {hasLiveLocation
+                                          ? moving
+                                            ? `Moving · ${(speedMps * 3.6).toFixed(1)} km/h`
+                                            : "Live location · stable"
+                                          : "Online on mesh · live GPS unavailable"}
                                       </div>
                                     </div>
                                     <div style={{ color: tokens.label, fontSize: 12, flexShrink: 0 }}>
-                                      {dist != null ? `${Math.round(dist)}m` : "-"}
+                                      {hasLiveLocation ? (dist != null ? `${Math.round(dist)}m` : "GPS") : "mesh"}
                                     </div>
                                   </div>
                                 );
@@ -11577,9 +11988,9 @@ export default function GridCaller({
               {menuView === "map" && (
                 <>
                   <div style={{ fontSize: 13, color: tokens.label, marginBottom: 8 }}>
-                    {meshMapPeers.length === 0 && !myGps
+                    {radarPeers.length === 0 && !myGps
                       ? "Location permission is required to share your map position with nearby GridCaller phones."
-                      : `${meshMapPeers.length} nearby · blue = you · green = others · auto-mesh`}
+                      : `${meshVisibleUsers.length} mesh users · ${radarPeers.length} with live GPS · blue = you · green = others`}
                   </div>
                   <div
                     ref={mapBoxRef}
@@ -11597,12 +12008,12 @@ export default function GridCaller({
                         You: {myGps.lat.toFixed(4)}, {myGps.lng.toFixed(4)}
                       </div>
                     )}
-                    {meshMapPeers.length === 0 ? (
+                    {meshVisibleUsers.length === 0 ? (
                       <div style={{ fontSize: 13, color: tokens.label }}>
-                        Waiting for another device.
+                        Waiting for another GridCaller user.
                       </div>
                     ) : (
-                      meshMapPeers.map((p) => (
+                      meshVisibleUsers.map((p) => (
                         <div
                           key={p.id}
                           style={{
@@ -11613,15 +12024,21 @@ export default function GridCaller({
                           }}
                         >
                           <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                            <span>
-                              {p.online ? "●" : "○"} {p.name}
-                              {p.displayNumber || p.phone ? (
-                                <span style={{ color: tokens.label }}> · {p.displayNumber || p.phone}</span>
-                              ) : null}
+                            <span style={{ minWidth: 0 }}>
+                              <span style={{ display: "block", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                {p.online ? "●" : "○"} {p.name}
+                              </span>
+                              <span style={{ display: "block", color: tokens.label, fontSize: 11, fontFamily: "monospace", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                ID: {p.id}
+                              </span>
+                              <span style={{ display: "block", color: tokens.label, fontSize: 11, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                {formatMeshUserId(p)}
+                              </span>
                             </span>
                             <span style={{ color: tokens.label, flexShrink: 0 }}>
-                              {p.lat.toFixed(3)}, {p.lng.toFixed(3)}
-                              {p.distance != null ? ` · ${Math.round(p.distance)}m` : ""}
+                              {typeof p.lat === "number" && typeof p.lng === "number"
+                                ? `${p.lat.toFixed(3)}, ${p.lng.toFixed(3)}${p.distance != null ? ` · ${Math.round(p.distance)}m` : ""}`
+                                : "No live GPS"}
                             </span>
                           </div>
                           <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
@@ -12260,6 +12677,45 @@ function projectRadarOffset(
     xPct: 50 + normX * scale * 44,
     yPct: 50 - normY * scale * 44,
   };
+}
+
+function formatMeshUserId(peer: Pick<MeshVisibleUser, "id" | "displayNumber" | "handle" | "phone">): string {
+  const display = String(peer.displayNumber || "").trim();
+  if (display) return display;
+  const handle = String(peer.handle || "").trim();
+  if (handle) return handle.startsWith("@") ? handle : `@${handle}`;
+  const phone = String(peer.phone || "").trim();
+  if (phone) return phone;
+  return peer.id;
+}
+
+function meshNodeSeed(id: string): number {
+  let hash = 0;
+  for (let i = 0; i < id.length; i += 1) {
+    hash = (hash * 33 + id.charCodeAt(i)) >>> 0;
+  }
+  return hash;
+}
+
+function buildMeshGraphNodes(peers: MeshVisibleUser[]): MeshGraphNode[] {
+  const total = peers.length;
+  if (!total) return [];
+  const ringRadius = total <= 6 ? 31 : total <= 12 ? 35 : total <= 18 ? 39 : 42;
+  return peers.map((peer, index) => {
+    const angle = -Math.PI / 2 + (index / total) * Math.PI * 2;
+    const jitter = ((meshNodeSeed(peer.id) % 9) - 4) * 0.45;
+    const radius = Math.max(26, Math.min(44, ringRadius + jitter));
+    return {
+      ...peer,
+      xPct: 50 + Math.cos(angle) * radius,
+      yPct: 50 + Math.sin(angle) * radius,
+      hasLiveLocation:
+        typeof peer.lat === "number" &&
+        typeof peer.lng === "number" &&
+        Number.isFinite(peer.lat) &&
+        Number.isFinite(peer.lng),
+    };
+  });
 }
 
 function settingsInputStyle(tokens: Tokens): Record<string, string | number> {
