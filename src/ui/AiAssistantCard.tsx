@@ -82,7 +82,11 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
 
   useEffect(() => {
     const off = localAiEngine.subscribeStatus(setStatus);
-    return off;
+    return () => {
+      off();
+      chatAbort.current?.abort();
+      try { mediaRecorder.current?.stop(); } catch {}
+    };
   }, []);
 
   useEffect(() => {
