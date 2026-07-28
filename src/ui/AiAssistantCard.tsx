@@ -216,11 +216,15 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
     setVoiceError("");
     try {
       const buf = await localAiEngine.textToSpeech(ttsText.trim());
-      const ctx = new AudioContext();
-      const decoded = await ctx.decodeAudioData(buf);
+      const AC = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AC) throw new Error("AudioContext not supported.");
+      const ctx: AudioContext = new AC();
+      if (ctx.state === "suspended") await ctx.resume();
+      const decoded = await ctx.decodeAudioData(buf.slice(0));
       const src = ctx.createBufferSource();
       src.buffer = decoded;
       src.connect(ctx.destination);
+      src.onended = () => { void ctx.close(); };
       src.start();
     } catch (err: any) {
       setVoiceError(err?.message || "TTS failed.");
