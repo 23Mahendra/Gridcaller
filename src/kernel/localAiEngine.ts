@@ -131,20 +131,26 @@ class LocalAiEngine {
         name: m.id,
         ownedBy: m.owned_by ?? "local",
       }));
-      if (models.length) {
-        // OpenAI-compat gateway becomes the preferred chat backend
-        this._chatModels = [
-          ...models,
-          ...this._chatModels.filter(
-            (existing) => !models.some((m) => m.id === existing.id)
-          ),
-        ];
-        this._chatBackend = "openai_compat";
-        if (!this._activeModel) {
-          this._activeModel = models[0].id;
-          S.set("local_ai_model", this._activeModel);
-        }
+
+      const gatewayModels: AiModel[] = models.length
+        ? models
+        : [{ id: "local", name: "local", ownedBy: "local" }];
+
+      // OpenAI-compat gateway becomes the preferred chat backend
+      this._chatModels = [
+        ...gatewayModels,
+        ...this._chatModels.filter(
+          (existing) => !gatewayModels.some((m) => m.id === existing.id)
+        ),
+      ];
+      this._chatBackend = "openai_compat";
+
+      const activeOk = this._activeModel && gatewayModels.some((m) => m.id === this._activeModel);
+      if (!activeOk) {
+        this._activeModel = gatewayModels[0].id;
+        S.set("local_ai_model", this._activeModel);
       }
+
       // Assume gateway supports images and audio if reachable
       this._imageBackend = "openai_compat";
       this._audioBackend = "openai_compat";
