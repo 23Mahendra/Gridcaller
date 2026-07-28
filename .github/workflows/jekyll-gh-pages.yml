@@ -32,6 +32,8 @@ jobs:
         run: npm ci --legacy-peer-deps
 
       - name: Build
+        env:
+          VITE_PUBLIC_BASE: /Gridcaller/
         run: npm run build
 
       - name: Setup Pages

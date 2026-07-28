@@ -67,6 +67,6 @@ export default defineConfig({
   optimizeDeps: {
     include: ["peerjs", "gun/gun", "trystero", "qrcode"],
   },
-  // Capacitor loads from file:// or android assets — relative base
-  base: "./",
+  // Default to relative base for Capacitor/file://; allow override for GitHub Pages.
+  base: process.env.VITE_PUBLIC_BASE || "./",
 });
