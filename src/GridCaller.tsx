@@ -1936,6 +1936,17 @@ export default function GridCaller({
           system: !!msg.data.system,
         };
         setGroupMessages((prev) => (prev.some((x) => x.id === row.id) ? prev : [...prev, row].slice(-1200)));
+        if (!row.system) {
+          try {
+            if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+              new Notification(row.fromName, {
+                body: row.text || (row.attachment ? "📎 Attachment" : "New group message"),
+                tag: `gc-grp-${row.groupId}`,
+                silent: false,
+              });
+            }
+          } catch {}
+        }
       }
 
       if (msg?.type === "GRID_GROUP_CALL_INVITE" && msg.data?.groupId) {
@@ -2002,6 +2013,15 @@ export default function GridCaller({
             ? p
             : [...p, row]
         );
+        try {
+          if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+            new Notification(row.name, {
+              body: row.text || (row.attachment ? "📎 Attachment" : "New message"),
+              tag: `gc-msg-${row.peerId}`,
+              silent: false,
+            });
+          }
+        } catch {}
         try {
           gridNumberRegistry.logMessage({
             direction: "in",
@@ -4468,6 +4488,46 @@ export default function GridCaller({
     setGroupSelectMode(false);
   };
 
+  const copyTextToClipboard = (text: string, label = "Copied") => {
+    if (!text.trim()) return;
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(
+        () => { setContactBusy(label); setTimeout(() => setContactBusy(""), 1400); },
+        () => { setErr("Copy failed — clipboard blocked"); },
+      );
+    } else {
+      try {
+        const el = document.createElement("textarea");
+        el.value = text;
+        el.style.cssText = "position:fixed;opacity:0;top:-9999px";
+        document.body.appendChild(el);
+        el.select();
+        document.execCommand("copy");
+        document.body.removeChild(el);
+        setContactBusy(label);
+        setTimeout(() => setContactBusy(""), 1400);
+      } catch {
+        setErr("Copy unavailable");
+      }
+    }
+  };
+
+  const copySelectedDirectMessages = () => {
+    if (!directSelectedMessageIds.length) return;
+    const texts = sms.filter((m) => directSelectedMessageIds.includes(m.id) && m.text).map((m) => m.text);
+    copyTextToClipboard(texts.join("\n"), `${texts.length} message${texts.length !== 1 ? "s" : ""} copied`);
+    setDirectSelectedMessageIds([]);
+    setDirectSelectMode(false);
+  };
+
+  const copySelectedGroupMessages = () => {
+    if (!groupSelectedMessageIds.length) return;
+    const texts = groupMessages.filter((m) => groupSelectedMessageIds.includes(m.id) && m.text).map((m) => `${m.fromName}: ${m.text}`);
+    copyTextToClipboard(texts.join("\n"), `${texts.length} message${texts.length !== 1 ? "s" : ""} copied`);
+    setGroupSelectedMessageIds([]);
+    setGroupSelectMode(false);
+  };
+
   const toggleSmsThreadSelection = (peerId: string) => {
     if (!peerId) return;
     setSelectedSmsThreadIds((prev) => (prev.includes(peerId) ? prev.filter((id) => id !== peerId) : [...prev, peerId]));
@@ -4693,6 +4753,22 @@ export default function GridCaller({
               {initials(peerName)}
             </div>
             <div style={{ fontSize: 20, fontWeight: 700, lineHeight: 1.1 }}>{displayId}</div>
+            <div style={{ display: "flex", justifyContent: "center", gap: 8, marginTop: 8 }}>
+              <button
+                type="button"
+                onClick={() => copyTextToClipboard(peerName, "Name copied")}
+                style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.blue, borderRadius: 999, padding: "4px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+              >
+                Copy name
+              </button>
+              <button
+                type="button"
+                onClick={() => copyTextToClipboard(displayId, "ID copied")}
+                style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.label, borderRadius: 999, padding: "4px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+              >
+                Copy ID
+              </button>
+            </div>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 8, marginBottom: 16 }}>
@@ -5728,6 +5804,13 @@ export default function GridCaller({
               </button>
               <button
                 type="button"
+                onClick={copySelectedDirectMessages}
+                style={{ border: "none", background: "transparent", color: tokens.blue, fontWeight: 700, cursor: "pointer" }}
+              >
+                Copy
+              </button>
+              <button
+                type="button"
                 onClick={deleteSelectedDirectMessages}
                 style={{ border: "none", background: "transparent", color: tokens.red, fontWeight: 700, cursor: "pointer" }}
               >
@@ -5855,35 +5938,45 @@ export default function GridCaller({
                     >
                       {isStarred ? <Star size={12} fill="#ffd54a" color="#ffd54a" /> : <StarOff size={12} />}
                     </button>
-                    {directSelectMode ? (
+                   {m.text ? (
                       <button
                         type="button"
-                        title={isSelected ? "Unselect" : "Select"}
-                        onClick={() => toggleDirectMessageSelection(m.id)}
-                        style={{ border: "none", background: "rgba(0,0,0,0.15)", color: "#fff", borderRadius: 10, padding: "2px 6px", cursor: "pointer", display: "inline-flex", alignItems: "center" }}
+                       title="Copy message"
+                       onClick={() => copyTextToClipboard(m.text, "Message copied")}
+                       style={{ border: "none", background: "rgba(0,0,0,0.15)", color: "#fff", borderRadius: 10, padding: "2px 6px", cursor: "pointer", display: "inline-flex", alignItems: "center", fontSize: 11, fontWeight: 700 }}
                       >
-                        {isSelected ? <CheckCircle2 size={12} /> : <Circle size={12} />}
+                       Copy
                       </button>
                     ) : null}
-                    {m.mine && (
+                   {directSelectMode ? (
                       <button
                         type="button"
-                        title="Delete message"
-                        onClick={() => deleteSmsMessage(m.id)}
-                        style={{
-                          border: "none",
-                          background: "rgba(0,0,0,0.15)",
-                          color: "#fff",
-                          borderRadius: 10,
-                          padding: "2px 6px",
-                          cursor: "pointer",
-                          display: "inline-flex",
-                          alignItems: "center",
-                        }}
-                      >
-                        <Trash2 size={12} />
-                      </button>
-                    )}
+                       title={isSelected ? "Unselect" : "Select"}
+                       onClick={() => toggleDirectMessageSelection(m.id)}
+                       style={{ border: "none", background: "rgba(0,0,0,0.15)", color: "#fff", borderRadius: 10, padding: "2px 6px", cursor: "pointer", display: "inline-flex", alignItems: "center" }}
+                     >
+                       {isSelected ? <CheckCircle2 size={12} /> : <Circle size={12} />}
+                     </button>
+                   ) : null}
+                   {m.mine && (
+                     <button
+                       type="button"
+                       title="Delete message"
+                       onClick={() => deleteSmsMessage(m.id)}
+                       style={{
+                         border: "none",
+                         background: "rgba(0,0,0,0.15)",
+                         color: "#fff",
+                         borderRadius: 10,
+                         padding: "2px 6px",
+                         cursor: "pointer",
+                         display: "inline-flex",
+                         alignItems: "center",
+                       }}
+                     >
+                       <Trash2 size={12} />
+                     </button>
+                   )}
                   </div>
                 </div>
               </div>
@@ -6919,6 +7012,35 @@ export default function GridCaller({
                 <span style={{ color: tokens.label, fontSize: 15, fontWeight: 500 }}>
                   Type a phone number or user ID
                 </span>
+              )}
+            </div>
+            <div style={{ display: "flex", justifyContent: "center", gap: 8, marginBottom: 8 }}>
+              <button
+                type="button"
+                title="Paste from clipboard"
+                onClick={() => {
+                  if (navigator.clipboard?.readText) {
+                    navigator.clipboard.readText().then(
+                      (text) => { const t = (text || "").trim(); if (t) setDial((p) => p + t); },
+                      () => setErr("Clipboard read blocked"),
+                    );
+                  } else {
+                    setErr("Clipboard paste not available in this browser");
+                  }
+                }}
+                style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.blue, borderRadius: 999, padding: "5px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
+              >
+                Paste
+              </button>
+              {dial && (
+                <button
+                  type="button"
+                  title="Copy dialled number"
+                  onClick={() => copyTextToClipboard(dial, "Number copied")}
+                  style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.label, borderRadius: 999, padding: "5px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
+                >
+                  Copy
+                </button>
               )}
             </div>
 
@@ -8706,6 +8828,13 @@ export default function GridCaller({
                         </button>
                         <button
                           type="button"
+                          onClick={copySelectedGroupMessages}
+                          style={{ border: "none", background: "transparent", color: tokens.blue, fontWeight: 700, cursor: "pointer" }}
+                        >
+                          Copy
+                        </button>
+                        <button
+                          type="button"
                           onClick={deleteSelectedGroupMessages}
                           style={{ border: "none", background: "transparent", color: tokens.red, fontWeight: 700, cursor: "pointer" }}
                         >
@@ -8798,6 +8927,16 @@ export default function GridCaller({
                                 >
                                   {isStarred ? <Star size={12} fill="#ffd54a" color="#ffd54a" /> : <StarOff size={12} />}
                                 </button>
+                                {m.text ? (
+                                  <button
+                                    type="button"
+                                    title="Copy message"
+                                    onClick={() => copyTextToClipboard(m.text, "Message copied")}
+                                    style={{ border: "none", background: "rgba(0,0,0,0.12)", color: tokens.text, borderRadius: 10, padding: "2px 6px", cursor: "pointer", display: "inline-flex", alignItems: "center", fontSize: 10, fontWeight: 700 }}
+                                  >
+                                    Copy
+                                  </button>
+                                ) : null}
                                 {groupSelectMode ? (
                                   <button
                                     type="button"
