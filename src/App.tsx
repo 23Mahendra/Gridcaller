@@ -62,7 +62,9 @@ export default function App() {
 
   // Start background AI monitoring as soon as app is ready
   useEffect(() => {
-    if (consentReady) localAiEngine.startMonitoring();
+    if (!consentReady) return;
+    localAiEngine.startMonitoring();
+    return () => localAiEngine.stopMonitoring();
   }, [consentReady]);
 
   useEffect(() => {
