@@ -293,6 +293,21 @@ export function getMeshHandle(): string {
   return snapshot.handle;
 }
 
+export function getHandleNodeIdCode() {
+  return `${getMeshHandle()}@${getPeerId()}`;
+}
+
+export function parseHandleNodeIdCode(code: string): { handle: string; nodeId: string } | null {
+  const raw = String(code || "").trim();
+  if (!raw) return null;
+  const at = raw.indexOf("@");
+  if (at <= 0 || at === raw.length - 1) return null;
+  const handle = raw.slice(0, at).trim();
+  const nodeId = raw.slice(at + 1).trim();
+  if (!handle || !nodeId) return null;
+  return { handle, nodeId };
+}
+
 export function ensureMeshIdentity() {
   const peerId = getPeerId();
   const handle = rememberDeviceIdentity({

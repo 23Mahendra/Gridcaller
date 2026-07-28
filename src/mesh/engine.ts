@@ -16,12 +16,28 @@ import {
   APP_ID,
   getDisplayName,
   getHubHttp,
+  getMeshHandle,
   getPeerId,
   getRoom,
   getSignalUrl,
 } from "./identity";
 import { loadCalls, loadChats, saveCalls, saveChats, type CallLog, type ChatMsg } from "./store";
 import { bridgeCapabilities } from "./bridge";
+import { recentPeers, rememberPeer } from "./peerCache";
+import { enqueueOfflineMessage, markPendingDelivered, markPendingRetry, readPendingMessages } from "./offlineQueue";
+import { decodeAnyPairingCode } from "./qrPairing";
+import { startLanDiscovery, type LanDiscoveryController } from "./lanDiscovery";
+import MeshRoutingTable from "../kernel/meshRoutingTable";
+import {
+  getNodeCapabilities,
+  RelayService,
+  SyncNodeService,
+  setRelayMode,
+  setSyncNode,
+} from "./nodeServices";
+import { BroadcastTransport } from "./transports/broadcastTransport";
+import { PeerJsTransport } from "./transports/peerjsTransport";
+import { TransportRegistry } from "./transport";
 
 export type PeerInfo = {
   id: string;
@@ -45,6 +61,19 @@ export type ActiveCall = {
 };
 
 type Listener = () => void;
+
+type RelayEnvelope = {
+  type: "relay";
+  id: string;
+  from: string;
+  dest: string;
+  nextHop?: string;
+  ttl: number;
+  hops: number;
+  path: string[];
+  payload: any;
+  storeForward?: boolean;
+};
 
 const ICE: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
@@ -88,6 +117,19 @@ class MeshEngine {
   private reconnectTimer: number | null = null;
   private intentionalClose = false;
   private audioEl: HTMLAudioElement | null = null;
+  private lanDiscovery: LanDiscoveryController | null = null;
+  private routeBroadcastTimer: number | null = null;
+  private routing = new MeshRoutingTable();
+  private relayService = new RelayService();
+  private syncNode = new SyncNodeService();
+  private relaySeen = new Set<string>();
+  private transportRegistry = new TransportRegistry();
+
+  constructor() {
+    this.routing.setLocalId(this.peerId);
+    this.transportRegistry.register(new BroadcastTransport(this.peerId, "gc_transport_bc"));
+    this.transportRegistry.register(new PeerJsTransport(() => this.dataConns as any));
+  }
 
   subscribe(fn: Listener) {
     this.listeners.add(fn);
@@ -108,6 +150,7 @@ class MeshEngine {
     this.room = getRoom();
     this.signalUrl = getSignalUrl();
     this.hubHttp = getHubHttp();
+    this.routing.setLocalId(this.peerId);
     this.emit();
   }
 
@@ -124,7 +167,13 @@ class MeshEngine {
     this.intentionalClose = false;
     this.lastError = "";
     this.status = "connecting";
+    this.relaySeen.clear();
     this.emit();
+    void this.transportRegistry.connectAll();
+
+    void this.primeCachedPeers();
+    this.startLanDiscovery();
+    this.startRouteBroadcast();
 
     // Pull hub config (PeerJS host/port) if possible
     try {
@@ -143,6 +192,11 @@ class MeshEngine {
   disconnect() {
     this.intentionalClose = true;
     if (this.reconnectTimer) window.clearTimeout(this.reconnectTimer);
+    if (this.routeBroadcastTimer) window.clearInterval(this.routeBroadcastTimer);
+    this.routeBroadcastTimer = null;
+    this.lanDiscovery?.stop();
+    this.lanDiscovery = null;
+    this.transportRegistry.disconnectAll();
     try {
       this.ws?.close();
     } catch {}
@@ -167,6 +221,55 @@ class MeshEngine {
       this.transports.ws || this.transports.peerjs || this.transports.trystero || this.transports.gun;
     this.status = any ? "online" : this.intentionalClose ? "offline" : "connecting";
     this.emit();
+  }
+
+  private async primeCachedPeers() {
+    try {
+      const cached = await recentPeers(24);
+      for (const row of cached) {
+        this.upsertPeer(row.peerId, row.name || row.handle || row.peerId.slice(0, 8), "cache");
+        void this.ensureDataConn(row.peerId);
+      }
+    } catch {}
+  }
+
+  private startLanDiscovery() {
+    this.lanDiscovery?.stop();
+    this.lanDiscovery = startLanDiscovery({
+      peerId: this.peerId,
+      handle: getMeshHandle(),
+      name: this.name,
+      onPeer: (peer) => {
+        this.upsertPeer(peer.id, peer.name || peer.handle || peer.id.slice(0, 8), "broadcast");
+        void this.ensureDataConn(peer.id);
+      },
+    });
+  }
+
+  private startRouteBroadcast() {
+    if (this.routeBroadcastTimer) window.clearInterval(this.routeBroadcastTimer);
+    this.routeBroadcastTimer = window.setInterval(() => this.broadcastRoutes(), 9000);
+  }
+
+  private broadcastRoutes() {
+    const routes = this.routing.snapshot().slice(0, 48).map((route) => ({
+      targetId: route.targetId,
+      cost: route.cost,
+      hops: route.hops,
+      quality: route.quality,
+      via: route.via,
+      gateway: route.gateway,
+    }));
+    const packet = { type: "route-adv", from: this.peerId, routes };
+    this.wsSend(packet);
+    for (const conn of this.dataConns.values()) {
+      try {
+        if (conn.open) conn.send(packet);
+      } catch {}
+    }
+    try {
+      this.trySend?.(packet);
+    } catch {}
   }
 
   // ─── WebSocket hub ───────────────────────────────────────────
@@ -196,7 +299,7 @@ class MeshEngine {
           name: this.name,
           role: "gridcaller",
           transports: ["ws", "peerjs", "trystero", "gun"],
-          caps: bridgeCapabilities(),
+          caps: { ...bridgeCapabilities(), ...getNodeCapabilities() },
         })
       );
     };
@@ -270,6 +373,7 @@ class MeshEngine {
         type: "presence",
         peerjsId: peer.id,
         name: this.name,
+        caps: { ...bridgeCapabilities(), ...getNodeCapabilities() },
       });
     });
 
@@ -311,7 +415,7 @@ class MeshEngine {
         type: "hello",
         name: this.name,
         peerId: this.peerId,
-        caps: bridgeCapabilities(),
+        caps: { ...bridgeCapabilities(), ...getNodeCapabilities() },
       });
       this.emit();
     });
@@ -356,7 +460,7 @@ class MeshEngine {
 
       room.onPeerJoin((id) => {
         this.upsertPeer(id, id.slice(0, 8), "trystero");
-        send({ type: "hello", name: this.name, peerId: this.peerId }, id);
+        send({ type: "hello", name: this.name, peerId: this.peerId, caps: { ...bridgeCapabilities(), ...getNodeCapabilities() } }, id);
         this.emit();
       });
       room.onPeerLeave((id) => {
@@ -415,6 +519,13 @@ class MeshEngine {
     } else {
       this.peers.set(id, { id, name, lastSeen: Date.now(), via: [via] });
     }
+    this.routing.observeDirectLink(id, { via, quality: 1, hops: 1, gateway: via === "ws" });
+    void rememberPeer({ peerId: id, handle: name, name, lastSeen: Date.now() }).catch(() => {});
+    void this.flushQueuedForPeer(id);
+    const held = this.syncNode.take(id);
+    if (held.length) {
+      for (const row of held) this.sendEnvelopeToPeer(id, row.envelope);
+    }
   }
 
   private onHubMessage(msg: any) {
@@ -439,6 +550,12 @@ class MeshEngine {
         break;
       case "chat":
         this.ingestChat(msg, "ws");
+        break;
+      case "route-adv":
+        this.applyRouteAdvertisement(msg.from, msg.routes);
+        break;
+      case "relay":
+        void this.handleRelayEnvelope(msg as RelayEnvelope, msg.from || "ws");
         break;
       case "call":
       case "signal":
@@ -467,8 +584,70 @@ class MeshEngine {
       this.ingestChat({ ...data, from }, data.via || "peerjs");
       return;
     }
+    if (data.type === "route-adv") {
+      this.applyRouteAdvertisement(from, data.routes);
+      return;
+    }
+    if (data.type === "relay") {
+      void this.handleRelayEnvelope({ ...(data as RelayEnvelope), from: data.from || from }, from);
+      return;
+    }
     if (data.type === "call" || data.action) {
       void this.onCallSignal({ ...data, from, type: "call" });
+    }
+  }
+
+  private applyRouteAdvertisement(from: string, routes: any[]) {
+    if (!from || !Array.isArray(routes)) return;
+    for (const route of routes) {
+      const targetId = String(route?.targetId || "").trim();
+      if (!targetId || targetId === this.peerId || targetId === from) continue;
+      this.routing.observeRoute(targetId, from, {
+        via: route?.via || from,
+        quality: Number(route?.quality) || 0.5,
+        hops: Math.max(1, Number(route?.hops || 1) + 1),
+        cost: Math.max(1, Number(route?.cost || route?.hops || 1) + 1),
+        gateway: Boolean(route?.gateway),
+        path: Array.isArray(route?.path) ? route.path : [from, targetId],
+      });
+    }
+  }
+
+  private async handleRelayEnvelope(envelope: RelayEnvelope, via: string) {
+    if (!envelope?.id || this.relaySeen.has(envelope.id)) return;
+    this.relaySeen.add(envelope.id);
+    if (this.relaySeen.size > 600) {
+      const keep = [...this.relaySeen].slice(-400);
+      this.relaySeen = new Set(keep);
+    }
+    if (envelope.dest === this.peerId) {
+      const payload = envelope.payload || {};
+      if (payload.type === "chat") this.ingestChat({ ...payload, from: payload.from || envelope.from }, via);
+      return;
+    }
+    if (!this.relayService.shouldForward(envelope.ttl)) return;
+    if ((envelope.path || []).includes(this.peerId)) return;
+
+    const route = this.routing.getBestRoute(envelope.dest);
+    const nextHop = route?.nextHop || envelope.nextHop || envelope.dest;
+    const next: RelayEnvelope = {
+      ...envelope,
+      nextHop,
+      ttl: Math.max(0, envelope.ttl - 1),
+      hops: (envelope.hops || 0) + 1,
+      path: [...(envelope.path || []), this.peerId],
+      storeForward: true,
+    };
+    const sent = this.sendEnvelopeToPeer(nextHop, next);
+    if (!sent) {
+      this.syncNode.hold(nextHop, next);
+      await enqueueOfflineMessage({
+        id: next.id,
+        to: nextHop,
+        toHandle: nextHop,
+        text: JSON.stringify(next.payload || {}),
+        envelope: next,
+      });
     }
   }
 
@@ -491,6 +670,65 @@ class MeshEngine {
     saveChats(this.chats);
     this.upsertPeer(msg.from, row.fromName, via);
     this.emit();
+  }
+
+  private sendEnvelopeToPeer(peerId: string, envelope: any): boolean {
+    const packet = { ...(envelope || {}), to: peerId };
+    let sent = this.wsSend(packet);
+    const conn = this.dataConns.get(peerId);
+    if (conn?.open) {
+      try {
+        conn.send(packet);
+        sent = true;
+      } catch {}
+    }
+    try {
+      this.trySend?.(packet, peerId);
+      sent = true;
+    } catch {}
+    return sent;
+  }
+
+  private async flushQueuedForPeer(peerId: string) {
+    const pending = await readPendingMessages(peerId, 80);
+    if (!pending.length) return;
+    const delivered: string[] = [];
+    const retried: string[] = [];
+    for (const row of pending) {
+      const packet =
+        row.envelope && typeof row.envelope === "object"
+          ? row.envelope
+          : {
+              type: "chat",
+              id: row.id,
+              to: row.to,
+              text: row.text,
+              fromName: this.name,
+              from: this.peerId,
+            };
+      if (this.sendEnvelopeToPeer(peerId, packet)) delivered.push(row.id);
+      else retried.push(row.id);
+    }
+    if (delivered.length) await markPendingDelivered(delivered);
+    if (retried.length) await markPendingRetry(retried);
+  }
+
+  async addPeerFromCode(handle: string, nodeId: string) {
+    const id = String(nodeId || "").trim();
+    const name = String(handle || "").trim();
+    if (!id || id === this.peerId || !name) return false;
+    this.upsertPeer(id, name, "pairing");
+    void rememberPeer({ peerId: id, handle: name, name, lastSeen: Date.now() }).catch(() => {});
+    const conn = await this.ensureDataConn(id);
+    this.lanDiscovery?.announce();
+    this.emit();
+    return Boolean(conn || this.peers.get(id));
+  }
+
+  async addPeerFromInvite(input: string) {
+    const parsed = decodeAnyPairingCode(input);
+    if (!parsed) return false;
+    return this.addPeerFromCode(parsed.handle, parsed.nodeId);
   }
 
   async sendChat(to: string, text: string) {
@@ -518,12 +756,39 @@ class MeshEngine {
       from: this.peerId,
     };
 
-    this.wsSend(packet);
+    let delivered = this.wsSend(packet);
     const conn = await this.ensureDataConn(to);
-    if (conn?.open) conn.send(packet);
+    if (conn?.open) {
+      conn.send(packet);
+      delivered = true;
+    }
     try {
       this.trySend?.(packet, to);
+      delivered = true;
     } catch {}
+
+    if (!delivered) {
+      const best = this.routing.getBestRoute(to);
+      if (best?.nextHop && best.nextHop !== to) {
+        const relay: RelayEnvelope = {
+          type: "relay",
+          id: `relay_${row.id}`,
+          from: this.peerId,
+          dest: to,
+          nextHop: best.nextHop,
+          ttl: 6,
+          hops: 0,
+          path: [this.peerId],
+          payload: packet,
+          storeForward: true,
+        };
+        delivered = this.sendEnvelopeToPeer(best.nextHop, relay);
+      }
+    }
+
+    if (!delivered) {
+      await enqueueOfflineMessage({ to, toHandle: to, text: t, id: row.id, envelope: packet });
+    }
 
     this.emit();
   }
@@ -856,6 +1121,18 @@ class MeshEngine {
       this.call.state = "connecting";
       this.emit();
     }
+  }
+
+  enableRelayMode(on: boolean) {
+    setRelayMode(on);
+  }
+
+  enableSyncNode(on: boolean) {
+    setSyncNode(on);
+  }
+
+  nodeCapabilities() {
+    return getNodeCapabilities();
   }
 
   threadWith(peerId: string) {
