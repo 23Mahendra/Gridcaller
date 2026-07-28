@@ -66,6 +66,8 @@ class LocalAiEngine {
   private _monitorStarted = false;
   private _checkInterval: ReturnType<typeof setInterval> | null = null;
   private _retryTimers: Array<ReturnType<typeof setTimeout>> = [];
+  private _visibilityHandler: (() => void) | null = null;
+  private _focusHandler: (() => void) | null = null;
   private _subscribers = new Set<(s: AiStatusSnapshot) => void>();
   private _pulling = new Map<string, AiPullProgress>();
 
