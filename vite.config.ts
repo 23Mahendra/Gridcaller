@@ -15,6 +15,10 @@ export default defineConfig({
         target: "http://127.0.0.1:8765",
         changeOrigin: true,
       },
+      "/api/rag": {
+        target: "http://127.0.0.1:8765",
+        changeOrigin: true,
+      },
       "/mesh-ws": {
         target: "ws://127.0.0.1:8765",
         changeOrigin: true,

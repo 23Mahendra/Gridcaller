@@ -66,7 +66,7 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
   const chatAbort = useRef<AbortController | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const [ragEnabled, setRagEnabled] = useState(true);
-  const [ragDocs, setRagDocs] = useState<RagDocMeta[]>(() => listRagDocs());
+  const [ragDocs, setRagDocs] = useState<RagDocMeta[]>([]);
   const [ragTitle, setRagTitle] = useState("");
   const [ragInput, setRagInput] = useState("");
   const [ragBusy, setRagBusy] = useState(false);
@@ -106,6 +106,19 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
+
+  const refreshRagDocs = useCallback(async () => {
+    try {
+      setRagDocs(await listRagDocs());
+      setRagError("");
+    } catch (err: any) {
+      setRagError(err?.message || "Could not load knowledge.");
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshRagDocs();
+  }, [refreshRagDocs]);
 
   // ─── Chat ──────────────────────────────────────────────────────────────
 
@@ -273,7 +286,7 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
     }
   };
 
-  const addKnowledge = async () => {
+  const addKnowledge = useCallback(async () => {
     if (ragBusy) return;
     const text = ragInput.trim();
     if (!text) return;
@@ -281,7 +294,7 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
     setRagError("");
     try {
       await addRagDoc(ragTitle.trim() || "Knowledge Note", text);
-      setRagDocs(listRagDocs());
+      await refreshRagDocs();
       setRagInput("");
       setRagTitle("");
     } catch (err: any) {
@@ -289,7 +302,35 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
     } finally {
       setRagBusy(false);
     }
-  };
+  }, [ragBusy, ragInput, ragTitle, refreshRagDocs]);
+
+  const clearKnowledge = useCallback(async () => {
+    if (ragBusy || ragDocs.length === 0) return;
+    setRagBusy(true);
+    setRagError("");
+    try {
+      await clearRagDocs();
+      setRagDocs([]);
+    } catch (err: any) {
+      setRagError(err?.message || "Could not clear knowledge.");
+    } finally {
+      setRagBusy(false);
+    }
+  }, [ragBusy, ragDocs.length]);
+
+  const removeKnowledge = useCallback(async (docId: string) => {
+    if (ragBusy) return;
+    setRagBusy(true);
+    setRagError("");
+    try {
+      await removeRagDoc(docId);
+      await refreshRagDocs();
+    } catch (err: any) {
+      setRagError(err?.message || "Could not remove knowledge.");
+    } finally {
+      setRagBusy(false);
+    }
+  }, [ragBusy, refreshRagDocs]);
 
   // ─── Render helpers ────────────────────────────────────────────────────
 
@@ -579,7 +620,7 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
                   RAG mode
                 </label>
                 <div style={{ color: T.label, fontSize: 11 }}>
-                  {ragDocs.length} docs · local-only
+                  {ragDocs.length} docs · hub-backed
                 </div>
               </div>
               <input
@@ -633,10 +674,7 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    clearRagDocs();
-                    setRagDocs([]);
-                  }}
+                  onClick={() => void clearKnowledge()}
                   disabled={ragBusy || ragDocs.length === 0}
                   style={{
                     border: "none",
@@ -659,10 +697,7 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
                     <button
                       key={d.id}
                       type="button"
-                      onClick={() => {
-                        removeRagDoc(d.id);
-                        setRagDocs(listRagDocs());
-                      }}
+                      onClick={() => void removeKnowledge(d.id)}
                       title="Remove document"
                       style={{
                         border: `1px solid ${T.sep}`,

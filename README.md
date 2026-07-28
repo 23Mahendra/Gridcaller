@@ -80,4 +80,4 @@ npx cap open android
 - The app requests permissions and requires explicit consent before continuing. This is intentional and helps keep the experience transparent.
 - For the best demo experience, keep the devices on the same local network and use the included hub service.
 - The project is best understood as a research and prototyping platform rather than a production carrier replacement.
-- AI chat now supports local RAG: add your own notes/SOPs in the AI panel and retrieval is performed on-device.
+- AI chat now supports hub-backed local RAG: add your own notes/SOPs in the AI panel and retrieval is indexed by the local hub for reuse across clients on the same self-hosted setup.

@@ -1,5 +1,3 @@
-import { S } from "./storage";
-
 export interface RagDocMeta {
   id: string;
   title: string;
@@ -23,17 +21,7 @@ export interface RagMatch {
   score: number;
 }
 
-const KEYS = {
-  docs: "gc_local_rag_docs_v1",
-  chunks: "gc_local_rag_chunks_v1",
-  embedModel: "gc_local_rag_embed_model",
-};
-
-const DEFAULT_EMBED_MODEL = "nomic-embed-text";
-
-function nowId(prefix: string) {
-  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-}
+const RAG_BASE = "/api/rag";
 
 function normalizeText(input: string): string {
   return String(input || "").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
@@ -84,85 +72,44 @@ function keywordScore(query: string, text: string): number {
   return hits / words.length;
 }
 
-async function embedText(text: string, model?: string): Promise<number[]> {
-  const targetModel = String(model || S.get(KEYS.embedModel, DEFAULT_EMBED_MODEL) || DEFAULT_EMBED_MODEL);
-  const res = await fetch("/api/ollama/api/embeddings", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: targetModel, prompt: text }),
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!res.ok) throw new Error(`RAG embedding failed: ${res.status}`);
-  const data = await res.json();
-  const embedding = data?.embedding;
-  if (!Array.isArray(embedding) || embedding.length === 0) {
-    throw new Error("RAG embedding missing");
+async function readJson<T>(res: Response): Promise<T> {
+  let data: any = null;
+  try {
+    data = await res.json();
+  } catch {}
+  if (!res.ok || data?.ok === false) {
+    throw new Error(data?.error || `RAG request failed: ${res.status}`);
   }
-  return embedding.map((v: any) => Number(v || 0));
+  return data as T;
 }
 
-function readDocs(): RagDocMeta[] {
-  return S.get(KEYS.docs, []) as RagDocMeta[];
+export async function listRagDocs(): Promise<RagDocMeta[]> {
+  const data = await readJson<{ ok: true; docs: RagDocMeta[] }>(await fetch(`${RAG_BASE}/docs`));
+  return Array.isArray(data.docs) ? data.docs : [];
 }
 
-function writeDocs(rows: RagDocMeta[]) {
-  S.set(KEYS.docs, rows.slice(0, 200));
-}
-
-function readChunks(): RagChunk[] {
-  return S.get(KEYS.chunks, []) as RagChunk[];
-}
-
-function writeChunks(rows: RagChunk[]) {
-  S.set(KEYS.chunks, rows.slice(0, 4000));
-}
-
-export function listRagDocs(): RagDocMeta[] {
-  return readDocs().sort((a, b) => b.createdAt - a.createdAt);
-}
-
-export function removeRagDoc(docId: string) {
+export async function removeRagDoc(docId: string): Promise<void> {
   const id = String(docId || "").trim();
   if (!id) return;
-  writeDocs(readDocs().filter((d) => d.id !== id));
-  writeChunks(readChunks().filter((c) => c.docId !== id));
+  await readJson(await fetch(`${RAG_BASE}/docs/${encodeURIComponent(id)}`, { method: "DELETE" }));
 }
 
-export function clearRagDocs() {
-  writeDocs([]);
-  writeChunks([]);
+export async function clearRagDocs(): Promise<void> {
+  await readJson(await fetch(`${RAG_BASE}/docs`, { method: "DELETE" }));
 }
 
 export async function addRagDoc(title: string, content: string): Promise<RagDocMeta> {
-  const safeTitle = normalizeText(title) || "Untitled";
-  const chunks = splitTextChunks(content);
-  if (!chunks.length) throw new Error("Knowledge text is empty.");
-  const docId = nowId("ragdoc");
-  const createdAt = Date.now();
-
-  const outChunks: RagChunk[] = [];
-  for (let i = 0; i < chunks.length; i++) {
-    const text = chunks[i];
-    const embedding = await embedText(text);
-    outChunks.push({
-      id: `${docId}_${i + 1}`,
-      docId,
-      title: safeTitle,
-      text,
-      embedding,
-      createdAt,
-    });
-  }
-
-  const meta: RagDocMeta = {
-    id: docId,
-    title: safeTitle,
-    createdAt,
-    chunkCount: outChunks.length,
-  };
-  writeDocs([meta, ...readDocs()]);
-  writeChunks([...outChunks, ...readChunks()]);
-  return meta;
+  const safeTitle = normalizeText(title) || "Knowledge Note";
+  const text = normalizeText(content);
+  if (!text) throw new Error("Knowledge text is empty.");
+  const data = await readJson<{ ok: true; doc: RagDocMeta }>(
+    await fetch(`${RAG_BASE}/docs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: safeTitle, content: text }),
+    })
+  );
+  return data.doc;
 }
 
 export async function buildRagContext(
@@ -170,37 +117,17 @@ export async function buildRagContext(
   opts?: { topK?: number; minScore?: number }
 ): Promise<{ context: string; matches: RagMatch[] } | null> {
   const q = normalizeText(query);
-  const chunks = readChunks();
-  if (!q || !chunks.length) return null;
-  const topK = Math.max(1, Math.min(8, Number(opts?.topK || 4)));
-  const minScore = Number.isFinite(opts?.minScore as number) ? Number(opts?.minScore) : 0.15;
-
-  let scored: RagMatch[] = [];
-  try {
-    const qVec = await embedText(q);
-    scored = chunks
-      .map((c) => ({
-        docId: c.docId,
-        title: c.title,
-        text: c.text,
-        score: cosineSimilarity(qVec, c.embedding),
-      }))
-      .filter((m) => m.score >= minScore);
-  } catch {
-    scored = chunks
-      .map((c) => ({
-        docId: c.docId,
-        title: c.title,
-        text: c.text,
-        score: keywordScore(q, c.text),
-      }))
-      .filter((m) => m.score > 0);
-  }
-
-  if (!scored.length) return null;
-  const matches = scored.sort((a, b) => b.score - a.score).slice(0, topK);
-  const context = matches
-    .map((m, i) => `[${i + 1}] ${m.title}\n${m.text.slice(0, 900)}`)
-    .join("\n\n");
-  return { context, matches };
+  if (!q) return null;
+  const data = await readJson<{ ok: true; result: { context: string; matches: RagMatch[] } | null }>(
+    await fetch(`${RAG_BASE}/query`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query: q,
+        topK: opts?.topK,
+        minScore: opts?.minScore,
+      }),
+    })
+  );
+  return data.result ?? null;
 }
