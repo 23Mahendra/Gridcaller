@@ -43,6 +43,23 @@ Open the app in a browser at:
 http://<your-pc-ip>:8765
 ```
 
+### Docker self-hosting (local-first)
+```bash
+docker compose up --build
+```
+
+Then open:
+```text
+http://127.0.0.1:8765
+```
+
+Notes:
+- `gridcaller` runs the local hub + static UI.
+- `ollama` runs local LLM APIs for chat/embeddings.
+- Optional `offgrid` profile can be enabled for local image/voice APIs:
+  - `docker compose --profile optional up --build`
+- Default STUN list is empty to avoid central dependency by default.
+
 ### Android build
 ```bash
 npm run cap:sync
@@ -63,3 +80,4 @@ npx cap open android
 - The app requests permissions and requires explicit consent before continuing. This is intentional and helps keep the experience transparent.
 - For the best demo experience, keep the devices on the same local network and use the included hub service.
 - The project is best understood as a research and prototyping platform rather than a production carrier replacement.
+- AI chat now supports hub-backed local RAG: add your own notes/SOPs in the AI panel and retrieval is indexed by the local hub for reuse across clients on the same self-hosted setup.

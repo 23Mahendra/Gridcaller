@@ -15,6 +15,7 @@ import path from "path";
 import os from "os";
 import { createHash } from "crypto";
 import { fileURLToPath } from "url";
+import { Readable } from "stream";
 import { WebSocketServer } from "ws";
 import { PeerServer } from "peer";
 import {
@@ -35,8 +36,11 @@ const SHARE = path.join(ROOT, "share");
 const TRANSFER = path.join(ROOT, "transfer");
 const DATA = path.join(ROOT, "data");
 const USAGE_LEDGER_FILE = path.join(DATA, "usage-ledger.json");
+const RAG_STORE_FILE = path.join(DATA, "rag-store.json");
 const PORT = Number(process.env.PORT || 8765);
 const PEER_PORT = Number(process.env.PEER_PORT || 9000);
+const OLLAMA_BASE_URL = String(process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
+const OFFGRID_BASE_URL = String(process.env.OFFGRID_BASE_URL || "http://127.0.0.1:7878/v1").replace(/\/$/, "");
 
 for (const d of [SHARE, TRANSFER, DATA, defaultWorkDir()]) {
   fs.mkdirSync(d, { recursive: true });
@@ -63,6 +67,13 @@ const usageLedger = readJsonFile(USAGE_LEDGER_FILE, {
   updatedAt: 0,
 });
 
+const ragStore = readJsonFile(RAG_STORE_FILE, {
+  docs: [],
+  chunks: [],
+  updatedAt: 0,
+  embedModel: "nomic-embed-text",
+});
+
 function hashReceiptPayload(payload) {
   return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 }
@@ -76,8 +87,170 @@ function appendUsageEntry(entry) {
   writeJsonFile(USAGE_LEDGER_FILE, usageLedger);
 }
 
+function saveRagStore() {
+  ragStore.updatedAt = Date.now();
+  writeJsonFile(RAG_STORE_FILE, ragStore);
+}
+
+function ragNowId(prefix) {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeRagText(input) {
+  return String(input || "").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function splitRagTextChunks(input, chunkSize = 700, overlap = 120) {
+  const text = normalizeRagText(input);
+  if (!text) return [];
+  const chunks = [];
+  let i = 0;
+  while (i < text.length) {
+    const end = Math.min(text.length, i + chunkSize);
+    chunks.push(text.slice(i, end).trim());
+    if (end >= text.length) break;
+    i = Math.max(0, end - overlap);
+  }
+  return chunks.filter(Boolean);
+}
+
+function cosineSimilarity(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length === 0 || b.length === 0) return 0;
+  const n = Math.min(a.length, b.length);
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < n; i++) {
+    const av = Number(a[i] || 0);
+    const bv = Number(b[i] || 0);
+    dot += av * bv;
+    na += av * av;
+    nb += bv * bv;
+  }
+  if (!na || !nb) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+function keywordScore(query, text) {
+  const q = normalizeRagText(query).toLowerCase();
+  const t = normalizeRagText(text).toLowerCase();
+  if (!q || !t) return 0;
+  const words = q
+    .split(/[^a-z0-9]+/i)
+    .map((w) => w.trim())
+    .filter((w) => w.length >= 3);
+  if (!words.length) return 0;
+  let hits = 0;
+  for (const w of words) if (t.includes(w)) hits++;
+  return hits / words.length;
+}
+
+async function embedRagText(text, model = ragStore.embedModel || "nomic-embed-text") {
+  const res = await fetch(`${OLLAMA_BASE_URL}/api/embeddings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model, prompt: text }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) throw new Error(`RAG embedding failed: ${res.status}`);
+  const data = await res.json();
+  const embedding = data?.embedding;
+  if (!Array.isArray(embedding) || embedding.length === 0) throw new Error("RAG embedding missing");
+  return embedding.map((v) => Number(v || 0));
+}
+
+function listRagDocs() {
+  return [...(ragStore.docs || [])].sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+}
+
+function removeRagDoc(docId) {
+  const id = String(docId || "").trim();
+  if (!id) return;
+  ragStore.docs = (ragStore.docs || []).filter((d) => d.id !== id);
+  ragStore.chunks = (ragStore.chunks || []).filter((c) => c.docId !== id);
+  saveRagStore();
+}
+
+function clearRagDocs() {
+  ragStore.docs = [];
+  ragStore.chunks = [];
+  saveRagStore();
+}
+
+async function addRagDoc(title, content, model) {
+  const safeTitle = normalizeRagText(title) || "Untitled";
+  const chunks = splitRagTextChunks(content);
+  if (!chunks.length) throw new Error("Knowledge text is empty.");
+  const docId = ragNowId("ragdoc");
+  const createdAt = Date.now();
+  const embedModel = String(model || ragStore.embedModel || "nomic-embed-text");
+  const outChunks = [];
+
+  for (let i = 0; i < chunks.length; i++) {
+    const text = chunks[i];
+    const embedding = await embedRagText(text, embedModel);
+    outChunks.push({
+      id: `${docId}_${i + 1}`,
+      docId,
+      title: safeTitle,
+      text,
+      embedding,
+      createdAt,
+    });
+  }
+
+  const meta = {
+    id: docId,
+    title: safeTitle,
+    createdAt,
+    chunkCount: outChunks.length,
+  };
+  ragStore.embedModel = embedModel;
+  ragStore.docs = [meta, ...(ragStore.docs || [])].slice(0, 200);
+  ragStore.chunks = [...outChunks, ...(ragStore.chunks || [])].slice(0, 4000);
+  saveRagStore();
+  return meta;
+}
+
+async function buildRagContext(query, opts = {}) {
+  const q = normalizeRagText(query);
+  const chunks = Array.isArray(ragStore.chunks) ? ragStore.chunks : [];
+  if (!q || !chunks.length) return null;
+  const topK = Math.max(1, Math.min(8, Number(opts.topK || 4)));
+  const minScore = Number.isFinite(opts.minScore) ? Number(opts.minScore) : 0.15;
+
+  let scored = [];
+  try {
+    const qVec = await embedRagText(q, opts.model || ragStore.embedModel || "nomic-embed-text");
+    scored = chunks
+      .map((c) => ({
+        docId: c.docId,
+        title: c.title,
+        text: c.text,
+        score: cosineSimilarity(qVec, c.embedding),
+      }))
+      .filter((m) => m.score >= minScore);
+  } catch {
+    scored = chunks
+      .map((c) => ({
+        docId: c.docId,
+        title: c.title,
+        text: c.text,
+        score: keywordScore(q, c.text),
+      }))
+      .filter((m) => m.score > 0);
+  }
+
+  if (!scored.length) return null;
+  const matches = scored.sort((a, b) => b.score - a.score).slice(0, topK);
+  return {
+    context: matches.map((m, i) => `[${i + 1}] ${m.title}\n${String(m.text || "").slice(0, 900)}`).join("\n\n"),
+    matches,
+  };
+}
+
 function getWebRtcConfig() {
-  const stunCsv = String(process.env.STUN_URLS || "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302");
+  const stunCsv = String(process.env.STUN_URLS || "");
   const turnCsv = String(process.env.TURN_URLS || process.env.TURN_URL || "");
   const turnUsername = String(process.env.TURN_USERNAME || "");
   const turnCredential = String(process.env.TURN_CREDENTIAL || "");
@@ -174,6 +347,69 @@ function readJson(req) {
         resolve(raw ? JSON.parse(raw) : {});
       } catch (e) {
         reject(e);
+      }
+
+      async function readBodyBuffer(req) {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        return Buffer.concat(chunks);
+      }
+
+      function mergeProxyHeaders(upstreamHeaders = {}) {
+        const out = {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+          "Cache-Control": "no-store",
+        };
+        for (const [k, v] of Object.entries(upstreamHeaders)) {
+          if (typeof v !== "string") continue;
+          const key = String(k).toLowerCase();
+          if (key === "transfer-encoding") continue;
+          out[k] = v;
+        }
+        return out;
+      }
+
+      async function proxyLocalApi(req, res, pathname, search, routePrefix, targetBase) {
+        const upstreamPath = pathname.startsWith(routePrefix)
+          ? pathname.slice(routePrefix.length) || "/"
+          : pathname;
+        const targetUrl = `${targetBase}${upstreamPath}${search || ""}`;
+        const method = String(req.method || "GET").toUpperCase();
+        const headers = {};
+        for (const [k, v] of Object.entries(req.headers || {})) {
+          if (k.toLowerCase() === "host" || k.toLowerCase() === "content-length") continue;
+          if (Array.isArray(v)) {
+            headers[k] = v.join(", ");
+          } else if (typeof v === "string") {
+            headers[k] = v;
+          }
+        }
+        const body =
+          method === "GET" || method === "HEAD" || method === "OPTIONS"
+            ? undefined
+            : await readBodyBuffer(req);
+
+        const upstream = await fetch(targetUrl, {
+          method,
+          headers,
+          body,
+          signal: AbortSignal.timeout(300000),
+        });
+        const responseHeaders = mergeProxyHeaders(Object.fromEntries(upstream.headers.entries()));
+        res.writeHead(upstream.status, responseHeaders);
+        if (!upstream.body) {
+          res.end();
+          return;
+        }
+        const stream = Readable.fromWeb(upstream.body);
+        stream.on("error", () => {
+          try {
+            res.end();
+          } catch {}
+        });
+        stream.pipe(res);
       }
     });
     req.on("error", reject);
@@ -325,6 +561,69 @@ const server = http.createServer(async (req, res) => {
   const { pathname } = url;
 
   try {
+    if (pathname === "/api/ollama" || pathname.startsWith("/api/ollama/")) {
+      await proxyLocalApi(req, res, pathname, url.search, "/api/ollama", OLLAMA_BASE_URL);
+      return;
+    }
+
+    if (pathname === "/api/offgrid" || pathname.startsWith("/api/offgrid/")) {
+      await proxyLocalApi(req, res, pathname, url.search, "/api/offgrid", OFFGRID_BASE_URL);
+      return;
+    }
+
+    if (pathname === "/api/rag/docs" && req.method === "GET") {
+      return send(
+        res,
+        200,
+        JSON.stringify({
+          ok: true,
+          docs: listRagDocs(),
+          updatedAt: Number(ragStore.updatedAt || 0),
+          embedModel: String(ragStore.embedModel || "nomic-embed-text"),
+        }),
+        "application/json"
+      );
+    }
+
+    if (pathname === "/api/rag/docs" && req.method === "POST") {
+      const body = await readJson(req);
+      const title = String(body.title || "").trim() || "Knowledge Note";
+      const content = String(body.content || "");
+      if (!normalizeRagText(content)) {
+        return send(res, 400, JSON.stringify({ ok: false, error: "Knowledge text is empty." }), "application/json");
+      }
+      const doc = await addRagDoc(title, content, body.model);
+      return send(res, 200, JSON.stringify({ ok: true, doc }), "application/json");
+    }
+
+    if (pathname === "/api/rag/docs" && req.method === "DELETE") {
+      clearRagDocs();
+      return send(res, 200, JSON.stringify({ ok: true }), "application/json");
+    }
+
+    if (pathname.startsWith("/api/rag/docs/") && req.method === "DELETE") {
+      const docId = decodeURIComponent(pathname.slice("/api/rag/docs/".length));
+      if (!docId) {
+        return send(res, 400, JSON.stringify({ ok: false, error: "Missing document id." }), "application/json");
+      }
+      removeRagDoc(docId);
+      return send(res, 200, JSON.stringify({ ok: true, docId }), "application/json");
+    }
+
+    if (pathname === "/api/rag/query" && req.method === "POST") {
+      const body = await readJson(req);
+      const query = String(body.query || "");
+      if (!normalizeRagText(query)) {
+        return send(res, 400, JSON.stringify({ ok: false, error: "Query is required." }), "application/json");
+      }
+      const result = await buildRagContext(query, {
+        topK: body.topK,
+        minScore: body.minScore,
+        model: body.model,
+      });
+      return send(res, 200, JSON.stringify({ ok: true, result }), "application/json");
+    }
+
     if (pathname === "/api/webrtc/config") {
       const cfg = getWebRtcConfig();
       return send(

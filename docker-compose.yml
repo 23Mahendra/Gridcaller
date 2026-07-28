@@ -1,0 +1,43 @@
+services:
+  gridcaller:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gridcaller-hub
+    restart: unless-stopped
+    environment:
+      PORT: "8765"
+      PEER_PORT: "9000"
+      OLLAMA_BASE_URL: "http://ollama:11434"
+      OFFGRID_BASE_URL: "http://offgrid:7878/v1"
+      STUN_URLS: ""
+    ports:
+      - "8765:8765"
+      - "9000:9000"
+    volumes:
+      - ./share:/app/share
+      - ./transfer:/app/transfer
+      - ./data:/app/data
+      - ./hub-work:/app/hub-work
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: gridcaller-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+
+  offgrid:
+    image: ghcr.io/off-grid-ai/desktop:latest
+    container_name: gridcaller-offgrid
+    restart: unless-stopped
+    profiles: ["optional"]
+    ports:
+      - "7878:7878"
+
+volumes:
+  ollama-data:

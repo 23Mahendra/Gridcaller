@@ -34,10 +34,7 @@ function fallbackServers(): RTCIceServer[] {
       if (fromEnv.length) return fromEnv;
     }
   } catch {}
-  return [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-  ];
+  return [];
 }
 
 export async function getWebRtcIceServers(forceRefresh = false): Promise<RTCIceServer[]> {
