@@ -25,6 +25,7 @@ import { ensureMeshIdentity, syncLocalDeviceIdentity } from "./mesh/identity";
 import { ConsentGate } from "./ui/ConsentGate";
 import { getConsentState } from "./kernel/consent";
 import SetupWizard, { isWizardDone } from "./setup/SetupWizard";
+import { isPermsDone } from "./setup/permissions";
 import localAiEngine from "./kernel/localAiEngine";
 
 function userFromStorage() {
@@ -171,24 +172,28 @@ export default function App() {
       await setupNativeChrome();
       installViewportFit();
       try {
-        const r = await requestAllAppPermissions();
-        if (Capacitor.isNativePlatform()) {
-          const missing: string[] = [];
-          if (!r.microphone) missing.push("Microphone");
-          if (!r.camera) missing.push("Camera");
-          if (!r.location) missing.push("Location");
-          if (!r.bluetooth) missing.push("Bluetooth");
-          setPermNote(
-            missing.length
-              ? `Allow once: ${missing.join(", ")} — then nearby devices can connect for calls and texts.`
-              : `v${APP_VERSION_NAME} · Ready for nearby connections`
-          );
-          if (!missing.length) {
-            setTimeout(() => setPermNote(""), 5000);
+        if (!isPermsDone()) {
+          // First launch (before/during setup wizard): request all permissions once.
+          const r = await requestAllAppPermissions();
+          if (Capacitor.isNativePlatform()) {
+            const missing: string[] = [];
+            if (!r.microphone) missing.push("Microphone");
+            if (!r.camera) missing.push("Camera");
+            if (!r.location) missing.push("Location");
+            if (!r.bluetooth) missing.push("Bluetooth");
+            setPermNote(
+              missing.length
+                ? `Allow once: ${missing.join(", ")} — then nearby devices connect automatically.`
+                : `v${APP_VERSION_NAME} · All permissions granted — mesh always on`
+            );
+            if (!missing.length) {
+              setTimeout(() => setPermNote(""), 5000);
+            }
+            S.set("gc_perm_summary", r);
           }
-          S.set("gc_perm_summary", r);
         }
-        // After permissions → re-run full auto join (BT/Location now available)
+        // Always (re-)start auto-join after every launch so devices stay interconnected
+        // without requiring any further permission dialogs.
         void startFullAutoJoin(S.get("user_name") || S.get("mesh_name") || "GridUser");
         void startMeshKeepAlive();
         void startMeshVpn("gateway", navigator.onLine).catch(() => {});

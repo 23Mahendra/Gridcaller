@@ -13,6 +13,7 @@ import {
   setSignalUrl,
 } from "../mesh/identity";
 import {
+  markPermsDone,
   requestCamera,
   requestClipboard,
   requestLocation,
@@ -278,6 +279,8 @@ export default function SetupWizard({ onComplete }: Props) {
       try {
         localStorage.setItem("gc_perm_summary", JSON.stringify(results));
       } catch {}
+      // Mark all permissions as granted once — app will never re-request them.
+      markPermsDone();
       onComplete({
         name: (name || "GridUser").trim(),
         room: room.trim() || "gridcaller",

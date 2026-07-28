@@ -202,6 +202,32 @@ export async function checkMicQuery(): Promise<PermStatus> {
   return queryName("microphone" as PermissionName);
 }
 
+/** Key stored after the setup wizard grants all permissions once. */
+const PERMS_DONE_KEY = "gc_perms_done";
+
+/**
+ * Returns true once the setup wizard has successfully requested all
+ * permissions. Subsequent app launches skip re-requesting so no extra
+ * dialogs appear after installation.
+ */
+export function isPermsDone(): boolean {
+  try {
+    return localStorage.getItem(PERMS_DONE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Called at the end of the setup wizard to record that all permissions
+ * have been granted. After this point the app never asks again.
+ */
+export function markPermsDone(): void {
+  try {
+    localStorage.setItem(PERMS_DONE_KEY, "1");
+  } catch {}
+}
+
 export function statusEmoji(s: PermStatus) {
   if (s === "granted") return "✅";
   if (s === "denied") return "❌";
