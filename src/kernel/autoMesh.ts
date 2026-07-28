@@ -388,6 +388,34 @@ function handleInbound(raw: any, via: string) {
   }
 }
 
+/** Relay send function for full mesh messages (calls, SMS, groups, etc.) */
+let tryRelaySend: ((data: any, peerId?: string) => void) | null = null;
+
+/** Deliver a raw mesh message payload to all local MeshEngine listeners */
+function deliverToMeshListeners(msg: any) {
+  if (!msg?.from) return;
+  const myId = unifyLocalIdentity();
+  if (msg.from === myId) return;
+  // Also feed into MeshEngine peer table
+  try {
+    const mp = (MeshEngine as any).peers || {};
+    if (!mp[msg.from]) {
+      mp[msg.from] = {
+        name: msg.fromName || msg.from,
+        lastSeen: Date.now(),
+      };
+      (MeshEngine as any).peers = mp;
+    } else {
+      mp[msg.from].lastSeen = Date.now();
+      if (msg.fromName) mp[msg.from].name = msg.fromName;
+    }
+  } catch {}
+  const listeners = ((MeshEngine as any).listeners || []) as ((m: any) => void)[];
+  for (const fn of listeners) {
+    try { fn(msg); } catch {}
+  }
+}
+
 async function startTrystero() {
   if (trysteroRoom) return;
   try {
@@ -395,6 +423,28 @@ async function startTrystero() {
     trysteroRoom = room;
     const [send, get] = room.makeAction("gcauto");
     trySend = send as any;
+
+    // ── gcrelay: full mesh message bus over Trystero (no hub required) ──
+    // All MeshEngine.broadcast() calls are relayed here so calls, SMS, group
+    // messages, and presence all work purely peer-to-peer via WebRTC swarm.
+    const [sendRelay, getRelay] = room.makeAction("gcrelay");
+    tryRelaySend = sendRelay as any;
+
+    getRelay((data: any, peerKey: string) => {
+      trysteroOk = true;
+      if (!data) return;
+      const msg = {
+        type: data.type,
+        data: data.data,
+        from: data.from || peerKey,
+        fromName: data.fromName || data.from || peerKey,
+        ts: data.ts || Date.now(),
+      };
+      // Deliver all relayed messages (calls, SMS, groups, presence) to listeners
+      deliverToMeshListeners(msg);
+      // Also handle presence types in the auto-mesh peer table
+      handleInbound(msg, "trystero-relay");
+    });
 
     get((data: any, peerKey: string) => {
       trysteroOk = true;
@@ -433,12 +483,34 @@ async function startTrystero() {
     try {
       send(buildPresence({ type: "AM_HELLO" }));
     } catch {}
-    console.info("[AutoMesh] Trystero room joined", AUTO_MESH_ROOM);
+
+    // Install global relay hook so mesh.ts can call us without circular import
+    try {
+      (window as any).__gc_trystero_relay = (
+        type: string,
+        data: any,
+        from: string,
+        fromName: string
+      ) => {
+        try {
+          (tryRelaySend as any)?.({ type, data, from, fromName, ts: Date.now() });
+        } catch {}
+      };
+    } catch {}
+
+    console.info("[AutoMesh] Trystero room joined · gcrelay bus active ·", AUTO_MESH_ROOM);
   } catch (e) {
     trysteroOk = false;
     console.warn("[AutoMesh] Trystero failed (needs network for trackers)", e);
   }
   emitStatus();
+}
+
+/** Relay a mesh message via Trystero (used by MeshEngine when hub is unavailable) */
+export function relayViaTrystero(type: string, data: any, from: string, fromName: string) {
+  try {
+    tryRelaySend?.({ type, data, from, fromName, ts: Date.now() } as any);
+  } catch {}
 }
 
 async function probeAndRegisterHub() {
@@ -638,7 +710,11 @@ export function stopAutoMesh() {
   } catch {}
   trysteroRoom = null;
   trySend = null;
+  tryRelaySend = null;
   trysteroOk = false;
+  try {
+    delete (window as any).__gc_trystero_relay;
+  } catch {}
 }
 
 // Eager start in browser / WebView (APK)
