@@ -20,6 +20,15 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      (() => {
+        const { pathname, search, hash } = window.location;
+        if (pathname.endsWith("/")) return;
+        const tail = pathname.split("/").pop() || "";
+        if (!tail || tail.includes(".")) return;
+        window.location.replace(`${pathname}/${search}${hash}`);
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
