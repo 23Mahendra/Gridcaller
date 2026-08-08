@@ -64,10 +64,10 @@ export function gunPeersForMesh(cloudPeers: string[] = []): string[] {
 
 export function meshModeLabel(): string {
   if (S.get("gc_radio_mode", true) === true || getForceLocalMesh()) {
-    return "Free radio mesh · no SIM · no cloud track";
+    return "Sovereign mesh · BLE + hotspot + swarm · no SIM · no cloud";
   }
-  if (!allowCloudMesh()) return "Sovereign local mesh · peer relays only";
-  if (isFlightOrOffline()) return "Offline / flight · LAN mesh only";
+  if (!allowCloudMesh()) return "Local mesh · peer relays only";
+  if (isFlightOrOffline()) return "Offline · hotspot mesh active";
   return "Cloud-bridged mesh · explicit opt-in";
 }
 

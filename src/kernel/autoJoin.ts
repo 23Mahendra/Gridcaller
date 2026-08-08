@@ -7,15 +7,17 @@
  * soft multi-hop), it appears ONLINE by itself.
  *
  * Paths (all permutations, continuous):
- *  · wifi-hub     — LAN hub HTTP register/poll + WS
+ *  · wifi-hub     — LAN hub HTTP register/poll + WS (OPTIONAL — mesh works without it)
  *  · multi-hub    — probe common LAN IPs if default hub down
- *  · swarm        — Trystero global room (WebRTC discovery)
+ *  · swarm        — Trystero global room (WebRTC discovery, needs internet)
  *  · soft-tower   — multi-hop software relay (peer density = range)
  *  · free-fabric  — bonded free links
- *  · bluetooth    — continuous BLE scan (nearby radios)
+ *  · bluetooth    — continuous BLE scan (nearby radios, no internet needed)
  *
  * Honesty: raw cellular/ISM RF chips are not open to apps.
  * "RF fabric" here = software multi-hop over every OS-allowed radio.
+ * For device-to-device calls without internet: one phone acts as WiFi
+ * hotspot, others connect — no SIM, no cloud, no PC hub required.
  *
  * One-time OS permissions (Location / Nearby / BT / Mic), then forever auto.
  */
@@ -248,16 +250,17 @@ async function probeAnyHub(): Promise<string | null> {
 
 async function wifiAutoPass() {
   ensureHubDefaults();
+  // Mesh-independent paths start first — no hub dependency
+  try {
+    softTowerHop.start(meName());
+    freeMeshFabric.start(meName());
+  } catch {}
   try {
     (MeshEngine as any).start?.();
     (MeshEngine as any).reconnect?.();
   } catch {}
   try {
     await startAutoMesh(meName());
-  } catch {}
-  try {
-    softTowerHop.start(meName());
-    freeMeshFabric.start(meName());
   } catch {}
 
   try {
@@ -438,15 +441,17 @@ export async function startFullAutoJoin(userName?: string): Promise<AutoJoinStat
     (MeshEngine as any).start?.();
   } catch {}
   startCallSession();
-  await startAutoMesh(meName());
-  await startResilientMesh();
+  // Fire all mesh paths in parallel — hub probe must NOT block BLE/swarm/softTower
+  void startAutoMesh(meName());
+  void startResilientMesh();
   try {
     softTowerHop.start(meName());
     freeMeshFabric.start(meName());
   } catch {}
 
-  await wifiAutoPass();
-  setTimeout(() => void bleAutoPass(), 1500);
+  // wifi + BLE both start immediately, in parallel
+  void wifiAutoPass();
+  void bleAutoPass(); // no delay — BLE must start at same time as hub probe
 
   // Aggressive continuous discovery — proximity fabric
   wifiTimer = setInterval(() => void wifiAutoPass(), 3000);

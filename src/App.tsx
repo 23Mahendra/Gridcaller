@@ -9,6 +9,7 @@ import { S } from "./kernel/storage";
 import { requestAllAppPermissions } from "./kernel/nativePermissions";
 import { installViewportFit } from "./lib/viewportFit";
 import { ensureHubDefaults } from "./kernel/meshHubConfig";
+import { enableFreeRadioMeshDefaults } from "./kernel/offlineMode";
 import { startAutoMesh, unifyLocalIdentity } from "./kernel/autoMesh";
 import { startOtaWatcher, onOta, applyUpdate, type UpdateInfo } from "./kernel/otaUpdate";
 import { startResilientMesh, onPathHealth, type PathHealth } from "./kernel/resilientMesh";
@@ -122,6 +123,8 @@ export default function App() {
 
     // Critical for APK: hub must be PC LAN IP, not localhost
     ensureHubDefaults();
+    // Sovereign mesh first — no SIM, no cloud, no hub required to start
+    enableFreeRadioMeshDefaults();
     const identity = ensureMeshIdentity();
     void syncLocalDeviceIdentity({ peerId: identity.peerId }).catch(() => {});
     unifyLocalIdentity();

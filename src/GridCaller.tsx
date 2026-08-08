@@ -12416,7 +12416,7 @@ export default function GridCaller({
                       Local only
                     </div>
                     <div style={{ fontSize: 12, color: tokens.label, lineHeight: 1.45, marginBottom: 10 }}>
-                      Same Wi‑Fi or hotspot. {meshModeLabel()}
+                      Bluetooth · hotspot · LAN · swarm — no SIM needed. {meshModeLabel()}
                     </div>
                     <button
                       type="button"
