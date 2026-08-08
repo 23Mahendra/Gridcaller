@@ -37,7 +37,6 @@ import {
 } from "./meshHubConfig";
 import { startAutoMesh, unifyLocalIdentity, getStatus as autoStatus, getPeers as autoPeers } from "./autoMesh";
 import { startResilientMesh } from "./resilientMesh";
-import { startCallSession } from "./callSession";
 import softTowerHop from "./softTowerHopNet";
 import freeMeshFabric from "./freeMeshFabric";
 import { ensureLocationPermission } from "./nativePermissions";
@@ -440,7 +439,6 @@ export async function startFullAutoJoin(userName?: string): Promise<AutoJoinStat
   try {
     (MeshEngine as any).start?.();
   } catch {}
-  startCallSession();
   // Fire all mesh paths in parallel — hub probe must NOT block BLE/swarm/softTower
   void startAutoMesh(meName());
   void startResilientMesh();
