@@ -5,6 +5,7 @@
   "description": "Real GridCaller + Mesh Network — PeerJS/Trystero/Gun, APK share BT/WiFi, GitHub/gh, GridAlive bridge",
   "type": "module",
   "scripts": {
+    "setup": "npm install --legacy-peer-deps && npm run build && node server/hub.mjs",
     "dev": "vite --host 0.0.0.0 --port 5173",
     "build": "vite build",
     "test": "npm run test:node",
@@ -22,7 +23,8 @@
     "apk:copy": "node server/copy-apk.mjs",
     "push": "node scripts/push-to-devices.mjs",
     "push:ota": "node -e \"fetch('http://127.0.0.1:8765/api/update/push',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:true})}).then(r=>r.json()).then(console.log).catch(e=>console.error(e))\"",
-    "postinstall": "node -e \"console.log('[gridcaller] Real mesh stack ready: peerjs + trystero + gun + capacitor share')\""
+    "postinstall": "node -e \"console.log('[gridcaller] Real mesh stack ready: peerjs + trystero + gun + capacitor share')\"",
+    "install:safe": "npm install --legacy-peer-deps"
   },
   "dependencies": {
     "@capacitor-community/bluetooth-le": "7.1.1",

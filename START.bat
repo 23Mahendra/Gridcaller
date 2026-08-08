@@ -3,12 +3,12 @@ title GridCaller REAL Mesh Hub
 cd /d "%~dp0"
 echo.
 echo  ============================================
-echo   GridCaller REAL — Mesh + APK share + gh
+echo   GridCaller REAL — Mobile Browser App
 echo  ============================================
 echo.
 if not exist "node_modules\" (
   echo Installing packages (peerjs trystero gun capacitor)...
-  call npm install
+  call npm install --legacy-peer-deps
 )
 if not exist "dist\index.html" (
   echo Building UI...
@@ -16,11 +16,15 @@ if not exist "dist\index.html" (
 )
 if not exist "share\" mkdir share
 echo.
-echo  Hub ports: 8765 (HTTP/WS) + 9000 (PeerJS)
-echo  Drop APK in: D:\gridcaller\share\
-echo  After Android build: npm run apk:copy
+echo  ============================================
+echo   App ready! Phone ko same WiFi se connect
+echo   karo aur browser mein yeh link open karo:
 echo.
-echo  Phone same WiFi/hotspot - open http://PC-IP:8765
+echo   http://YOUR-PC-IP:8765
+echo.
+echo   (Apna PC ka IP ipconfig se dekho)
+echo  ============================================
+echo  Hub ports: 8765 (HTTP/WS) + 9000 (PeerJS)
 echo  Stop: Ctrl+C
 echo.
 node server/hub.mjs
