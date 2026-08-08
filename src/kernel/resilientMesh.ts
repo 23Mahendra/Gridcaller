@@ -74,12 +74,13 @@ export function getPathHealth(): PathHealth {
   if (bluetooth) active.push("bluetooth");
 
   let note = "Mesh ready";
-  if (st.hubOk && onlinePeers > 0) note = "Wi‑Fi hub mesh · peers online";
-  else if (st.hubOk) note = "Wi‑Fi hub ON · waiting for other phones";
-  else if (st.trysteroOk) note = "Swarm mesh (hub offline)";
-  else if (bluetooth) note = "Bluetooth nearby path active";
-  else if (softN) note = "Soft-tower hop path";
-  else note = "Searching paths (Wi‑Fi / swarm / BT)…";
+  if (st.hubOk && onlinePeers > 0) note = "Hub mesh · peers online";
+  else if (st.hubOk) note = "Hub ON · waiting for other phones";
+  else if (st.trysteroOk && onlinePeers > 0) note = "Swarm mesh · peers online (no hub needed)";
+  else if (st.trysteroOk) note = "Swarm mesh ready (no hub/SIM needed)";
+  else if (bluetooth) note = "Bluetooth nearby · hotspot one phone for calls";
+  else if (softN) note = "Soft-tower relay active";
+  else note = "Searching… — enable hotspot on one phone, others connect (no SIM needed)";
 
   return {
     wifiHub: st.hubOk,

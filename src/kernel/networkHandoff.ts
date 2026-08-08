@@ -14,8 +14,6 @@ import { Network } from "@capacitor/network";
 import { MeshEngine } from "./mesh";
 import { resolveHubHttp, probeHub, ensureHubDefaults } from "./meshHubConfig";
 import { startAutoMesh } from "./autoMesh";
-// startFullAutoJoin imported lazily inside quietMeshRejoin to break the
-// autoJoin → callSession → networkHandoff → autoJoin circular dependency.
 import { logMeshEvent } from "./meshDirectory";
 import { bus } from "./bus";
 import { S } from "./storage";
@@ -43,10 +41,6 @@ async function quietMeshRejoin() {
   } catch {}
   try {
     await startAutoMesh(S.get("user_name") || S.get("mesh_name") || "GridUser");
-  } catch {}
-  try {
-    const { startFullAutoJoin } = await import("./autoJoin");
-    await startFullAutoJoin(S.get("user_name") || S.get("mesh_name") || "GridUser");
   } catch {}
   try {
     await probeHub(resolveHubHttp());

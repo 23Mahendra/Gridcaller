@@ -661,9 +661,10 @@ export function getStatus(): AutoMeshStatus {
   const list = getPeers();
   const noteParts: string[] = [];
   if (hubOk) noteParts.push("Hub mesh ON");
-  else noteParts.push("Hub offline — using swarm");
+  else noteParts.push("Hub offline — BLE+swarm+relay active");
   if (trysteroOk) noteParts.push("Global swarm ON");
-  noteParts.push("Auto-join (no manual peer connect)");
+  else noteParts.push("Hotspot/BLE mesh ready");
+  noteParts.push("Auto-join (no SIM · no central server)");
   return {
     started,
     hubOk,
