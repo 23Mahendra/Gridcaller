@@ -2400,17 +2400,50 @@ export default function GridCaller({
           } catch {}
           mapObjRef.current = null;
         }
+        const mergedPeers = new Map<string, MeshVisibleUser>();
+        const addPeer = (raw: Partial<MeshVisibleUser> & { id?: string }) => {
+          const id = String(raw.id || "").trim();
+          if (!id || blocked.includes(id) || isSelfPeer(id)) return;
+          const prev = mergedPeers.get(id);
+          mergedPeers.set(id, {
+            id,
+            name: String(raw.name || prev?.name || id.slice(0, 12)).trim() || id.slice(0, 12),
+            online: raw.online ?? prev?.online ?? true,
+            distance: raw.distance ?? prev?.distance,
+            handle: raw.handle ?? prev?.handle,
+            phone: raw.phone ?? prev?.phone,
+            displayNumber: raw.displayNumber ?? prev?.displayNumber,
+            lat: raw.lat ?? prev?.lat,
+            lng: raw.lng ?? prev?.lng,
+          });
+        };
+        for (const p of peers as any[]) addPeer(p);
+        for (const p of meshMapPeers) addPeer(p);
+
+        const allPeers = Array.from(mergedPeers.values());
+        const liveGpsPeers = allPeers.filter(
+          (peer): peer is MeshVisibleUser & { lat: number; lng: number } =>
+            typeof peer.lat === "number" &&
+            typeof peer.lng === "number" &&
+            Number.isFinite(peer.lat) &&
+            Number.isFinite(peer.lng)
+        );
+
         const center: [number, number] = myGps
           ? [myGps.lat, myGps.lng]
-          : radarPeers[0]
-            ? [radarPeers[0].lat, radarPeers[0].lng]
+          : liveGpsPeers[0]
+            ? [liveGpsPeers[0].lat, liveGpsPeers[0].lng]
             : [20.5937, 78.9629]; // India default
-        const map = L.map(mapBoxRef.current, { zoomControl: true }).setView(center, myGps || radarPeers.length ? 12 : 5);
+        const map = L.map(mapBoxRef.current, { zoomControl: true }).setView(center, myGps || allPeers.length ? 12 : 5);
         L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
           attribution: "© OpenStreetMap",
           maxZoom: 19,
         }).addTo(map);
-        const popupNode = (title: string, lines: string[]) => {
+        const popupNode = (
+          title: string,
+          lines: string[],
+          actions: { label: string; color: string; onClick: () => void }[] = []
+        ) => {
           const root = document.createElement("div");
           const head = document.createElement("div");
           head.textContent = title;
@@ -2421,6 +2454,28 @@ export default function GridCaller({
             const row = document.createElement("div");
             row.textContent = line;
             row.style.fontSize = "12px";
+            root.appendChild(row);
+          }
+          if (actions.length) {
+            const row = document.createElement("div");
+            row.style.display = "flex";
+            row.style.gap = "6px";
+            row.style.marginTop = "8px";
+            for (const action of actions) {
+              const btn = document.createElement("button");
+              btn.type = "button";
+              btn.textContent = action.label;
+              btn.style.border = "none";
+              btn.style.borderRadius = "6px";
+              btn.style.padding = "4px 8px";
+              btn.style.fontSize = "11px";
+              btn.style.fontWeight = "700";
+              btn.style.cursor = "pointer";
+              btn.style.background = "#f2f2f7";
+              btn.style.color = action.color;
+              btn.onclick = () => action.onClick();
+              row.appendChild(btn);
+            }
             root.appendChild(row);
           }
           return root;
@@ -2444,14 +2499,52 @@ export default function GridCaller({
         }
         const bounds: [number, number][] = [];
         if (myGps) bounds.push([myGps.lat, myGps.lng]);
-        for (const p of radarPeers) {
-          L.marker([p.lat, p.lng], { icon: icon(p.online ? "#30d158" : "#98989f") })
+        const peersWithoutGps = allPeers.filter((peer) => !liveGpsPeers.some((live) => live.id === peer.id));
+        const fallbackLatDivisor = 111320;
+        const fallbackLngDivisor = Math.max(24000, Math.cos((center[0] * Math.PI) / 180) * 111320);
+        const mapPeers: (MeshVisibleUser & { lat: number; lng: number; hasLiveGps: boolean })[] = [
+          ...liveGpsPeers.map((p) => ({ ...p, hasLiveGps: true })),
+          ...peersWithoutGps.map((p, idx) => {
+            const angle = (idx / Math.max(1, peersWithoutGps.length)) * Math.PI * 2;
+            const radiusMeters = 140 + (idx % 5) * 55;
+            return {
+              ...p,
+              lat: center[0] + (Math.sin(angle) * radiusMeters) / fallbackLatDivisor,
+              lng: center[1] + (Math.cos(angle) * radiusMeters) / fallbackLngDivisor,
+              hasLiveGps: false,
+            };
+          }),
+        ];
+        const liveGpsIds = new Set(liveGpsPeers.map((p) => p.id));
+        for (const p of mapPeers) {
+          L.marker([p.lat, p.lng], { icon: icon(!p.hasLiveGps ? "#ff9f0a" : p.online ? "#30d158" : "#98989f") })
             .addTo(map)
             .bindPopup(
               popupNode(p.name, [
                 `ID: ${p.id}`,
                 `User: ${formatMeshUserId(p)}`,
-                p.distance != null ? `Distance: ${Math.round(p.distance)}m` : "",
+                liveGpsIds.has(p.id)
+                  ? p.distance != null
+                    ? `Distance: ${Math.round(p.distance)}m`
+                    : "Live GPS"
+                  : "Approximate map pin (live GPS unavailable)",
+              ], [
+                {
+                  label: "Message",
+                  color: "#007aff",
+                  onClick: () => {
+                    setMenuOpen(false);
+                    msgMeshNetwork(p.id, p.name);
+                  },
+                },
+                {
+                  label: "Call",
+                  color: "#30d158",
+                  onClick: () => {
+                    setMenuOpen(false);
+                    void placeCall(p.id, p.name);
+                  },
+                },
               ])
             );
           bounds.push([p.lat, p.lng]);
@@ -2474,7 +2567,7 @@ export default function GridCaller({
       } catch {}
       mapObjRef.current = null;
     };
-  }, [menuOpen, menuView, radarPeers, myGps, myName, myGridDisplay]);
+  }, [menuOpen, menuView, radarPeers, myGps, myName, myGridDisplay, blocked, peers, meshMapPeers]);
 
   const networkPeopleCount = useMemo(() => {
     // Real connected devices only (no fabric ghosts / self duplicates)
@@ -10645,6 +10738,25 @@ export default function GridCaller({
                         </div>
                         <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
                           <button
+                            type="button"
+                            onClick={() => {
+                              setMenuOpen(false);
+                              msgMeshNetwork(p.id, p.name);
+                            }}
+                            style={{
+                              border: "none",
+                              borderRadius: 8,
+                              padding: "5px 10px",
+                              fontSize: 11,
+                              fontWeight: 600,
+                              background: tokens.fill,
+                              color: tokens.blue,
+                              cursor: "pointer",
+                            }}
+                           >
+                            Message
+                           </button>
+                           <button
                             type="button"
                             onClick={() => placeCall(p.id, p.name)}
                             style={{
