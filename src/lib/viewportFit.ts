@@ -49,6 +49,10 @@ export function installViewportFit() {
         if (h > 0) root.style.setProperty("--app-height", `${h}px`);
         if (w > 0) root.style.setProperty("--app-width", `${w}px`);
 
+        // Track keyboard height so input bars can add padding when keyboard is visible
+        const kh = Math.max(0, window.innerHeight - h);
+        root.style.setProperty("--keyboard-height", `${kh}px`);
+
         // Body fixed full-screen
         document.body.style.height = `${h}px`;
         document.body.style.width = `${w}px`;

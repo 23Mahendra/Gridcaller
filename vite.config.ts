@@ -36,6 +36,42 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/offgrid/, ""),
       },
+      // LM Studio (localhost:1234)
+      "/api/lmstudio": {
+        target: "http://127.0.0.1:1234/v1",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/lmstudio/, ""),
+      },
+      // Jan.ai (localhost:1337)
+      "/api/janai": {
+        target: "http://127.0.0.1:1337/v1",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/janai/, ""),
+      },
+      // llama.cpp server (localhost:8080)
+      "/api/llamacpp": {
+        target: "http://127.0.0.1:8080/v1",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/llamacpp/, ""),
+      },
+      // text-generation-webui (localhost:5000)
+      "/api/textgenui": {
+        target: "http://127.0.0.1:5000/v1",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/textgenui/, ""),
+      },
+      // GPT4All (localhost:4891)
+      "/api/gpt4all": {
+        target: "http://127.0.0.1:4891/v1",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/gpt4all/, ""),
+      },
+      // AnythingLLM (localhost:3001)
+      "/api/anythingllm": {
+        target: "http://127.0.0.1:3001/api/v1/openai",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/anythingllm/, ""),
+      },
     },
   },
   build: {

@@ -86,16 +86,16 @@ const LINK_META: Record<
     note: "Web Bluetooth / BLE when device grants session access",
   },
   "ir-optical": {
-    label: "IR / Optical bridge",
+    label: "QR / Optical handoff",
     rangeHintM: 3,
     powerCost: 1,
-    note: "QR + camera optical handoff (works air-gapped, free light path)",
+    note: "Payload encoded as QR; peer scans with camera. Not infrared — manual scan required.",
   },
   "rf-free": {
-    label: "Free multi-hop fabric",
+    label: "Software Mesh Fabric",
     rangeHintM: 0,
     powerCost: 2,
-    note: "All free links bonded · range = peer density × multi-hop relay",
+    note: "Aggregated software paths (Wi-Fi + BLE + QR). No RF radio — range scales with peer density.",
   },
 };
 

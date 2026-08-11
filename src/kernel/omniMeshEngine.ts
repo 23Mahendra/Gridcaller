@@ -647,6 +647,11 @@ class OmniMeshEngine {
       priority: pkt.priority === "presence" ? "relay" : pkt.priority,
     };
     this.stats.packetsRelayed++;
+    // Track actual bytes relayed so bandwidth_sell earnings are measurement-based
+    try {
+      const payloadBytes = JSON.stringify(relay.payload || {}).length;
+      bus.emit("omnimesh:bytes_relayed", { bytes: payloadBytes, packetId: relay.id });
+    } catch {}
     const wire = this.availableTransports().filter((t) => t !== "ram-relay").slice(0, 3);
     if (wire.length) await this.dispatchCombo(relay, wire);
   }
@@ -1075,11 +1080,11 @@ class OmniMeshEngine {
   }
 
   private rangeLabel(m: number): string {
-    if (m < 30) return `~${m} m · same room / device mesh`;
-    if (m < 150) return `~${m} m · Wi‑Fi floor (software multi-hop)`;
-    if (m < 800) return `~${m} m · building LAN via peer relays`;
-    if (m < 5000) return `~${(m / 1000).toFixed(1)} km-class · dense peer software mesh`;
-    return `~${(m / 1000).toFixed(1)} km-class · multi-hop software mesh (no dongle)`;
+    if (m < 30) return `~${m} m est. · same room / device mesh`;
+    if (m < 150) return `~${m} m est. · Wi‑Fi floor (software multi-hop)`;
+    if (m < 800) return `~${m} m est. · building LAN via peer relays`;
+    if (m < 5000) return `~${(m / 1000).toFixed(1)} km est. · dense peer software mesh`;
+    return `~${(m / 1000).toFixed(1)} km est. · multi-hop software mesh (no dongle)`;
   }
 
   private aiModeLabel(): string {

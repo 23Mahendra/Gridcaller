@@ -2,10 +2,15 @@
 // GRIDALIVE KERNEL — Local AI Engine
 // Unified offline AI: chat, image generation, voice STT/TTS
 //
-// Supported backends (auto-detected, zero API keys):
-//   • Ollama   — http://localhost:11434  (chat + model pull)
-//   • OpenAI-compatible local gateway   (chat + images + audio)
-//     e.g. Off Grid AI running at http://localhost:7878/v1
+// Auto-detects ALL common local LLM backends (zero config):
+//   • Ollama          — localhost:11434
+//   • LM Studio       — localhost:1234
+//   • Jan.ai          — localhost:1337
+//   • llama.cpp       — localhost:8080
+//   • text-gen-webui  — localhost:5000
+//   • GPT4All         — localhost:4891
+//   • Off Grid AI     — localhost:7878
+//   • AnythingLLM     — localhost:3001
 //
 // All inference runs on-device. Nothing leaves the machine.
 // ═══════════════════════════════════════════════════════
@@ -16,6 +21,25 @@ import { S } from "./storage";
 // Vite dev-server proxy paths (avoids CORS for local backends)
 const OLLAMA_BASE = "/api/ollama";
 const OFFGRID_BASE = "/api/offgrid";
+
+// ─── Known OpenAI-compatible local backends ─────────────────────────────────
+/** Each entry maps to a Vite proxy route defined in vite.config.ts */
+export interface KnownBackend {
+  name: string;       // display name e.g. "LM Studio"
+  proxyPath: string;  // Vite proxy prefix, e.g. "/api/lmstudio"
+  port: number;       // real localhost port
+  downloadUrl: string;
+}
+
+export const KNOWN_OPENAI_BACKENDS: KnownBackend[] = [
+  { name: "LM Studio",          proxyPath: "/api/lmstudio",   port: 1234, downloadUrl: "https://lmstudio.ai" },
+  { name: "Jan.ai",             proxyPath: "/api/janai",      port: 1337, downloadUrl: "https://jan.ai" },
+  { name: "llama.cpp server",   proxyPath: "/api/llamacpp",   port: 8080, downloadUrl: "https://github.com/ggerganov/llama.cpp" },
+  { name: "text-gen-webui",     proxyPath: "/api/textgenui",  port: 5000, downloadUrl: "https://github.com/oobabooga/text-generation-webui" },
+  { name: "GPT4All",            proxyPath: "/api/gpt4all",    port: 4891, downloadUrl: "https://gpt4all.io" },
+  { name: "Off Grid AI",        proxyPath: "/api/offgrid",    port: 7878, downloadUrl: "https://github.com/off-grid-ai/desktop/releases/latest" },
+  { name: "AnythingLLM",        proxyPath: "/api/anythingllm",port: 3001, downloadUrl: "https://useanything.com" },
+];
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
@@ -53,6 +77,23 @@ export interface AiStatusSnapshot {
   audioBackend: AiBackend;
   chatModels: AiModel[];
   activeModel: string;
+  /** Which backend was actually detected — display name + port */
+  detectedBackend?: { name: string; port: number };
+  /** Browser-native STT (SpeechRecognition API) — no external service needed */
+  nativeStt: boolean;
+  /** Browser/OS-native TTS (speechSynthesis API) — fully local, no server */
+  nativeTts: boolean;
+}
+
+/** True if the browser exposes a SpeechRecognition API (Chrome/Edge built-in). */
+export function browserHasSpeechRecognition(): boolean {
+  return typeof window !== "undefined" &&
+    ("SpeechRecognition" in window || "webkitSpeechRecognition" in window);
+}
+
+/** True if the browser/OS provides speech synthesis (available on virtually all platforms). */
+export function browserHasSpeechSynthesis(): boolean {
+  return typeof window !== "undefined" && "speechSynthesis" in window;
 }
 
 // ─── Engine ─────────────────────────────────────────────────────────────────
@@ -63,7 +104,10 @@ class LocalAiEngine {
   private _audioBackend: AiBackend = "none";
   private _chatModels: AiModel[] = [];
   private _activeModel: string = S.get("local_ai_model", "");
+  private _detectedBackend: { name: string; port: number } | undefined;
+  private _activeChatProxyPath: string = OFFGRID_BASE;
   private _monitorStarted = false;
+  private _checking = false; // guard against concurrent checkAvailability runs
   private _checkInterval: ReturnType<typeof setInterval> | null = null;
   private _retryTimers: Array<ReturnType<typeof setTimeout>> = [];
   private _visibilityHandler: (() => void) | null = null;
@@ -83,14 +127,62 @@ class LocalAiEngine {
   get audioAvailable(): boolean { return this._audioBackend !== "none"; }
   get pulling(): Map<string, AiPullProgress> { return new Map(this._pulling); }
 
+  get detectedBackend() { return this._detectedBackend; }
+
   // ─── Backend detection ────────────────────────────────────────────────────
+
+  /** Probe a generic OpenAI-compatible endpoint at a given Vite proxy path */
+  private async probeOpenAiCompatAt(
+    proxyPath: string,
+    backendName: string,
+    backendPort: number,
+  ): Promise<boolean> {
+    try {
+      const res = await fetch(`${proxyPath}/models`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+      const models: AiModel[] = (data.data ?? []).map((m: any) => ({
+        id: m.id,
+        name: m.id,
+        ownedBy: m.owned_by ?? backendName,
+      }));
+      const found: AiModel[] = models.length
+        ? models
+        : [{ id: "local", name: "local", ownedBy: backendName }];
+
+      // First OpenAI-compat backend wins as the active chat backend
+      if (this._chatBackend === "none") {
+        this._chatModels = found;
+        this._chatBackend = "openai_compat";
+        this._activeChatProxyPath = proxyPath;
+        this._imageBackend = "openai_compat";
+        this._audioBackend = "openai_compat";
+        this._detectedBackend = { name: backendName, port: backendPort };
+        if (!this._activeModel || !found.some((m) => m.id === this._activeModel)) {
+          this._activeModel = found[0].id;
+          S.set("local_ai_model", this._activeModel);
+        }
+      } else {
+        // Merge additional models
+        const existing = new Set(this._chatModels.map((m) => m.id));
+        for (const m of found) {
+          if (!existing.has(m.id)) this._chatModels.push(m);
+        }
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   private async probeOllama(): Promise<boolean> {
     try {
       const res = await fetch(`${OLLAMA_BASE}/api/tags`, {
-        signal: AbortSignal.timeout(2500),
+        signal: AbortSignal.timeout(4000),
       });
-      if (!res.ok) return false;
+      if (!res.ok) { console.warn("[localAiEngine] probeOllama non-ok:", res.status); return false; }
       const data = await res.json();
       const models: AiModel[] = (data.models ?? []).map((m: any) => ({
         id: m.name,
@@ -114,65 +206,65 @@ class LocalAiEngine {
         }
       }
       return true;
-    } catch {
-      return false;
-    }
-  }
-
-  private async probeOpenAiCompat(): Promise<boolean> {
-    try {
-      const res = await fetch(`${OFFGRID_BASE}/models`, {
-        signal: AbortSignal.timeout(2500),
-      });
-      if (!res.ok) return false;
-      const data = await res.json();
-      const models: AiModel[] = (data.data ?? []).map((m: any) => ({
-        id: m.id,
-        name: m.id,
-        ownedBy: m.owned_by ?? "local",
-      }));
-
-      const gatewayModels: AiModel[] = models.length
-        ? models
-        : [{ id: "local", name: "local", ownedBy: "local" }];
-
-      // OpenAI-compat gateway becomes the preferred chat backend
-      this._chatModels = [
-        ...gatewayModels,
-        ...this._chatModels.filter(
-          (existing) => !gatewayModels.some((m) => m.id === existing.id)
-        ),
-      ];
-      this._chatBackend = "openai_compat";
-
-      const activeOk = this._activeModel && gatewayModels.some((m) => m.id === this._activeModel);
-      if (!activeOk) {
-        this._activeModel = gatewayModels[0].id;
-        S.set("local_ai_model", this._activeModel);
-      }
-
-      // Assume gateway supports images and audio if reachable
-      this._imageBackend = "openai_compat";
-      this._audioBackend = "openai_compat";
-      return true;
-    } catch {
+    } catch (e) {
+      console.warn("[localAiEngine] probeOllama error:", (e as any)?.message, (e as any)?.name);
       return false;
     }
   }
 
   async checkAvailability(): Promise<AiStatusSnapshot> {
-    // Reset before probing both backends simultaneously
+    // Skip if a check is already in progress to prevent race condition
+    if (this._checking) return this.getSnapshot();
+    this._checking = true;
+    try {
+    return await this._doCheck();
+    } finally {
+      this._checking = false;
+    }
+  }
+
+  private async _doCheck(): Promise<AiStatusSnapshot> {
+    // Reset before probing all backends
     this._chatBackend = "none";
     this._imageBackend = "none";
     this._audioBackend = "none";
     this._chatModels = [];
+    this._detectedBackend = undefined;
+    this._activeChatProxyPath = OFFGRID_BASE;
 
-    await Promise.all([this.probeOllama(), this.probeOpenAiCompat()]);
+    // Probe Ollama first (has model pull support), then all OpenAI-compat backends in parallel
+    const ollamaOk = await this.probeOllama();
+
+    if (!ollamaOk) {
+      // Probe ALL known OpenAI-compat backends simultaneously
+      await Promise.all(
+        KNOWN_OPENAI_BACKENDS.map((b) =>
+          this.probeOpenAiCompatAt(b.proxyPath, b.name, b.port)
+        )
+      );
+    }
+
+    // If Ollama succeeded but no OpenAI-compat detected yet for images/audio,
+    // try the full openai-compat list for image/audio support
+    if (ollamaOk && this._imageBackend === "none") {
+      for (const b of KNOWN_OPENAI_BACKENDS) {
+        try {
+          const r = await fetch(`${b.proxyPath}/models`, { signal: AbortSignal.timeout(1500) });
+          if (r.ok) { this._imageBackend = "openai_compat"; this._audioBackend = "openai_compat"; break; }
+        } catch { /* skip */ }
+      }
+    }
 
     S.set("local_ai_available", this._chatBackend !== "none");
+    const detected = this.detectedBackend;
+    if (detected) {
+      S.set("local_ai_backend_name", detected.name);
+      S.set("local_ai_backend_port", String(detected.port));
+    }
     this._emitStatus();
     return this.getSnapshot();
   }
+  // (end of _doCheck)
 
   /** Start background availability monitoring (idempotent). */
   startMonitoring() {
@@ -230,7 +322,7 @@ class LocalAiEngine {
     }
 
     if (this._chatBackend === "openai_compat") {
-      const res = await fetch(`${OFFGRID_BASE}/chat/completions`, {
+      const res = await fetch(`${this._activeChatProxyPath}/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -247,7 +339,7 @@ class LocalAiEngine {
       return (data.choices?.[0]?.message?.content as string) ?? "";
     }
 
-    throw new Error("No local AI backend is running. Start Ollama or Off Grid AI.");
+    throw new Error("No local AI backend is running. Start Ollama, LM Studio, Jan.ai or another compatible app.");
   }
 
   /** Streaming chat — calls onToken for each incremental piece. */
@@ -299,7 +391,7 @@ class LocalAiEngine {
     }
 
     if (this._chatBackend === "openai_compat") {
-      const res = await fetch(`${OFFGRID_BASE}/chat/completions`, {
+      const res = await fetch(`${this._activeChatProxyPath}/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -487,6 +579,22 @@ class LocalAiEngine {
     this._emitStatus();
   }
 
+  /** Delete an Ollama model by name. */
+  async deleteModel(modelName: string): Promise<boolean> {
+    try {
+      const res = await fetch(`${OLLAMA_BASE}/api/delete`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: modelName }),
+      });
+      if (res.ok) {
+        await this.checkAvailability();
+        return true;
+      }
+    } catch { /* silent */ }
+    return false;
+  }
+
   // ─── Install info (zero terminal commands) ────────────────────────────────
 
   /** Plain-language Ollama install steps (no terminal commands). */
@@ -543,6 +651,71 @@ class LocalAiEngine {
 
   // ─── Status subscription ──────────────────────────────────────────────────
 
+  /** One-shot smart reply: generate 3 short reply suggestions for a message thread */
+  async smartReplies(
+    theirMessage: string,
+    context?: string,
+    signal?: AbortSignal
+  ): Promise<string[]> {
+    const sys = `You are a helpful messaging assistant. Generate exactly 3 short, natural reply suggestions (each under 12 words) for the message below. Return ONLY a JSON array of 3 strings, no other text. Context: ${context ?? "general conversation"}.`;
+    try {
+      const raw = await this.chat(
+        [{ role: "system", content: sys }, { role: "user", content: theirMessage }],
+        { maxTokens: 100, temperature: 0.8, signal }
+      );
+      const match = raw.match(/\[.*?\]/s);
+      if (match) return JSON.parse(match[0]) as string[];
+    } catch { /* fallback below */ }
+    return ["Got it!", "Sure, sounds good.", "Let me check and get back to you."];
+  }
+
+  /** Generate a composed message draft from a topic/intent */
+  async composeDraft(
+    intent: string,
+    recipientName?: string,
+    signal?: AbortSignal
+  ): Promise<string> {
+    const sys = `You are a messaging assistant. Write a single natural, friendly message${recipientName ? ` to ${recipientName}` : ""}. Keep it under 40 words. Return ONLY the message text, no quotes.`;
+    try {
+      return (await this.chat(
+        [{ role: "system", content: sys }, { role: "user", content: intent }],
+        { maxTokens: 80, temperature: 0.7, signal }
+      )).trim();
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * Compose or refine a reply using full chat context.
+   * Pass existing draft to refine it, or empty string to generate from scratch.
+   */
+  async composeWithContext(opts: {
+    chatHistory: { role: "user" | "assistant"; content: string }[];
+    existingDraft: string;
+    instruction: string;
+    recipientName?: string;
+    signal?: AbortSignal;
+  }): Promise<string> {
+    const { chatHistory, existingDraft, instruction, recipientName, signal } = opts;
+    const historyText = chatHistory.slice(-10).map((m) =>
+      `${m.role === "user" ? (recipientName || "Them") : "Me"}: ${m.content}`
+    ).join("\n");
+
+    const sys = existingDraft
+      ? `You are a messaging assistant. The user has a draft reply and wants you to improve it.\nChat context:\n${historyText}\n\nCurrent draft: "${existingDraft}"\n\nUser instruction: ${instruction || "improve this reply"}\n\nReturn ONLY the improved message text, no quotes or labels.`
+      : `You are a messaging assistant. Write a single natural reply based on the chat context.\nChat context:\n${historyText}\n\nInstruction: ${instruction || "write a helpful, friendly reply"}\n\nReturn ONLY the message text, no quotes or labels.`;
+
+    try {
+      return (await this.chat(
+        [{ role: "system", content: sys }, { role: "user", content: instruction || "compose reply" }],
+        { maxTokens: 120, temperature: 0.75, signal }
+      )).trim();
+    } catch {
+      return existingDraft || "";
+    }
+  }
+
   getSnapshot(): AiStatusSnapshot {
     return {
       chatBackend: this._chatBackend,
@@ -550,6 +723,9 @@ class LocalAiEngine {
       audioBackend: this._audioBackend,
       chatModels: [...this._chatModels],
       activeModel: this._activeModel,
+      detectedBackend: this._detectedBackend,
+      nativeStt: browserHasSpeechRecognition(),
+      nativeTts: browserHasSpeechSynthesis(),
     };
   }
 

@@ -348,7 +348,7 @@ export const SERVICE_CATALOG: ServiceConfig[] = [
   {
     id: "bandwidth_sell",
     name: "Sell Bandwidth",
-    description: "Sell your unused internet bandwidth. Other devices route through your connection and you earn per MB.",
+    description: "Share your internet connection as a mesh relay node. Earnings are credited per MB of mesh traffic your node forwards (measured from actual relayed packets).",
     icon: "📶",
     ratePerUnit: 3,
     unit: "MB sold",
@@ -361,11 +361,12 @@ export const SERVICE_CATALOG: ServiceConfig[] = [
   {
     id: "ram_share",
     name: "RAM Sharing",
-    description: "Lend unused device RAM for mesh distributed computing. Apps running on mesh use your memory.",
+    // Browser sandbox cannot measure or expose RAM shared to other processes— disabled until platform API exists
+    description: "RAM sharing unavailable: browser sandbox does not expose measurable shared-memory work. Enable this service when a native platform integration is available.",
     icon: "🧩",
-    ratePerUnit: 6,
+    ratePerUnit: 0,
     unit: "MB·hour",
-    minBattery: 30,
+    minBattery: 100,
     minStorageMB: 10,
     requiresInternet: false,
     premium: true,
@@ -374,7 +375,7 @@ export const SERVICE_CATALOG: ServiceConfig[] = [
   {
     id: "gpu_cluster",
     name: "GPU Cluster",
-    description: "Contribute your GPU (WebGPU/WebGL) for AI training, image rendering, and heavy computation across the mesh.",
+    description: "Run Ollama AI inference jobs for other mesh nodes. Requires Ollama running locally. Browser cannot expose raw GPU compute — jobs run as Ollama text/embedding inference.",
     icon: "🎮",
     ratePerUnit: 12,
     unit: "GPU·minute",
@@ -583,6 +584,17 @@ class MeshEconomyEngine {
       if (msg.type === "node_heartbeat") this.handlePeerHeartbeat(msg.data);
       if (msg.type === "resource_request") this.handleResourceRequest(msg.data);
       if (msg.type === "revenue_config_update") this.handleRevenueUpdate(msg.data);
+    });
+
+    // Credit bandwidth_sell earnings only for actually relayed bytes (measurement-based)
+    bus.on("omnimesh:bytes_relayed", (msg) => {
+      if (!this.activeServices.has("bandwidth_sell")) return;
+      const bytes: number = (msg.payload as any)?.bytes ?? 0;
+      const mb = bytes / (1024 * 1024);
+      if (mb > 0) {
+        this.nodeStats.bandwidthSoldMB = (this.nodeStats.bandwidthSoldMB || 0) + mb;
+        this.recordContribution("bandwidth_sell", mb, "mesh-relay");
+      }
     });
 
     // Initial probe + heartbeat
@@ -1027,8 +1039,10 @@ class MeshEconomyEngine {
       case "cdn":
       case "connectivity":
       case "bandwidth_sell": this.nodeStats.dataServedMB += units; break;
-      case "ram_share": break; // tracked in tickPassiveEarnings
-      case "gpu_cluster": break; // tracked in tickPassiveEarnings
+      // ram_share earns nothing: browser cannot measure shared-memory work
+      case "ram_share": break;
+      // gpu_cluster earns via tryWorkJob (Ollama inference)
+      case "gpu_cluster": break;
     }
 
     // Track resource contributions by type
@@ -1343,6 +1357,12 @@ class MeshEconomyEngine {
 
   // ─── Withdrawals ────────────────────────────
 
+  /**
+   * Export a signed earnings record to the local ledger.
+   * This is a LOCAL-ONLY record — no payment gateway, no fiat transfer.
+   * Real settlement requires a future decentralized settlement layer
+   * or an optional self-hosted exchange. Do NOT present this as cash withdrawal.
+   */
   requestWithdrawal(
     amount: number,
     method: "upi" | "bank" | "crypto" | "mobile_money" | "voucher"
@@ -1356,6 +1376,8 @@ class MeshEconomyEngine {
     const available = totalEarnings - withdrawn;
     if (amount > available || amount <= 0) return null;
 
+    // Record as a local export request — status stays "pending" until a
+    // settlement layer processes it. No external API is called here.
     const request: WithdrawalRequest = {
       id: crypto.randomUUID(), nodeId: this.nodeStats.nodeId,
       amount, method, status: "pending", createdAt: Date.now(),
@@ -1396,7 +1418,8 @@ class MeshEconomyEngine {
     return { earnings, tier, stats, services, balance, resources, revenueConfig, resourceLimits, resourcePool };
   }
 
-  estimateDailyEarnings(): number {
+  /** Returns a synthetic projection based on typical service units. Label as "projected" in UI — not actual earnings. */
+  getProjectedDailyEarnings(): number {
     let estimate = 0;
     const userShare = this.getUserShare();
     for (const serviceId of this.activeServices) {

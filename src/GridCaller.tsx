@@ -3,20 +3,25 @@
  * Synced with Mesh Comms + meshAppBridge for calls & messages.
  * Light + Dark themes (fixes dim dark-mode colors).
  */
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, Fragment as ReactFragment, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import {
   Phone, PhoneOff, PhoneIncoming, PhoneOutgoing, PhoneMissed,
   MessageCircle, MessageSquare, Search, Mic, MicOff, Volume2, ChevronLeft,
   ChevronDown, ChevronUp, CheckCircle2, Circle,
-  Delete, Plus, Star, StarOff, Ban, Pencil, Trash2, Download,
+  Delete, Plus, Star, StarOff, Ban, Pencil, Trash2, Download, Check,
   Upload, UserPlus, X, Smartphone, Users, Menu, Map as MapIcon, Settings,
   Share2, Image as ImageIcon, IdCard, Wifi, Bluetooth, Shield, Sun, Moon, Power,
   Network, Radio, Video, VideoOff, SwitchCamera, Camera, BellOff, EllipsisVertical,
-  CalendarDays, Sparkles, Home, Grid3X3,
+  CalendarDays, Sparkles, Home, Grid3X3, MapPin,
 } from "lucide-react";
 import { bus } from "./kernel/bus";
 import { removeStorageValue, S } from "./kernel/storage";
 import { C as liveTheme } from "./kernel/theme";
+import AiAssistantCard from "./ui/AiAssistantCard";
+import { QRPairingModal } from "./ui/QRPairingModal";
+import { mesh as pairingMesh } from "./mesh/engine";
+import localAiEngine from "./kernel/localAiEngine";
 import meshComms from "./kernel/meshCommsEngine";
 import { MeshEngine } from "./kernel/mesh";
 import omniMesh from "./kernel/omniMeshEngine";
@@ -56,7 +61,7 @@ import {
 } from "./kernel/callSession";
 import globalCall from "./kernel/globalCallEngine";
 import sovereignMesh from "./kernel/sovereignMesh";
-import gridNumberRegistry, { type LocalCommLogEntry } from "./kernel/gridNumberRegistry";
+import gridNumberRegistry, { type LocalCommLogEntry, formatGridNumber } from "./kernel/gridNumberRegistry";
 import meshAppBridge from "./kernel/meshAppBridge";
 import softTower from "./kernel/softTowerEngine";
 import sovereignCall from "./kernel/sovereignCall";
@@ -262,6 +267,10 @@ type GroupMessage = {
   mine: boolean;
   attachment?: GroupAttachment;
   system?: boolean;
+  meta?: Record<string, unknown>;
+  status?: "sent" | "delivered";
+  edited?: boolean;
+  deletedForAll?: boolean;
 };
 
 type StatusPost = {
@@ -479,6 +488,167 @@ function fmt(sec: number) {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
+// ── Radial corner menu — always visible, quarter-circle fan on tap ────────────
+function RadialMenuPortal({
+  dark,
+  aiAvailable,
+  showPanel,
+  onTogglePanel,
+  onClosePanel,
+  onGoTo,
+  onNewChat,
+  onOpenQrPair,
+}: {
+  dark: boolean;
+  aiAvailable: boolean;
+  showPanel: boolean;
+  onTogglePanel: () => void;
+  onClosePanel: () => void;
+  onGoTo: (tab: string) => void;
+  onNewChat: () => void;
+  onOpenQrPair: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  const blue  = dark ? "#0a84ff" : "#007aff";
+  const green = dark ? "#30d158" : "#34c759";
+  const TAB_H    = 56;   // actual tab bar height (icon + label + padding)
+  const BTN_R    = 60;   // floats between Gridchat+Mesh tabs, not above any single tab
+  const BTN_B    = TAB_H + 28; // 28 px clear gap above tab bar
+  const BTN_SIZE = 52;
+  const ITEM_SIZE = 40;  // smaller to avoid overlap across 5 items
+  const DIST = 130;      // wider arc radius for proper spacing
+
+  // Center of main button in CSS right/bottom coords
+  const CX = BTN_R + BTN_SIZE / 2;
+  const CY = BTN_B + BTN_SIZE / 2;
+
+  // 5 fan items — angles from "straight up" (0° = directly above) going toward left (90°)
+  // Spacing: adjacent centers ≈ 2*130*sin(10°) ≈ 45px > ITEM_SIZE=40 → no overlap
+  const ITEMS = [
+    { icon: <Sparkles size={17} />,       label: "AI Chat",    color: blue,      angle: 8  , action: () => { setOpen(false); onTogglePanel(); } },
+    { icon: <MessageSquare size={17} />,  label: "New Chat",   color: green,     angle: 28 , action: () => { setOpen(false); onNewChat(); } },
+    { icon: <MessageCircle size={17} />,  label: "Messages",   color: "#5e5ce6", angle: 50 , action: () => { setOpen(false); onGoTo("sms"); } },
+    { icon: <Bluetooth size={17} />,      label: "QR Pair",    color: "#30b0c7", angle: 70 , action: () => { setOpen(false); onOpenQrPair(); } },
+    { icon: <Grid3X3 size={17} />,        label: "Dialpad",    color: "#636366", angle: 88 , action: () => { setOpen(false); onGoTo("keypad"); } },
+  ];
+
+  const closeAll = () => { setOpen(false); if (showPanel) onClosePanel(); };
+
+  return createPortal(
+    <>
+      <style>{`
+        @keyframes _radPop {
+          0%   { transform: scale(0); opacity: 0; }
+          65%  { transform: scale(1.12); opacity: 1; }
+          100% { transform: scale(1);   opacity: 1; }
+        }
+        @keyframes _radLbl {
+          from { opacity: 0; transform: translateX(8px); }
+          to   { opacity: 1; transform: translateX(0); }
+        }
+        ._gc-ri { animation: _radPop 0.22s cubic-bezier(0.34,1.56,0.64,1) var(--d,0ms) both; }
+        ._gc-rl { animation: _radLbl 0.18s ease var(--d,0ms) both; }
+      `}</style>
+
+      {/* Backdrop */}
+      {(open || showPanel) && (
+        <div onClick={closeAll} style={{
+          position: "fixed", inset: 0, zIndex: 9988,
+          background: "rgba(0,0,0,0.28)",
+        }} />
+      )}
+
+      {/* AI Chat Panel — floats above tab bar */}
+      {showPanel && (
+        <div style={{
+          position: "fixed", bottom: TAB_H, left: 0, right: 0, zIndex: 9990,
+          display: "flex", justifyContent: "center", padding: "0 8px",
+          pointerEvents: "none",
+        }}>
+          <div style={{
+            width: "min(480px, 100%)", pointerEvents: "auto",
+            borderRadius: 20, overflow: "hidden",
+            boxShadow: "0 8px 48px rgba(0,0,0,0.7)",
+          }}>
+            <AiAssistantCard dark={dark} onClose={onClosePanel} />
+          </div>
+        </div>
+      )}
+
+      {/* Fan items — appear on open */}
+      {open && ITEMS.map((item, idx) => {
+        const rad  = (item.angle * Math.PI) / 180;
+        const dx   = DIST * Math.sin(rad);  // CSS right offset
+        const dy   = DIST * Math.cos(rad);  // CSS bottom offset
+        const iR   = CX + dx - ITEM_SIZE / 2;
+        const iB   = CY + dy - ITEM_SIZE / 2;
+        const lR   = iR + ITEM_SIZE + 6;
+        const lB   = iB + ITEM_SIZE / 2 - 11;
+        return (
+          <ReactFragment key={item.label}>
+            <button className="_gc-ri" onClick={item.action} title={item.label}
+              style={{
+                "--d": `${idx * 40}ms`,
+                position: "fixed", right: iR, bottom: iB,
+                zIndex: 9991, width: ITEM_SIZE, height: ITEM_SIZE,
+                borderRadius: 999, background: item.color, color: "#fff",
+                border: "none", display: "flex", alignItems: "center",
+                justifyContent: "center", cursor: "pointer",
+                boxShadow: "0 4px 20px rgba(0,0,0,0.45)",
+              } as React.CSSProperties}>
+              {item.icon}
+            </button>
+            <div className="_gc-rl" style={{
+              "--d": `${idx * 40 + 30}ms`,
+              position: "fixed", right: lR, bottom: lB,
+              zIndex: 9991, pointerEvents: "none", whiteSpace: "nowrap",
+              background: dark ? "rgba(28,28,30,0.92)" : "rgba(255,255,255,0.92)",
+              color: dark ? "#f2f2f7" : "#1c1c1e",
+              borderRadius: 8, padding: "4px 10px",
+              fontSize: 12, fontWeight: 600,
+              boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
+              backdropFilter: "blur(10px)",
+            } as React.CSSProperties}>
+              {item.label}
+            </div>
+          </ReactFragment>
+        );
+      })}
+
+      {/* Main toggle — always fully visible at bottom-right above tab bar */}
+      <div
+        onClick={() => { if (showPanel) { onClosePanel(); return; } setOpen((v) => !v); }}
+        role="button" tabIndex={0}
+        aria-label={open ? "Close menu" : "Quick actions"}
+        style={{
+          position: "fixed",
+          bottom: BTN_B, right: BTN_R,
+          zIndex: 9994,
+          width: BTN_SIZE, height: BTN_SIZE, borderRadius: 999,
+          background: showPanel
+            ? "#ff453a"
+            : open
+              ? (dark ? "#3a3a3c" : "#48484a")
+              : aiAvailable ? blue : "#636366",
+          color: "#fff",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          boxShadow: open
+            ? "0 6px 28px rgba(0,0,0,0.55)"
+            : "0 3px 16px rgba(0,0,0,0.35)",
+          cursor: "pointer",
+          transition: "background 0.2s, box-shadow 0.2s, transform 0.2s",
+          transform: open ? "rotate(45deg)" : "none",
+          userSelect: "none",
+        }}
+      >
+        {(showPanel || open) ? <X size={22} style={{ transform: "rotate(-45deg)", transition: "none" }} /> : <Sparkles size={20} />}
+      </div>
+    </>,
+    document.body
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════
 export default function GridCaller({
   user,
@@ -571,6 +741,32 @@ export default function GridCaller({
     };
   }, []);
 
+  // Flush group message outbox when network recovers
+  useEffect(() => {
+    const flush = () => {
+      const outbox: any[] = S.get("gc_group_msg_outbox", []);
+      if (!outbox.length) return;
+      const failed: any[] = [];
+      for (const item of outbox) {
+        // Expire after 7 days
+        if (Date.now() - item.queuedAt > 7 * 24 * 60 * 60 * 1000) continue;
+        try {
+          MeshEngine.broadcast(item.type, item.data);
+        } catch {
+          failed.push(item);
+        }
+      }
+      S.set("gc_group_msg_outbox", failed);
+    };
+    const offOnline = bus.on("mesh_comms:online", flush);
+    window.addEventListener("online", flush);
+    flush(); // try immediately on mount
+    return () => {
+      try { offOnline?.(); } catch {}
+      window.removeEventListener("online", flush);
+    };
+  }, []);
+
   const [tab, setTab] = useState<Tab>(() => {
     const raw = String(S.get("gridcaller_active_tab", "logs") || "logs").trim().toLowerCase();
     return raw === "mesh" || raw === "contacts" || raw === "keypad" || raw === "sms" || raw === "groups" || raw === "logs"
@@ -594,15 +790,41 @@ export default function GridCaller({
   const [dial, setDial] = useState("");
   const [thread, setThread] = useState<string | null>(null);
   const [smsDraft, setSmsDraft] = useState("");
+  const [smartReplies, setSmartReplies] = useState<string[]>([]);
+  const [smartRepliesBusy, setSmartRepliesBusy] = useState(false);
+  const smartReplyAbort = useRef<AbortController | null>(null);
   const [composeOpen, setComposeOpen] = useState(false);
   const [messageFolder, setMessageFolder] = useState<MessageFolder>("inbox");
   const [composeTo, setComposeTo] = useState("");
   const [groupChats, setGroupChats] = useState<GroupChat[]>(() => S.get("gridcaller_group_chats", []));
   const [groupMessages, setGroupMessages] = useState<GroupMessage[]>(() => S.get("gridcaller_group_messages", []));
+  // DTN queue: group messages that failed to broadcast — unused ref, outbox is read directly from S.get
   const [groupViewId, setGroupViewId] = useState<string | null>(null);
   const [groupDraft, setGroupDraft] = useState("");
+  const [groupAiReplies, setGroupAiReplies] = useState<string[]>([]);
+  const [groupAiBusy, setGroupAiBusy] = useState(false);
+  // AI compose panel — group chat
+  const [showGroupAiCompose, setShowGroupAiCompose] = useState(false);
+  const [groupAiDraft, setGroupAiDraft] = useState("");
+  const [groupAiInstruction, setGroupAiInstruction] = useState("");
+  const [groupAiComposeBusy, setGroupAiComposeBusy] = useState(false);
+  const groupAiComposeAbort = useRef<AbortController | null>(null);
+  // AI compose panel — direct message
+  const [showDirectAiCompose, setShowDirectAiCompose] = useState(false);
+  const [directAiDraft, setDirectAiDraft] = useState("");
+  const [directAiInstruction, setDirectAiInstruction] = useState("");
+  const [directAiComposeBusy, setDirectAiComposeBusy] = useState(false);
+  const directAiComposeAbort = useRef<AbortController | null>(null);
+  // AI compose panel — NEW MESSAGE compose dialog
+  const [showComposeAi, setShowComposeAi] = useState(false);
+  const [composeAiDraft, setComposeAiDraft] = useState("");
+  const [composeAiInstruction, setComposeAiInstruction] = useState("");
+  const [composeAiBusy, setComposeAiBusy] = useState(false);
+  const composeAiAbort = useRef<AbortController | null>(null);
   const [groupNameInput, setGroupNameInput] = useState("");
   const [groupMembersInput, setGroupMembersInput] = useState("");
+  const [gcMemberSearch, setGcMemberSearch] = useState("");
+  const [gcMemberSelected, setGcMemberSelected] = useState<{ id: string; name: string }[]>([]);
   const [gridchatSearch, setGridchatSearch] = useState("");
   const [gridchatFilter, setGridchatFilter] = useState<GridchatFilter>("all");
   const [gridchatFavourites, setGridchatFavourites] = useState<string[]>(() => S.get("gridcaller_gridchat_favourites", []));
@@ -646,6 +868,17 @@ export default function GridCaller({
   const [gridchatCreateMenuOpen, setGridchatCreateMenuOpen] = useState(false);
   const [gridchatMoreMenuOpen, setGridchatMoreMenuOpen] = useState(false);
   const [gridchatSubTab, setGridchatSubTab] = useState<"chats" | "updates" | "communities" | "calls">("chats");
+  const [gridchatPeopleTab, setGridchatPeopleTab] = useState<"live" | "contacts" | "map">("live");
+  const [gcPeopleCollapsed, setGcPeopleCollapsed] = useState(false);
+  const [gcSelectedPeerId, setGcSelectedPeerId] = useState<string | null>(null);
+  const gcLongPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [gcAddGroupTarget, setGcAddGroupTarget] = useState<{ id: string; name: string } | null>(null);
+  const gcLeafletMapRef = useRef<HTMLDivElement | null>(null);
+  const gcLeafletInstanceRef = useRef<any>(null);
+  const gcLeafletMarkersRef = useRef<any[]>([]);
+  // New direct chat state
+  const [gcNewDirectOpen, setGcNewDirectOpen] = useState(false);
+  const [gcNewDirectSearch, setGcNewDirectSearch] = useState("");
   const [gridchatShowCreateForm, setGridchatShowCreateForm] = useState(false);
   const [threadSearchOpen, setThreadSearchOpen] = useState(false);
   const [threadSearchQuery, setThreadSearchQuery] = useState("");
@@ -662,6 +895,8 @@ export default function GridCaller({
   const [directSelectedMessageIds, setDirectSelectedMessageIds] = useState<string[]>([]);
   const [groupSelectMode, setGroupSelectMode] = useState(false);
   const [groupSelectedMessageIds, setGroupSelectedMessageIds] = useState<string[]>([]);
+  const [groupEditingMessageId, setGroupEditingMessageId] = useState<string | null>(null);
+  const [groupEditText, setGroupEditText] = useState("");
   const [smsThreadSelectMode, setSmsThreadSelectMode] = useState(false);
   const [selectedSmsThreadIds, setSelectedSmsThreadIds] = useState<string[]>([]);
   const [gridchatListSelectMode, setGridchatListSelectMode] = useState(false);
@@ -689,17 +924,15 @@ export default function GridCaller({
   const groupDocumentInputRef = useRef<HTMLInputElement>(null);
   const groupCameraInputRef = useRef<HTMLInputElement>(null);
   const groupAudioInputRef = useRef<HTMLInputElement>(null);
+  const groupMsgsEndRef = useRef<HTMLDivElement | null>(null);
   const [groupAttachMenuOpen, setGroupAttachMenuOpen] = useState(false);
   const gridchatHeaderRef = useRef<HTMLDivElement>(null);
   const gridchatCreatePanelRef = useRef<HTMLDivElement>(null);
   const [err, setErr] = useState("");
   const [callScope, setCallScope] = useState<"auto" | "local" | "global">(() => {
     const saved = String(S.get("gridcaller_scope", "auto") || "auto").trim().toLowerCase();
-    if (saved === "local" || saved === "global") {
-      S.set("gridcaller_scope", "auto");
-      return "auto";
-    }
-    return saved === "auto" ? "auto" : "auto";
+    if (saved === "local" || saved === "global" || saved === "auto") return saved as "auto" | "local" | "global";
+    return "auto";
   });
   const [groupSelection, setGroupSelection] = useState<string[]>([]);
   const [meshPeersCollapsed, setMeshPeersCollapsed] = useState(false);
@@ -711,6 +944,12 @@ export default function GridCaller({
   const [groupCallMuted, setGroupCallMuted] = useState(false);
   const [groupCallSilent, setGroupCallSilent] = useState(false);
   const [groupCallSpeaker, setGroupCallSpeaker] = useState(true);
+  const [groupCallChannelId, setGroupCallChannelId] = useState("");
+  const [groupCallPeerCount, setGroupCallPeerCount] = useState(0);
+  // refs for active group call resources — cleaned up on close
+  const groupCallVoiceTxRef = useRef<{ stop: () => void } | null>(null);
+  const groupCallLeaveRef = useRef<(() => void) | null>(null);
+  const groupCallMicStreamRef = useRef<MediaStream | null>(null);
 
   const [globalHandle, setGlobalHandle] = useState(() => getLocalDeviceIdentity().handle || getMeshHandle() || myName || "");
   const [bridgeStatus, setBridgeStatus] = useState<MenuBridgeStatus>({ ready: false, text: "Checking bridge…", detail: "" });
@@ -719,6 +958,7 @@ export default function GridCaller({
   const [myGridDisplay, setMyGridDisplay] = useState(() => getImmutableDisplayNumber() || resolveMyPublicNumber());
   const [mySerial, setMySerial] = useState("");
   const [lanUrl, setLanUrl] = useState("");
+  const [incomingSos, setIncomingSos] = useState<{ id: string; user: string; message: string; lat: number; lng: number; ts: number } | null>(null);
   /** Real hub status — not decorative */
   const [hubStatus, setHubStatus] = useState<{
     connected: boolean;
@@ -727,11 +967,16 @@ export default function GridCaller({
     error?: string;
   }>(() => ({ connected: false, hub: resolveHubHttp(), peers: 0 }));
 
+  // AI assistant panel
+  const [showAiPanel, setShowAiPanel] = useState(false);
+  const [aiAvailable, setAiAvailable] = useState(() => S.get("local_ai_available", false));
+  const [showQrModal, setShowQrModal] = useState(false);
+
   // Hamburger: network count + map + GridCaller settings
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuFullscreen, setMenuFullscreen] = useState(false);
   const [menuView, setMenuView] = useState<
-    "home" | "map" | "settings" | "radio" | "profile" | "tower" | "devices" | "share" | "privacy" | "emergency" | "logs"
+    "home" | "ai" | "map" | "settings" | "radio" | "profile" | "tower" | "devices" | "share" | "privacy" | "emergency" | "logs"
   >("home");
   const [logFilter, setLogFilter] = useState<LogTopFilter>("all");
   const [logFiltersOpen, setLogFiltersOpen] = useState(false);
@@ -842,18 +1087,57 @@ export default function GridCaller({
 
   const clearGroupSelection = () => setGroupSelection([]);
 
-  const startMeshGroupCall = () => {
+  const startMeshGroupCall = async () => {
     if (selectedGroupPeers.length < 2) {
       setErr("Pick at least 2 mesh peers to start a group call");
       return;
     }
+    // Stable channel ID derived from sorted peer IDs so all participants hash to the same room
+    const sortedIds = [MeshEngine.localId, ...selectedGroupPeers.map((p) => p.id)].sort();
+    const channelId = `group_${sortedIds.join("_").slice(0, 64)}`;
+    setGroupCallChannelId(channelId);
+    setGroupCallPeerCount(0);
     setGroupCallOpen(true);
     setGroupCallMuted(false);
     setGroupCallSilent(false);
     setGroupCallSpeaker(true);
-    setContactBusy(`Mesh group call ready for ${selectedGroupPeers.length} peers`);
-    setTimeout(() => setContactBusy(""), 2200);
     setErr("");
+
+    // Join the walkie room — peers in the same sorted channel hear each other via Trystero P2P
+    const leave = meshComms.joinWalkieChannel(channelId, () => {});
+    groupCallLeaveRef.current = leave;
+
+    // Track peer joins/leaves for the participant count
+    const onJoin = () => setGroupCallPeerCount((n) => n + 1);
+    const onLeave = () => setGroupCallPeerCount((n) => Math.max(0, n - 1));
+    bus.on("mesh_comms:walkie_peer_join", onJoin);
+    bus.on("mesh_comms:walkie_peer_leave", onLeave);
+
+    // Start live voice transmission on the channel
+    try {
+      const tx = await meshComms.startVoiceTransmission(channelId);
+      groupCallVoiceTxRef.current = tx;
+    } catch (err: any) {
+      setErr(`Mic error: ${err?.message ?? "Could not access microphone"}`);
+    }
+
+    setContactBusy(`Group call started · ${selectedGroupPeers.length} peers invited`);
+    setTimeout(() => setContactBusy(""), 2500);
+  };
+
+  const endMeshGroupCall = () => {
+    // Stop voice transmission
+    try { groupCallVoiceTxRef.current?.stop(); } catch {}
+    groupCallVoiceTxRef.current = null;
+    // Stop mic stream
+    try { groupCallMicStreamRef.current?.getTracks().forEach((t) => t.stop()); } catch {}
+    groupCallMicStreamRef.current = null;
+    // Leave walkie channel
+    try { groupCallLeaveRef.current?.(); } catch {}
+    groupCallLeaveRef.current = null;
+    setGroupCallOpen(false);
+    setGroupCallChannelId("");
+    setGroupCallPeerCount(0);
   };
 
   const meshStatusSummary = useMemo(() => {
@@ -1503,6 +1787,14 @@ export default function GridCaller({
     return () => clearTimeout(t);
   }, [gridchatMyStatusText, gridchatMyStatusAt, gridchatStatusAutoClearHours]);
 
+  // Start local AI backend monitoring (auto-detects Ollama, LM Studio, Jan.ai, etc.)
+  useEffect(() => {
+    const unsub = localAiEngine.subscribeStatus((s) => {
+      setAiAvailable(s.chatBackend !== "none");
+    });
+    return unsub;
+  }, []);
+
   // Init: sync GridCaller <-> Mesh Comms <-> meshAppBridge <-> global call
   useEffect(() => {
     try {
@@ -1540,8 +1832,9 @@ export default function GridCaller({
         name: myName,
         phone: user?.phone || S.get("user_phone", ""),
       });
-      // Header number = ONLY what user saved (phone/handle). Never registry auto number.
-      const displayNow = resolveMyPublicNumber();
+      // Header number = Grid Number from registry (hardware-locked), falls back to user's phone/handle
+      const gridIdent = gidIdentity.display || gidIdentity.number ? formatGridNumber(gidIdentity.number || "") : "";
+      const displayNow = gridIdent || resolveMyPublicNumber();
       setMyGridDisplay(displayNow);
       setSettingsDisplayNum(displayNow);
       const savedHandle = String(S.get("global_call_handle", "") || "").trim();
@@ -1822,13 +2115,26 @@ export default function GridCaller({
         setCallMethod("Incoming");
         acceptRef.current = accept;
         rejectRef.current = reject;
-        try {
-          navigator.vibrate?.([200, 80, 200, 80, 200]);
-        } catch {}
+        try { navigator.vibrate?.([200, 80, 200, 80, 200]); } catch {}
       });
     } catch (e) {
       console.warn("[GridCaller] listenForIncomingCalls", e);
     }
+
+    // Incoming audio-stream calls (offline LAN fallback — no WebRTC needed)
+    let offAudioStream: (() => void) | undefined;
+    try {
+      offAudioStream = meshComms.listenForAudioStreamCalls?.((from, accept, reject) => {
+        if (blocked.includes(from)) { reject(); return; }
+        const name = peers.find((p) => p.id === from)?.name || from.slice(0, 12);
+        setCallPeer({ id: from, name });
+        setPhase("incoming");
+        setCallMethod("Mesh Audio");
+        acceptRef.current = accept;
+        rejectRef.current = reject;
+        try { navigator.vibrate?.([200, 80, 200, 80, 200]); } catch {}
+      });
+    } catch {}
 
     // OmniMesh SMS / call packets
     const offOmni = omniMesh.onPacket((pkt) => {
@@ -1946,24 +2252,89 @@ export default function GridCaller({
               });
             }
           } catch {}
+          // send delivery ack back to sender
+          try { MeshEngine.broadcast("GRID_GROUP_MSG_DELIVERED", { id: row.id, groupId: row.groupId }); } catch {}
         }
+      }
+
+      if (msg?.type === "GRID_GROUP_MSG_DELIVERED" && msg.data?.id) {
+        // only update status when the ACK comes from another device, not our own broadcast
+        if (!msg.from || msg.from === MeshEngine.localId) return;
+        setGroupMessages((prev) => prev.map((m) => m.id === msg.data.id ? { ...m, status: "delivered" } : m));
+      }
+
+      if (msg?.type === "GRID_GROUP_MSG_EDIT" && msg.data?.id && msg.data?.groupId) {
+        if (!msg.from || msg.from === MeshEngine.localId) return;
+        const members = normalizeGroupMembers(msg.data.members || []);
+        if (members.length && !members.some((m: string) => isCallAddressedToMe(m))) return;
+        setGroupMessages((prev) => {
+          const updated = prev.map((m) => m.id === msg.data.id ? { ...m, text: String(msg.data.text || ""), edited: true } : m);
+          S.set("gridcaller_group_messages", updated.slice(-1200));
+          return updated;
+        });
+      }
+
+      if (msg?.type === "GRID_GROUP_MSG_DELETE" && msg.data?.id && msg.data?.groupId) {
+        if (!msg.from || msg.from === MeshEngine.localId) return;
+        const members = normalizeGroupMembers(msg.data.members || []);
+        if (members.length && !members.some((m: string) => isCallAddressedToMe(m))) return;
+        setGroupMessages((prev) => {
+          const updated = prev.map((m) => m.id === msg.data.id ? { ...m, deletedForAll: true, text: "" } : m);
+          S.set("gridcaller_group_messages", updated.slice(-1200));
+          return updated;
+        });
       }
 
       if (msg?.type === "GRID_GROUP_CALL_INVITE" && msg.data?.groupId) {
         if (!msg.from || msg.from === MeshEngine.localId) return;
         const members = normalizeGroupMembers(msg.data.members || []);
         if (!members.some((m: string) => isCallAddressedToMe(m))) return;
+        const inboundChannelId = String(msg.data.channelId || "");
+        const modeLabel = msg.data.mode === "video" ? "Video" : "Voice";
         const sys: GroupMessage = {
           id: `sys_${msg.time || Date.now()}_${msg.from}`,
           groupId: String(msg.data.groupId),
           fromId: String(msg.from),
           fromName: String(msg.data.fromName || msg.fromName || msg.from),
-          text: `${msg.data.mode === "video" ? "Video" : "Voice"} call invite`,
+          text: inboundChannelId
+            ? `${modeLabel} group call started — tap Join to enter`
+            : `${modeLabel} call invite`,
           ts: Number(msg.time || Date.now()),
           mine: false,
           system: true,
+          // Attach channelId so the group chat can render a Join button
+          meta: inboundChannelId ? { groupCallChannelId: inboundChannelId, mode: msg.data.mode } : undefined,
         };
         setGroupMessages((prev) => [...prev, sys].slice(-1200));
+
+        // Auto-join the Trystero room so voice is live for this participant too
+        // Only if not already in another group call
+        if (inboundChannelId && !groupCallLeaveRef.current) {
+          setGroupCallChannelId(inboundChannelId);
+          setGroupCallPeerCount(0);
+          setGroupCallOpen(true);
+          setGroupCallMuted(false);
+          setGroupCallSilent(false);
+          setGroupCallSpeaker(true);
+          const leaveFn = meshComms.joinWalkieChannel(inboundChannelId, () => {});
+          groupCallLeaveRef.current = leaveFn;
+          bus.on("mesh_comms:walkie_peer_join", () => setGroupCallPeerCount((n) => n + 1));
+          bus.on("mesh_comms:walkie_peer_leave", () => setGroupCallPeerCount((n) => Math.max(0, n - 1)));
+          void meshComms.startVoiceTransmission(inboundChannelId).then((tx) => {
+            groupCallVoiceTxRef.current = tx;
+          }).catch(() => {});
+        }
+      }
+
+      if (msg?.type === "SOS_ALERT" && msg.data?.peerId && msg.data.peerId !== MeshEngine.localId) {
+        const d = msg.data;
+        setIncomingSos({ id: d.id || `sos_${Date.now()}`, user: d.user || d.peerId, message: d.message || "Emergency", lat: d.lat ?? 0, lng: d.lng ?? 0, ts: d.timestamp || Date.now() });
+        // Flash notification if permission granted
+        try {
+          if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+            new Notification(`🆘 SOS from ${d.user || d.peerId}`, { body: d.message || "Emergency — needs help", tag: `sos-${d.id}` });
+          }
+        } catch {}
       }
 
       if (msg?.type === "GRIDCALLER_SMS" && (msg.data?.text || msg.data?.attachment)) {
@@ -2074,6 +2445,7 @@ export default function GridCaller({
       offMesh?.();
       offState?.();
       offBus?.();
+      try { offAudioStream?.(); } catch {}
       try { clearInterval((window as any).__gc_share_timer); } catch {}
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2383,6 +2755,46 @@ export default function GridCaller({
     radarMotionRef.current = next;
   }, [meshMapPeers]);
 
+  const meshVisibleUsers = useMemo<MeshVisibleUser[]>(() => {
+    const merged = new Map<string, MeshVisibleUser>();
+    const add = (entry: Partial<MeshVisibleUser> & { id?: string }) => {
+      const id = String(entry.id || "").trim();
+      if (!id || blocked.includes(id) || isSelfPeer(id)) return;
+      const prev = merged.get(id);
+      merged.set(id, {
+        id,
+        name: String(entry.name || prev?.name || id.slice(0, 12)).trim() || id.slice(0, 12),
+        online: entry.online ?? prev?.online ?? true,
+        distance: entry.distance ?? prev?.distance,
+        handle: entry.handle ?? prev?.handle,
+        phone: entry.phone ?? prev?.phone,
+        displayNumber: entry.displayNumber ?? prev?.displayNumber,
+        lat: entry.lat ?? prev?.lat,
+        lng: entry.lng ?? prev?.lng,
+      });
+    };
+
+    for (const peer of peers) add(peer);
+    for (const peer of meshMapPeers) add(peer);
+
+    return Array.from(merged.values()).sort((a, b) => {
+      if (a.online !== b.online) return a.online ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+  }, [blocked, meshMapPeers, peers]);
+
+  const radarPeers = useMemo(
+    () =>
+      meshVisibleUsers.filter(
+        (peer): peer is MeshVisibleUser & { lat: number; lng: number } =>
+          typeof peer.lat === "number" &&
+          typeof peer.lng === "number" &&
+          Number.isFinite(peer.lat) &&
+          Number.isFinite(peer.lng)
+      ),
+    [meshVisibleUsers]
+  );
+
   // Leaflet map when menu map view open
   useEffect(() => {
     if (!menuOpen || menuView !== "map" || !mapBoxRef.current) return;
@@ -2556,6 +2968,15 @@ export default function GridCaller({
         }
         mapObjRef.current = map;
         setTimeout(() => map.invalidateSize(), 200);
+
+        // Listen for focus-peer requests from Gridchat search
+        const offFocus = bus.on("map:focus_peer", (msg: any) => {
+          const { lat, lng } = msg.payload || msg;
+          if (lat != null && lng != null && mapObjRef.current) {
+            mapObjRef.current.flyTo([lat, lng], 15, { duration: 1 });
+          }
+        });
+        return () => { offFocus(); };
       } catch (e) {
         console.warn("[GridCaller] map", e);
       }
@@ -2569,6 +2990,46 @@ export default function GridCaller({
     };
   }, [menuOpen, menuView, radarPeers, myGps, myName, myGridDisplay, blocked, peers, meshMapPeers]);
 
+  // Gridchat map tab: destroy Leaflet instance when leaving tab (prevents blank re-mount)
+  useEffect(() => {
+    if (gridchatPeopleTab !== "map") {
+      if (gcLeafletInstanceRef.current) {
+        try { gcLeafletInstanceRef.current.remove(); } catch {}
+        gcLeafletInstanceRef.current = null;
+      }
+      gcLeafletMarkersRef.current.forEach((m) => { try { m.remove(); } catch {} });
+      gcLeafletMarkersRef.current = [];
+    }
+  }, [gridchatPeopleTab]);
+
+  // Gridchat map tab: sync peer markers whenever peers or GPS changes
+  useEffect(() => {
+    if (gridchatPeopleTab !== "map" || !gcLeafletInstanceRef.current) return;
+    const mapPeers = meshMapPeers.filter((p) => !isSelfPeer(p.id) && p.lat != null && p.lng != null);
+    void import("leaflet").then((mod) => {
+      const L = mod.default;
+      const map = gcLeafletInstanceRef.current;
+      if (!map) return;
+      gcLeafletMarkersRef.current.forEach((m) => { try { m.remove(); } catch {} });
+      gcLeafletMarkersRef.current = [];
+      if (myGps) {
+        const myIcon = L.divIcon({ className: "", html: `<div style="width:18px;height:18px;border-radius:50%;background:#2196F3;border:3px solid #fff;box-shadow:0 0 8px #2196F3;"></div>`, iconSize: [18, 18], iconAnchor: [9, 9] });
+        const myM = L.marker([myGps.lat, myGps.lng], { icon: myIcon, title: "You" }).addTo(map);
+        myM.bindPopup("<b>You</b>");
+        gcLeafletMarkersRef.current.push(myM);
+      }
+      mapPeers.forEach((p) => {
+        const color = p.online ? "#4CAF50" : "#9E9E9E";
+        const initials = (p.name || p.id).slice(0, 2).toUpperCase();
+        const icon = L.divIcon({ className: "", html: `<div style="width:36px;height:36px;border-radius:50%;background:${color};border:2px solid #fff;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:12px;box-shadow:0 2px 8px rgba(0,0,0,0.4);cursor:pointer;">${initials}</div>`, iconSize: [36, 36], iconAnchor: [18, 18] });
+        const marker = L.marker([p.lat, p.lng], { icon, title: p.name }).addTo(map);
+        marker.bindPopup(`<b>${p.name}</b><br/><span style="font-size:11px;color:#666">${p.online ? "🟢 Online" : "⚫ Offline"}</span>`);
+        marker.on("click", () => setGcSelectedPeerId(p.id));
+        gcLeafletMarkersRef.current.push(marker);
+      });
+    }).catch(() => {});
+  }, [gridchatPeopleTab, meshMapPeers, myGps]);
+
   const networkPeopleCount = useMemo(() => {
     // Real connected devices only (no fabric ghosts / self duplicates)
     const { onlineCount } = listConnectedDevices({
@@ -2577,46 +3038,6 @@ export default function GridCaller({
     });
     return onlineCount;
   }, [peers, globalPeers, towerTick]);
-
-  const meshVisibleUsers = useMemo<MeshVisibleUser[]>(() => {
-    const merged = new Map<string, MeshVisibleUser>();
-    const add = (entry: Partial<MeshVisibleUser> & { id?: string }) => {
-      const id = String(entry.id || "").trim();
-      if (!id || blocked.includes(id) || isSelfPeer(id)) return;
-      const prev = merged.get(id);
-      merged.set(id, {
-        id,
-        name: String(entry.name || prev?.name || id.slice(0, 12)).trim() || id.slice(0, 12),
-        online: entry.online ?? prev?.online ?? true,
-        distance: entry.distance ?? prev?.distance,
-        handle: entry.handle ?? prev?.handle,
-        phone: entry.phone ?? prev?.phone,
-        displayNumber: entry.displayNumber ?? prev?.displayNumber,
-        lat: entry.lat ?? prev?.lat,
-        lng: entry.lng ?? prev?.lng,
-      });
-    };
-
-    for (const peer of peers) add(peer);
-    for (const peer of meshMapPeers) add(peer);
-
-    return Array.from(merged.values()).sort((a, b) => {
-      if (a.online !== b.online) return a.online ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
-  }, [blocked, meshMapPeers, peers]);
-
-  const radarPeers = useMemo(
-    () =>
-      meshVisibleUsers.filter(
-        (peer): peer is MeshVisibleUser & { lat: number; lng: number } =>
-          typeof peer.lat === "number" &&
-          typeof peer.lng === "number" &&
-          Number.isFinite(peer.lat) &&
-          Number.isFinite(peer.lng)
-      ),
-    [meshVisibleUsers]
-  );
 
   const refreshIdentityUi = (snapshot = getLocalDeviceIdentity()) => {
     setIdentityStatus(snapshot);
@@ -2767,9 +3188,12 @@ export default function GridCaller({
       setErr("Group name required");
       return;
     }
-    const members = normalizeGroupMembers(parseGroupMemberTokens(groupMembersInput));
-    if (members.length < 2) {
-      setErr("Add at least one member ID/number/handle");
+    // Combine tap-selected contacts + manually typed IDs
+    const fromSelected = gcMemberSelected.map((p) => p.id);
+    const fromTyped = normalizeGroupMembers(parseGroupMemberTokens(groupMembersInput));
+    const members = normalizeGroupMembers(Array.from(new Set([...fromSelected, ...fromTyped])));
+    if (members.length < 1) {
+      setErr("Add at least one member");
       return;
     }
     const row: GroupChat = {
@@ -2783,6 +3207,9 @@ export default function GridCaller({
     setGroupViewId(row.id);
     setGroupNameInput("");
     setGroupMembersInput("");
+    setGcMemberSearch("");
+    setGcMemberSelected([]);
+    setGridchatShowCreateForm(false);
     setContactBusy(`Group created: ${row.name}`);
     setTimeout(() => setContactBusy(""), 1800);
     try {
@@ -2810,21 +3237,30 @@ export default function GridCaller({
       mine: true,
       attachment,
       system,
+      status: "sent",
     };
     setGroupMessages((prev) => [...prev, row].slice(-1200));
     setGroupDraft("");
+    const payload = {
+      id: row.id,
+      groupId,
+      fromName: myName,
+      text: row.text,
+      ts: row.ts,
+      members: g.members,
+      attachment: row.attachment,
+      system,
+    };
     try {
-      MeshEngine.broadcast("GRID_GROUP_MESSAGE", {
-        id: row.id,
-        groupId,
-        fromName: myName,
-        text: row.text,
-        ts: row.ts,
-        members: g.members,
-        attachment: row.attachment,
-        system,
-      });
-    } catch {}
+      MeshEngine.broadcast("GRID_GROUP_MESSAGE", payload);
+      // Write to Gun.js via public API for offline delivery
+      try { meshComms.putGroupMessage?.(groupId, row.id, payload); } catch {}
+    } catch {
+      // Queue message for retry when network recovers
+      const outbox: any[] = S.get("gc_group_msg_outbox", []);
+      outbox.push({ type: "GRID_GROUP_MESSAGE", data: payload, queuedAt: Date.now() });
+      S.set("gc_group_msg_outbox", outbox.slice(-100));
+    }
   };
 
   const shareGroupLocation = (groupId: string) => {
@@ -2975,8 +3411,13 @@ export default function GridCaller({
     sendGroupMessage(groupId, `Sticker ${pick}`);
   };
 
-  const runGridchatAttachAction = (groupId: string, action: "document" | "photos" | "camera" | "audio" | "contact" | "poll" | "event" | "sticker") => {
+  const runGridchatAttachAction = (groupId: string, action: "document" | "photos" | "camera" | "audio" | "contact" | "poll" | "event" | "sticker" | "location") => {
     setGroupAttachMenuOpen(false);
+    if (action === "location") {
+      if (!myGps) { setErr("Location not ready yet"); return; }
+      shareGroupLocation(groupId);
+      return;
+    }
     if (action === "document") {
       groupDocumentInputRef.current?.click();
       return;
@@ -3008,32 +3449,64 @@ export default function GridCaller({
     sendGridchatSticker(groupId);
   };
 
-  const startGroupCall = async (groupId: string, mode: "audio" | "video") => {
+  const startGroupCall = async (groupId: string, _mode: "audio" | "video") => {
     const g = groupChats.find((x) => x.id === groupId);
     if (!g) return;
-    const targets = g.members.filter((m) => !isCallAddressedToMe(m) && !blocked.includes(m));
-    if (!targets.length) {
-      setErr("No valid members to call");
+    const eligible = g.members.filter((m) => !isCallAddressedToMe(m) && !blocked.includes(m));
+    if (!eligible.length) {
+      setErr("No available members to call");
       return;
     }
-    const primary = targets[0];
-    await placeCall(primary, primary);
-    if (mode === "video") {
-      setTimeout(() => {
-        void toggleVideoCall().catch(() => {});
-      }, 900);
+
+    // Resolve member IDs to peer objects for channel hashing
+    const groupPeers = eligible.map((m) => {
+      const found = peers.find(
+        (p) => p.id === m || p.phone === m.replace(/\D/g, "") || p.handle === m.replace(/^@/, "")
+      );
+      return { id: found?.id ?? m, name: found?.name ?? m };
+    });
+
+    // Same deterministic channel formula as startMeshGroupCall — all participants hash to same room
+    const sortedIds = [MeshEngine.localId, ...groupPeers.map((p) => p.id)].sort();
+    const channelId = `group_${sortedIds.join("_").slice(0, 64)}`;
+
+    setGroupCallChannelId(channelId);
+    setGroupCallPeerCount(0);
+    setGroupCallOpen(true);
+    setGroupCallMuted(false);
+    setGroupCallSilent(false);
+    setGroupCallSpeaker(true);
+    setErr("");
+
+    const leave = meshComms.joinWalkieChannel(channelId, () => {});
+    groupCallLeaveRef.current = leave;
+    bus.on("mesh_comms:walkie_peer_join", () => setGroupCallPeerCount((n) => n + 1));
+    bus.on("mesh_comms:walkie_peer_leave", () => setGroupCallPeerCount((n) => Math.max(0, n - 1)));
+
+    try {
+      const tx = await meshComms.startVoiceTransmission(channelId);
+      groupCallVoiceTxRef.current = tx;
+    } catch (err: any) {
+      setErr(`Mic error: ${err?.message ?? "Could not access microphone"}`);
     }
-    const note = `${mode === "video" ? "Video" : "Voice"} group call started by ${myName}`;
-    sendGroupMessage(groupId, note, undefined, true);
+
+    const modeLabel = _mode === "video" ? "Video" : "Voice";
+    sendGroupMessage(groupId, `${modeLabel} group call started by ${myName}`, undefined, true);
+    // Broadcast channelId so recipients can join the same Trystero room
     try {
       MeshEngine.broadcast("GRID_GROUP_CALL_INVITE", {
         groupId,
-        mode,
+        channelId,
+        mode: _mode,
         fromName: myName,
+        fromId: MeshEngine.localId,
         members: g.members,
         ts: Date.now(),
       });
     } catch {}
+
+    setContactBusy(`${modeLabel} group call · ${groupPeers.length} peer${groupPeers.length !== 1 ? "s" : ""} invited`);
+    setTimeout(() => setContactBusy(""), 2500);
   };
 
   /** Resolve handle / phone / id → mesh peer id (critical for handshake calls) */
@@ -3403,14 +3876,23 @@ export default function GridCaller({
         return;
       }
 
-      // Peer offline — still try mesh id direct once
+      // Peer offline — still try mesh id direct once (all 4 paths)
       try {
         const result = await meshComms.callWithFallback?.(peerId, { name });
         if (result?.pc) {
           pcRef.current = result.pc;
           setPhase("active");
           startedAt.current = Date.now();
-          setCallMethod("Connected");
+          const methodLabel = result.method === "lan" ? "LAN Direct" : result.method === "turn" ? "Relay" : "Connected";
+          setCallMethod(methodLabel);
+          return;
+        }
+        if (result?.method === "stream" && result.stop) {
+          // Audio-stream call active — no WebRTC PC, use stop() on hang-up
+          (pcRef as any).current = { close: result.stop };
+          setPhase("active");
+          startedAt.current = Date.now();
+          setCallMethod("Mesh Audio");
           return;
         }
       } catch {}
@@ -3679,6 +4161,94 @@ export default function GridCaller({
     void acceptCall().catch((e: any) => {
       setErr(e?.message || "Accept failed — allow Microphone");
     });
+  };
+
+  // ── AI smart reply helper ─────────────────────────────────────────────────
+  const fetchSmartReplies = async (lastMsg: string, peerName?: string) => {
+    if (!aiAvailable || !lastMsg.trim()) return;
+    smartReplyAbort.current?.abort();
+    const ac = new AbortController();
+    smartReplyAbort.current = ac;
+    setSmartRepliesBusy(true);
+    setSmartReplies([]);
+    try {
+      const replies = await localAiEngine.smartReplies(lastMsg, peerName, ac.signal);
+      setSmartReplies(replies);
+    } catch { /* silently ignore */ }
+    finally { setSmartRepliesBusy(false); }
+  };
+
+  // ── AI Compose: group chat ─────────────────────────────────────────────────
+  const runGroupAiCompose = async () => {
+    if (!aiAvailable || !activeGroup) return;
+    groupAiComposeAbort.current?.abort();
+    const ac = new AbortController();
+    groupAiComposeAbort.current = ac;
+    setGroupAiComposeBusy(true);
+    try {
+      const history = activeGroupMsgs.slice(-12).map((m) => ({
+        role: (m.mine ? "assistant" : "user") as "user" | "assistant",
+        content: m.text || "",
+      })).filter((m) => m.content);
+      const draft = await localAiEngine.composeWithContext({
+        chatHistory: history,
+        existingDraft: groupAiDraft,
+        instruction: groupAiInstruction || (groupAiDraft ? "improve this" : "write a helpful reply"),
+        recipientName: activeGroup.name,
+        signal: ac.signal,
+      });
+      if (draft) setGroupAiDraft(draft);
+      setGroupAiInstruction("");
+    } catch { /* silent */ }
+    finally { setGroupAiComposeBusy(false); }
+  };
+
+  // ── AI Compose: direct messages ────────────────────────────────────────────
+  const runDirectAiCompose = async () => {
+    if (!aiAvailable || !thread) return;
+    directAiComposeAbort.current?.abort();
+    const ac = new AbortController();
+    directAiComposeAbort.current = ac;
+    setDirectAiComposeBusy(true);
+    try {
+      const history = threadMsgs.slice(-12).map((m) => ({
+        role: (m.mine ? "assistant" : "user") as "user" | "assistant",
+        content: m.text || "",
+      })).filter((m) => m.content);
+      const draft = await localAiEngine.composeWithContext({
+        chatHistory: history,
+        existingDraft: directAiDraft,
+        instruction: directAiInstruction || (directAiDraft ? "improve this" : "write a helpful reply"),
+        recipientName: name,
+        signal: ac.signal,
+      });
+      if (draft) setDirectAiDraft(draft);
+      setDirectAiInstruction("");
+    } catch { /* silent */ }
+    finally { setDirectAiComposeBusy(false); }
+  };
+
+  // ── AI Compose: NEW MESSAGE compose dialog ─────────────────────────────────
+  const runComposeAi = async () => {
+    if (!aiAvailable) return;
+    composeAiAbort.current?.abort();
+    const ac = new AbortController();
+    composeAiAbort.current = ac;
+    setComposeAiBusy(true);
+    try {
+      const recipientName = peers.find((p) => p.id === composeTo.trim())?.name ||
+        globalPeers.find((p) => p.id === composeTo.trim())?.name || composeTo.trim() || "recipient";
+      const draft = await localAiEngine.composeWithContext({
+        chatHistory: [],
+        existingDraft: composeAiDraft || smsDraft,
+        instruction: composeAiInstruction || (smsDraft ? "improve this message" : "write a helpful message"),
+        recipientName,
+        signal: ac.signal,
+      });
+      if (draft) setComposeAiDraft(draft);
+      setComposeAiInstruction("");
+    } catch { /* silent */ }
+    finally { setComposeAiBusy(false); }
   };
 
   const sendSms = (peerId: string, name: string, text: string, attachment?: GroupAttachment) => {
@@ -3978,7 +4548,19 @@ export default function GridCaller({
       mediaIcon: "text" | "photo" | "audio" | "video" | "doc" | "location";
     }[] = [];
 
-    for (const g of groupChats) {
+    const seenGroupIds = new Set<string>();
+    const seenDmPairs = new Set<string>();
+    // Sort by most recent so the newest group wins when deduplicating same-pair DMs
+    const sortedGroups = [...groupChats].sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+    for (const g of sortedGroups) {
+      if (seenGroupIds.has(g.id)) continue;
+      seenGroupIds.add(g.id);
+      // Deduplicate 1:1 DM groups by sorted member pair — keep the one with most recent activity
+      if (g.members.length === 2) {
+        const pairKey = [...g.members].sort().join("|");
+        if (seenDmPairs.has(pairKey)) continue;
+        seenDmPairs.add(pairKey);
+      }
       const last = groupLatest.get(g.id);
       const preview = last?.text?.trim() || summarizeGroupAttachment(last?.attachment) || "Group created";
       let mediaIcon: "text" | "photo" | "audio" | "video" | "doc" | "location" = "text";
@@ -4434,7 +5016,13 @@ export default function GridCaller({
     reader.readAsDataURL(file);
   };
 
-  const runDirectAttachAction = (peerId: string, peerName: string, action: "document" | "photos" | "camera" | "audio" | "contact" | "poll" | "event" | "sticker") => {
+  const runDirectAttachAction = (peerId: string, peerName: string, action: "document" | "photos" | "camera" | "audio" | "contact" | "poll" | "event" | "sticker" | "location") => {
+    if (action === "location") {
+      setDirectAttachMenuOpen(false);
+      if (!myGps) { setErr("Location not ready yet"); return; }
+      sendSms(peerId, peerName, `📍 Location: ${myGps.lat.toFixed(5)}, ${myGps.lng.toFixed(5)}`);
+      return;
+    }
     if (action === "document") {
       setDirectAttachMenuOpen(false);
       directDocumentInputRef.current?.click();
@@ -4579,6 +5167,34 @@ export default function GridCaller({
     setGroupMessages((prev) => prev.filter((m) => !groupSelectedMessageIds.includes(m.id)));
     setGroupSelectedMessageIds([]);
     setGroupSelectMode(false);
+  };
+
+  const editGroupMessage = (msgId: string, newText: string) => {
+    const g = groupChats.find((x) => x.id === groupViewId);
+    if (!g) return;
+    setGroupMessages((prev) => {
+      const updated = prev.map((m) => m.id === msgId ? { ...m, text: newText, edited: true } : m);
+      S.set("gridcaller_group_messages", updated.slice(-1200));
+      return updated;
+    });
+    setGroupEditingMessageId(null);
+    setGroupEditText("");
+    try {
+      MeshEngine.broadcast("GRID_GROUP_MSG_EDIT", { id: msgId, groupId: g.id, text: newText, members: g.members });
+    } catch {}
+  };
+
+  const deleteGroupMessageForAll = (msgId: string) => {
+    const g = groupChats.find((x) => x.id === groupViewId);
+    if (!g) return;
+    setGroupMessages((prev) => {
+      const updated = prev.map((m) => m.id === msgId ? { ...m, deletedForAll: true, text: "" } : m);
+      S.set("gridcaller_group_messages", updated.slice(-1200));
+      return updated;
+    });
+    try {
+      MeshEngine.broadcast("GRID_GROUP_MSG_DELETE", { id: msgId, groupId: g.id, members: g.members });
+    } catch {}
   };
 
   const copyTextToClipboard = (text: string, label = "Copied") => {
@@ -4780,10 +5396,14 @@ export default function GridCaller({
         return { ...g, members: g.members.filter((m) => m !== me), updatedAt: Date.now() };
       }));
       setGroupViewId(null);
+      setGroupEditingMessageId(null);
+      setGroupEditText("");
       return;
     }
     if (action === "close") {
       setGroupViewId(null);
+      setGroupEditingMessageId(null);
+      setGroupEditText("");
     }
   };
 
@@ -5265,6 +5885,94 @@ export default function GridCaller({
     );
   };
 
+  // ── Shared inline mesh-peer search panel used by every search bar ─────────
+  const renderPeerSearch = (query: string, onClear: () => void, showAlways = false) => {
+    const qx = query.trim().toLowerCase();
+    if (!qx && !showAlways) return null;
+
+    const seen = new Set<string>();
+    const all: { id: string; name: string; handle?: string; phone?: string; online: boolean; lat?: number; lng?: number; distance?: number; source: "mesh" | "global" | "map" }[] = [];
+    for (const p of peers) { if (!seen.has(p.id) && !isSelfPeer(p.id)) { seen.add(p.id); all.push({ id: p.id, name: p.name, handle: p.handle, phone: p.phone, online: !!p.online, source: "mesh" }); } }
+    for (const p of globalPeers) { if (!seen.has(p.id) && !isSelfPeer(p.id)) { seen.add(p.id); all.push({ id: p.id, name: p.name, handle: p.handle, online: !!p.online, source: "global" }); } }
+    for (const p of meshMapPeers) { if (!seen.has(p.id) && !isSelfPeer(p.id)) { seen.add(p.id); all.push({ id: p.id, name: p.name, phone: p.phone, online: !!p.online, lat: p.lat, lng: p.lng, distance: p.distance, source: "map" }); } }
+
+    const hits = qx
+      ? all.filter((p) => `${p.name} ${p.handle || ""} ${p.phone || ""} ${p.id}`.toLowerCase().includes(qx)).slice(0, 6)
+      : all.filter((p) => p.online).slice(0, 8);
+
+    const srcColor = (src: string) => src === "mesh" ? tokens.green : src === "map" ? tokens.blue : tokens.orange;
+
+    if (!hits.length) return (
+      <div style={{ margin: "4px 16px 6px", padding: "9px 12px", borderRadius: 10, background: tokens.fill, color: tokens.label, fontSize: 12 }}>
+        {qx ? `No mesh peers found for "${query.trim()}"` : "No online peers nearby yet"}
+      </div>
+    );
+
+    return (
+      <div style={{ margin: "4px 16px 6px", borderRadius: 12, border: `1px solid ${tokens.sep}`, background: tokens.card, overflow: "hidden" }}>
+        <div style={{ fontSize: 10, fontWeight: 800, color: tokens.label, padding: "7px 12px 5px", textTransform: "uppercase", letterSpacing: 0.6, borderBottom: `1px solid ${tokens.sep}` }}>
+          {qx ? "Mesh peers — one tap to connect" : "🟢 Online now — tap to message or call"}
+        </div>
+        {hits.map((p) => {
+          const initials = (p.name || p.id).slice(0, 2).toUpperCase();
+          const dist = p.distance != null ? (p.distance < 1000 ? `${Math.round(p.distance)}m` : `${(p.distance / 1000).toFixed(1)}km`) : null;
+          return (
+            <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderBottom: `1px solid ${tokens.sep}` }}>
+              {/* Avatar */}
+              <div style={{ width: 38, height: 38, borderRadius: 999, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 13, background: p.online ? `${tokens.green}22` : tokens.fill, color: p.online ? tokens.green : tokens.label, border: `2px solid ${p.online ? tokens.green : tokens.sep}`, position: "relative" }}>
+                {initials}
+                {p.online && <span style={{ position: "absolute", bottom: 0, right: 0, width: 9, height: 9, borderRadius: 999, background: tokens.green, border: `2px solid ${tokens.card}` }} />}
+              </div>
+              {/* Info */}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: 13, color: tokens.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name || p.id}</div>
+                <div style={{ fontSize: 10, color: tokens.label, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <span style={{ color: srcColor(p.source), fontWeight: 700 }}>{p.source === "mesh" ? "Mesh" : p.source === "map" ? "Map" : "Global"}</span>
+                  {p.handle ? ` · @${p.handle}` : ""}
+                  {dist ? ` · ${dist}` : ""}
+                  {" · "}<span style={{ color: p.online ? tokens.green : tokens.label }}>{p.online ? "online" : "offline"}</span>
+                </div>
+              </div>
+              {/* Actions */}
+              <div style={{ display: "flex", gap: 5, flexShrink: 0 }}>
+                <button type="button" title="Call" onClick={() => { onClear(); void placeCallLocal(p.id, p.name); }}
+                  style={{ width: 32, height: 32, borderRadius: 999, border: "none", background: `${tokens.green}22`, color: tokens.green, display: "grid", placeItems: "center", cursor: "pointer" }}>
+                  <Phone size={14} />
+                </button>
+                <button type="button" title="Message" onClick={() => {
+                  onClear();
+                  const ex = sms.find((s) => s.peerId === p.id || (p.phone && s.peerId === p.phone.replace(/\D/g, "")));
+                  if (ex) { setThread(ex.peerId); setTab("sms"); } else { setDial(p.id); setTab("keypad"); }
+                }} style={{ width: 32, height: 32, borderRadius: 999, border: "none", background: `${tokens.blue}22`, color: tokens.blue, display: "grid", placeItems: "center", cursor: "pointer" }}>
+                  <MessageCircle size={14} />
+                </button>
+                <button type="button" title="Open chat" onClick={() => {
+                  onClear();
+                  const dmId = [MeshEngine.localId, p.id].sort().join("_");
+                  const ex = groupChats.find((g) => g.id === dmId || (g.members.length === 2 && g.members.includes(p.id) && g.members.some((m) => isCallAddressedToMe(m))));
+                  if (ex) { setGroupViewId(ex.id); } else { const ng = { id: dmId, name: p.name || p.id, members: [MeshEngine.localId, p.id], createdAt: Date.now(), updatedAt: Date.now() }; setGroupChats((prev) => [ng, ...prev]); setGroupViewId(dmId); }
+                  setTab("groups"); setGridchatSubTab("chats"); setGridchatPeopleTab("contacts");
+                }} style={{ width: 32, height: 32, borderRadius: 999, border: "none", background: `${tokens.orange}22`, color: tokens.orange, display: "grid", placeItems: "center", cursor: "pointer" }}>
+                  <MessageSquare size={14} />
+                </button>
+                <button type="button" title="Add to group" onClick={() => { onClear(); setGcAddGroupTarget({ id: p.id, name: p.name }); }}
+                  style={{ width: 32, height: 32, borderRadius: 999, border: "none", background: `${tokens.label}14`, color: tokens.label, display: "grid", placeItems: "center", cursor: "pointer" }}>
+                  <UserPlus size={14} />
+                </button>
+                {p.lat != null && (
+                  <button type="button" title="Locate on map" onClick={() => { onClear(); setTab("mesh"); bus.emit("map:focus_peer", { id: p.id, lat: p.lat, lng: p.lng }); }}
+                    style={{ width: 32, height: 32, borderRadius: 999, border: "none", background: `${tokens.blue}14`, color: tokens.blue, display: "grid", placeItems: "center", cursor: "pointer" }}>
+                    <MapPin size={14} />
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
   const openGridchatRow = (row: { kind: "group" | "direct"; groupId?: string; peerId?: string; id: string }) => {
     setGridchatLastSeen((prev) => ({ ...prev, [row.id]: Date.now() }));
     if (row.kind === "group" && row.groupId) {
@@ -5286,6 +5994,7 @@ export default function GridCaller({
     setGroupMembersInput("");
     setGridchatCreateMenuOpen(false);
     setGridchatMoreMenuOpen(false);
+    setGcNewDirectOpen(false);
     setGridchatShowCreateForm(true);
     window.setTimeout(() => {
       try {
@@ -5326,7 +6035,15 @@ export default function GridCaller({
     setGroupAttachMenuOpen(false);
     setGroupSearchOpen(false);
     setGroupSearchQuery("");
+    setShowGroupAiCompose(false);
+    setGroupAiDraft("");
   }, [groupViewId]);
+
+  // Scroll group messages to bottom when new messages arrive
+  useEffect(() => {
+    const el = groupMsgsEndRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [activeGroupMsgs.length]);
 
   useEffect(() => {
     setLogsSelectMode(false);
@@ -5410,10 +6127,17 @@ export default function GridCaller({
             <div style={{ display: "flex", flexWrap: "wrap", gap: 10, justifyContent: "center", marginTop: 8 }}>
               <button
                 type="button"
-                onClick={() => setGroupCallMuted((m) => !m)}
+                onClick={() => {
+                  const next = !groupCallMuted;
+                  setGroupCallMuted(next);
+                  // Actually mute/unmute the live mic track
+                  try {
+                    groupCallMicStreamRef.current?.getAudioTracks().forEach((t) => { t.enabled = !next; });
+                  } catch {}
+                }}
                 style={{ border: "none", borderRadius: 999, padding: "10px 14px", fontWeight: 800, cursor: "pointer", background: groupCallMuted ? "#ffffff" : "rgba(255,255,255,0.16)", color: groupCallMuted ? "#001a2e" : "#fff" }}
               >
-                {groupCallMuted ? "Unmute all" : "Mute all"}
+                {groupCallMuted ? "Unmute" : "Mute"}
               </button>
               <button
                 type="button"
@@ -5437,13 +6161,17 @@ export default function GridCaller({
               {groupCallSilent ? "Room is silent for now." : "Peers are listening to your voice."}
             </div>
 
+            <div style={{ fontSize: 11, opacity: 0.7, textAlign: "center", marginTop: 4 }}>
+              Channel: {groupCallChannelId.slice(0, 32)}… · {groupCallPeerCount} peer{groupCallPeerCount !== 1 ? "s" : ""} joined
+            </div>
+
             <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 6 }}>
               <button
                 type="button"
-                onClick={() => setGroupCallOpen(false)}
-                style={{ border: "none", borderRadius: 999, padding: "10px 16px", fontWeight: 800, cursor: "pointer", background: "rgba(255,255,255,0.16)", color: "#fff" }}
+                onClick={endMeshGroupCall}
+                style={{ border: "none", borderRadius: 999, padding: "10px 16px", fontWeight: 800, cursor: "pointer", background: "rgba(255,59,48,0.7)", color: "#fff" }}
               >
-                Close room
+                End call
               </button>
             </div>
           </div>
@@ -6078,8 +6806,9 @@ export default function GridCaller({
           );})}
         </div>
         <div
+          className="gc-chat-input-bar"
           style={{
-            padding: "10px 12px 16px",
+            padding: "10px 12px 0",
             background: tokens.dark ? "#1b1b1f" : "#f0f2f5",
             backdropFilter: tokens.blur,
             borderTop: `0.5px solid ${tokens.sep}`,
@@ -6087,53 +6816,29 @@ export default function GridCaller({
           }}
         >
           {directAttachMenuOpen && (
-            <div
-              style={{
-                position: "absolute",
-                left: 12,
-                bottom: 64,
-                width: "min(92vw, 280px)",
-                borderRadius: 14,
-                border: `1px solid ${tokens.sep}`,
-                background: tokens.card,
-                boxShadow: tokens.shadow,
-                zIndex: 4,
-                overflow: "hidden",
-              }}
-            >
-              {[
-                { id: "document" as const, label: "Document", icon: <Download size={16} color={tokens.blue} /> },
-                { id: "photos" as const, label: "Photos & videos", icon: <ImageIcon size={16} color={tokens.green} /> },
-                { id: "camera" as const, label: "Camera", icon: <Camera size={16} color={tokens.red} /> },
-                { id: "audio" as const, label: "Audio", icon: <Mic size={16} color={tokens.orange} /> },
-                { id: "contact" as const, label: "Contact", icon: <IdCard size={16} color={tokens.blue} /> },
-                { id: "poll" as const, label: "Poll", icon: <CheckCircle2 size={16} color={tokens.green} /> },
-                { id: "event" as const, label: "Event", icon: <CalendarDays size={16} color={tokens.orange} /> },
-                { id: "sticker" as const, label: "Sticker", icon: <Sparkles size={16} color={tokens.red} /> },
-              ].map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => runDirectAttachAction(thread, name, item.id)}
-                  style={{
-                    width: "100%",
-                    border: "none",
-                    borderBottom: `1px solid ${tokens.sep}`,
-                    background: tokens.card,
-                    color: tokens.text,
-                    padding: "11px 12px",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 10,
-                    fontWeight: 700,
-                    cursor: "pointer",
-                    textAlign: "left",
-                  }}
-                >
-                  {item.icon}
-                  {item.label}
-                </button>
-              ))}
+            <div style={{ position: "fixed", inset: 0, zIndex: 9995, display: "flex", flexDirection: "column", justifyContent: "flex-end" }} onClick={() => setDirectAttachMenuOpen(false)}>
+              <div onClick={(e) => e.stopPropagation()} style={{ background: tokens.card, borderRadius: "20px 20px 0 0", paddingBottom: "env(safe-area-inset-bottom, 16px)", boxShadow: "0 -8px 40px rgba(0,0,0,0.5)" }}>
+                <div style={{ padding: "16px 16px 8px", fontWeight: 700, fontSize: 14, color: tokens.label, borderBottom: `1px solid ${tokens.sep}` }}>Attach</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 0 }}>
+                  {[
+                    { id: "document" as const, label: "Document", icon: <Download size={22} color={tokens.blue} /> },
+                    { id: "photos" as const, label: "Photos", icon: <ImageIcon size={22} color={tokens.green} /> },
+                    { id: "camera" as const, label: "Camera", icon: <Camera size={22} color={tokens.red} /> },
+                    { id: "audio" as const, label: "Audio", icon: <Mic size={22} color={tokens.orange} /> },
+                    { id: "contact" as const, label: "Contact", icon: <IdCard size={22} color={tokens.blue} /> },
+                    { id: "location" as const, label: "Location", icon: <MapPin size={22} color={tokens.green} /> },
+                    { id: "poll" as const, label: "Poll", icon: <CheckCircle2 size={22} color={tokens.blue} /> },
+                    { id: "event" as const, label: "Event", icon: <CalendarDays size={22} color={tokens.orange} /> },
+                    { id: "sticker" as const, label: "Sticker", icon: <Sparkles size={22} color={tokens.red} /> },
+                  ].map((item) => (
+                    <button key={item.id} type="button" onClick={() => { setDirectAttachMenuOpen(false); runDirectAttachAction(thread, name, item.id); }}
+                      style={{ border: "none", background: "transparent", padding: "20px 8px 16px", display: "flex", flexDirection: "column", alignItems: "center", gap: 10, cursor: "pointer" }}>
+                      <div style={{ width: 52, height: 52, borderRadius: 999, background: tokens.fill, display: "grid", placeItems: "center" }}>{item.icon}</div>
+                      <span style={{ fontSize: 11, color: tokens.text, fontWeight: 600 }}>{item.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           )}
 
@@ -6178,6 +6883,7 @@ export default function GridCaller({
               onFocus={() => {
                 setDirectAttachMenuOpen(false);
                 setDirectChatMenuOpen(false);
+                setTimeout(() => (document.activeElement as HTMLElement)?.scrollIntoView?.({ block: "nearest", behavior: "smooth" }), 300);
               }}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
@@ -6212,7 +6918,102 @@ export default function GridCaller({
             >
               {smsDraft.trim() ? "↑" : <Mic size={16} />}
             </button>
+            {/* AI Compose button */}
+            {aiAvailable && (
+              <button type="button" title="AI Compose" onClick={() => { setShowDirectAiCompose((v) => !v); if (!showDirectAiCompose) { setDirectAiDraft(smsDraft); setDirectAiInstruction(""); } }}
+                style={{ width: 40, height: 40, borderRadius: 999, border: "none", background: showDirectAiCompose ? `${tokens.blue}33` : tokens.dark ? "#38383d" : "#ffffff", color: showDirectAiCompose ? tokens.blue : tokens.label, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}>
+                <Sparkles size={16} />
+              </button>
+            )}
           </div>
+
+          {/* ── AI Compose Panel ── */}
+          {showDirectAiCompose && aiAvailable && (
+            <div style={{ margin: "8px 0 0", borderRadius: 14, border: `1px solid ${tokens.blue}44`, background: tokens.dark ? "#16213e" : "#eef4ff", padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <span style={{ fontSize: 11, fontWeight: 800, color: tokens.blue, textTransform: "uppercase", letterSpacing: 0.5 }}>✨ AI Compose</span>
+                <button type="button" onClick={() => setShowDirectAiCompose(false)} style={{ border: "none", background: "transparent", color: tokens.label, cursor: "pointer", fontSize: 18, lineHeight: 1 }}>×</button>
+              </div>
+              <textarea value={directAiDraft} onChange={(e) => setDirectAiDraft(e.target.value)}
+                placeholder="AI draft will appear here… or type your own"
+                rows={3}
+                style={{ resize: "none", border: `1px solid ${tokens.sep}`, borderRadius: 10, padding: "8px 10px", background: tokens.bg, color: tokens.text, fontSize: 13, fontFamily: "inherit", outline: "none", width: "100%", boxSizing: "border-box" }}
+              />
+              <div style={{ display: "flex", gap: 6 }}>
+                <input value={directAiInstruction} onChange={(e) => setDirectAiInstruction(e.target.value)}
+                  placeholder={directAiDraft ? "Refine: shorter, formal, add emoji…" : "What to say? e.g. confirm tomorrow 3pm"}
+                  style={{ flex: 1, border: `1px solid ${tokens.sep}`, borderRadius: 999, padding: "7px 12px", background: tokens.bg, color: tokens.text, fontSize: 12, outline: "none" }}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void runDirectAiCompose(); } }}
+                />
+                <button type="button" disabled={directAiComposeBusy} onClick={() => void runDirectAiCompose()}
+                  style={{ border: "none", borderRadius: 999, padding: "7px 14px", background: tokens.blue, color: "#fff", fontWeight: 700, fontSize: 12, cursor: directAiComposeBusy ? "default" : "pointer", opacity: directAiComposeBusy ? 0.6 : 1 }}>
+                  {directAiComposeBusy ? "⏳" : directAiDraft ? "✨ Refine" : "✨ Generate"}
+                </button>
+              </div>
+              <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                <button type="button" onClick={() => setShowDirectAiCompose(false)}
+                  style={{ border: `1px solid ${tokens.sep}`, borderRadius: 999, padding: "6px 14px", background: "transparent", color: tokens.label, fontSize: 12, cursor: "pointer" }}>Discard</button>
+                <button type="button" disabled={!directAiDraft.trim()}
+                  onClick={() => { setSmsDraft(directAiDraft.trim()); setShowDirectAiCompose(false); }}
+                  style={{ border: "none", borderRadius: 999, padding: "6px 14px", background: directAiDraft.trim() ? tokens.green : tokens.sep, color: directAiDraft.trim() ? "#fff" : tokens.label, fontWeight: 700, fontSize: 12, cursor: directAiDraft.trim() ? "pointer" : "default" }}>Use this reply ↑</button>
+              </div>
+            </div>
+          )}
+
+          {/* ── AI Smart Replies ──────────────────────────────────────────── */}
+          {aiAvailable && (
+            <div style={{ padding: "4px 12px 0" }}>
+              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  disabled={smartRepliesBusy}
+                  onClick={() => {
+                    const lastMsg = threadMsgs.slice().reverse().find((m) => !m.mine);
+                    fetchSmartReplies(lastMsg?.text || "", name);
+                  }}
+                  style={{
+                    border: `1px solid ${tokens.blue}55`,
+                    background: "transparent",
+                    color: tokens.blue,
+                    borderRadius: 999,
+                    padding: "4px 10px",
+                    fontSize: 11,
+                    fontWeight: 700,
+                    cursor: smartRepliesBusy ? "default" : "pointer",
+                    opacity: smartRepliesBusy ? 0.5 : 1,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 4,
+                  }}
+                >
+                  <Sparkles size={11} />
+                  {smartRepliesBusy ? "Thinking…" : "Suggest reply"}
+                </button>
+                {smartReplies.map((r, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => { setSmsDraft(r); setSmartReplies([]); }}
+                    style={{
+                      border: `1px solid ${tokens.sep}`,
+                      background: tokens.card,
+                      color: tokens.text,
+                      borderRadius: 999,
+                      padding: "4px 10px",
+                      fontSize: 12,
+                      cursor: "pointer",
+                      maxWidth: 180,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {r}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           <input
             ref={directMediaInputRef}
@@ -6357,6 +7158,21 @@ export default function GridCaller({
   // ═══════════ MAIN ═══════════
   return (
     <ThemeCtx.Provider value={tokens}>
+    {/* AI panel — bottom overlay, opens from hamburger menu */}
+    {showAiPanel && (
+      <div style={{ position: "fixed", inset: 0, zIndex: 9988, display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
+        <div onClick={() => setShowAiPanel(false)} style={{ flex: 1 }} />
+        <div style={{ width: "100%", maxHeight: "70vh", overflow: "hidden", borderRadius: "20px 20px 0 0", boxShadow: "0 -8px 40px rgba(0,0,0,0.6)" }}>
+          <AiAssistantCard dark={darkMode} onClose={() => setShowAiPanel(false)} />
+        </div>
+      </div>
+    )}
+    <QRPairingModal
+      open={showQrModal}
+      onClose={() => setShowQrModal(false)}
+      handle={getMeshHandle()}
+      engine={pairingMesh}
+    />
     <Shell>
       <div
         style={{
@@ -6373,155 +7189,57 @@ export default function GridCaller({
           boxSizing: "border-box",
         }}
       >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", marginBottom: 10, gap: 8 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: "1 1 260px" }}>
-            <button
-              type="button"
-              title="Menu"
-              onClick={() => {
-                setMenuView("home");
-                setMenuFullscreen(false);
-                setMenuOpen(true);
-              }}
-              style={{
-                width: 40,
-                height: 40,
-                borderRadius: 10,
-                border: `1px solid ${tokens.sep}`,
-                background: tokens.fill,
-                color: tokens.text,
-                display: "grid",
-                placeItems: "center",
-                cursor: "pointer",
-                flexShrink: 0,
-              }}
-            >
-              <Menu size={20} />
-            </button>
-            <div
-              style={{
-                width: 42,
-                height: 42,
-                borderRadius: 12,
-                border: `1px solid ${tokens.sep}`,
-                background: darkMode ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.04)",
-                display: "grid",
-                placeItems: "center",
-                padding: 4,
-                flexShrink: 0,
-                boxShadow: "inset 0 1px 0 rgba(255,255,255,0.18)",
-              }}
-            >
-              <img src={gridCallerLogo} alt="GridCaller logo" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
+        {/* Header: single compact row — no wrap, controls always visible */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, minWidth: 0 }}>
+          <button
+            type="button"
+            title="Menu"
+            onClick={() => { setMenuView("home"); setMenuFullscreen(false); setMenuOpen(true); }}
+            style={{ width: 36, height: 36, borderRadius: 10, border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}
+          >
+            <Menu size={18} />
+          </button>
+          <div style={{ width: 34, height: 34, borderRadius: 10, border: `1px solid ${tokens.sep}`, background: darkMode ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.04)", display: "grid", placeItems: "center", padding: 3, flexShrink: 0 }}>
+            <img src={gridCallerLogo} alt="GridCaller logo" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
+          </div>
+
+          {/* Title + status info — truncates on narrow screens */}
+          <div style={{ minWidth: 0, flex: 1, overflow: "hidden" }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 5, overflow: "hidden" }}>
+              <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: -0.3, color: tokens.text, whiteSpace: "nowrap" }}>GridCaller</span>
+              <span style={{ fontSize: 11, color: tokens.label, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>
+                {myGridDisplay || (globalHandle && String(globalHandle).replace(/\D/g, "").length >= 8 ? formatTestPhone(globalHandle) : globalHandle) || ""}
+              </span>
             </div>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: "clamp(22px, 4vw, 28px)", fontWeight: 700, letterSpacing: -0.5, color: tokens.text, lineHeight: 1.15 }}>GridCaller</div>
-              <div style={{ fontSize: "clamp(13px, 2.8vw, 14px)", color: tokens.text, marginTop: 3, fontWeight: 700 }}>
-                {myGridDisplay ||
-                  (globalHandle && String(globalHandle).replace(/\D/g, "").length >= 8
-                    ? formatTestPhone(globalHandle)
-                    : globalHandle) ||
-                  "No number set"}
-              </div>
-              <div style={{ fontSize: 11, marginTop: 3, fontWeight: 600 }}>
-                <span style={{ color: (hubStatus.connected || (autoMeshStatus?.trysteroOk && peers.filter((p) => p.online && !isSelfPeer(p.id)).length > 0)) ? tokens.green : tokens.orange }}>
-                  {hubStatus.connected
-                    ? "● Hub + swarm mesh ON"
-                    : (autoMeshStatus?.trysteroOk && peers.filter((p) => p.online && !isSelfPeer(p.id)).length > 0)
-                      ? "● Swarm mesh ON — no server needed"
-                      : autoMeshStatus?.trysteroOk
-                        ? "◉ Local node active"
-                        : autoMeshStatus?.started
-                          ? "◌ Joining swarm mesh…"
-                          : "◌ Starting mesh…"}
-                </span>
-                <span style={{ color: tokens.label }}>
-                  {" · "}
-                  {peers.filter((p) => p.online && !isSelfPeer(p.id)).length} peer
-                  {peers.filter((p) => p.online && !isSelfPeer(p.id)).length === 1 ? "" : "s"}
-                </span>
-              </div>
-              <div style={{ fontSize: 10, color: tokens.label, marginTop: 2 }}>
-                Handle: <b style={{ color: tokens.text }}>@{getMeshHandle()}</b>
-              </div>
-              <div style={{ fontSize: 10, color: tokens.label, marginTop: 2 }}>
-                My ID: <b style={{ color: tokens.text }}>{MeshEngine.localId}</b>
-              </div>
-              <div style={{ fontSize: 10, marginTop: 2, lineHeight: 1.3 }}>
-                {hubStatus.connected || (autoMeshStatus?.trysteroOk && peers.filter((p) => p.online && !isSelfPeer(p.id)).length > 0)
-                  ? <span style={{ color: tokens.green }}>This device is a mesh node · ready to call &amp; relay</span>
-                  : autoMeshStatus?.trysteroOk
-                    ? <><span style={{ color: tokens.orange }}>Searching for nearby peers…</span><br /><span style={{ color: tokens.label }}>No central server required</span></>
-                    : <span style={{ color: tokens.label }}>Searching for nearby nodes…</span>}
-              </div>
+            <div style={{ fontSize: 10, marginTop: 1, color: tokens.label, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              <span style={{ color: (hubStatus.connected || (autoMeshStatus?.trysteroOk && peers.filter((p) => p.online && !isSelfPeer(p.id)).length > 0)) ? tokens.green : tokens.orange }}>
+                {hubStatus.connected ? "● Hub+swarm" : autoMeshStatus?.trysteroOk ? "◉ Local node" : "◌ Starting…"}
+              </span>
+              {" · "}{peers.filter((p) => p.online && !isSelfPeer(p.id)).length} peers{" · "}@{getMeshHandle()}
+            </div>
+            <div style={{ fontSize: 9, color: tokens.orange, marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {autoMeshStatus?.trysteroOk && !hubStatus.connected ? "Searching for nearby peers… No central server required" : `ID: ${MeshEngine.localId}`}
             </div>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, flexWrap: "wrap", marginLeft: "auto" }}>
-            <button
-              type="button"
-              title={darkMode ? "Light mode" : "Dark mode"}
-              onClick={() => setDarkMode((d) => !d)}
-              style={{
-                width: 36,
-                height: 36,
-                borderRadius: 10,
-                border: `1px solid ${tokens.sep}`,
-                background: tokens.fill,
-                color: tokens.text,
-                display: "grid",
-                placeItems: "center",
-                cursor: "pointer",
-              }}
-            >
-              {darkMode ? <Sun size={18} /> : <Moon size={18} />}
+
+          {/* Controls — always right-aligned, never wrap */}
+          <div style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
+            <button type="button" title={darkMode ? "Light mode" : "Dark mode"} onClick={() => setDarkMode((d) => !d)}
+              style={{ width: 28, height: 28, borderRadius: 7, border: "none", background: tokens.fill, color: tokens.text, display: "grid", placeItems: "center", cursor: "pointer" }}>
+              {darkMode ? <Sun size={13} /> : <Moon size={13} />}
             </button>
-            <button
-              type="button"
-              title="Turn OFF GridCaller"
-              onClick={() => {
-                if (confirm("Turn GridCaller OFF? Mesh and calls will go to standby.")) {
-                  setAppEnabled(false);
-                  setMenuOpen(false);
-                }
-              }}
-              style={{
-                width: 36,
-                height: 36,
-                borderRadius: 10,
-                border: `1px solid ${tokens.sep}`,
-                background: tokens.fill,
-                color: tokens.red,
-                display: "grid",
-                placeItems: "center",
-                cursor: "pointer",
-              }}
-            >
-              <Power size={18} />
+            <button type="button" title={appEnabled ? "Standby" : "Wake up"}
+              onClick={() => { if (appEnabled) { if (confirm("Put GridCaller on standby?")) setAppEnabled(false); } else setAppEnabled(true); }}
+              style={{ width: 28, height: 28, borderRadius: 7, border: "none", background: tokens.fill, color: appEnabled ? tokens.red : tokens.green, display: "grid", placeItems: "center", cursor: "pointer" }}>
+              <Power size={13} />
             </button>
-            <div
-              style={{
-                display: "flex",
-                background: tokens.fill,
-                borderRadius: 10,
-                padding: 2,
-                gap: 2,
-              }}
-            >
-              <div
-                style={{
-                  border: `1px solid ${tokens.sep}`,
-                  borderRadius: 8,
-                  padding: "6px 10px",
-                  fontSize: 12,
-                  fontWeight: 700,
-                  color: tokens.blue,
-                  background: `${tokens.blue}14`,
-                }}
-                title="Auto routing: local first, global fallback"
-              >
-                Auto
-              </div>
-            </div>
+            {/* Scope: Auto (mesh-first fallback) → Local (mesh only) → Global (Gun.js+internet) */}
+            <button type="button"
+              title={callScope === "auto" ? "Auto: mesh-first, global fallback — tap for Local" : callScope === "local" ? "Local mesh only — tap for Global" : "Global (Gun.js + internet) — tap for Auto"}
+              onClick={() => setCallScope((s) => s === "auto" ? "local" : s === "local" ? "global" : "auto")}
+              style={{ height: 28, paddingInline: 8, borderRadius: 7, border: "none", background: callScope === "local" ? `${tokens.green}22` : callScope === "global" ? `${tokens.blue}22` : tokens.fill, color: callScope === "local" ? tokens.green : callScope === "global" ? tokens.blue : tokens.label, fontSize: 10, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
+              {callScope === "auto" ? "Auto" : callScope === "local" ? "Local" : "Global"}
+            </button>
           </div>
         </div>
       </div>
@@ -6533,7 +7251,7 @@ export default function GridCaller({
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="Search contacts"
+              placeholder="Search contacts & mesh peers"
               style={{ flex: 1, border: "none", background: "transparent", outline: "none", fontSize: 16, color: tokens.text }}
             />
             {q.trim() ? (
@@ -6549,6 +7267,7 @@ export default function GridCaller({
           </div>
         </div>
       )}
+      {(tab === "contacts" || (tab === "logs" && logsSubView === "contacts")) && renderPeerSearch(q, () => setQ(""))}
 
       {tab === "logs" && (
         <div>
@@ -6557,7 +7276,7 @@ export default function GridCaller({
             <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: tokens.fill, borderRadius: 24, padding: "8px 14px" }}>
               <Search size={15} color={tokens.label} />
               <input
-                placeholder="Search names &amp; numbers"
+                placeholder="Search names, numbers & mesh peers"
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
                 style={{ flex: 1, border: "none", background: "transparent", outline: "none", color: tokens.text, fontSize: 14 }}
@@ -6567,6 +7286,7 @@ export default function GridCaller({
             <button type="button" onClick={refreshLocalLogs} style={{ border: "none", background: tokens.fill, color: tokens.text, borderRadius: 999, width: 36, height: 36, display: "grid", placeItems: "center", cursor: "pointer" }} title="Refresh"><Radio size={16} /></button>
             <button type="button" onClick={() => setLogFiltersOpen((p) => !p)} style={{ border: "none", background: tokens.fill, color: tokens.text, borderRadius: 999, width: 36, height: 36, display: "grid", placeItems: "center", cursor: "pointer" }} title="Filters"><EllipsisVertical size={16} /></button>
           </div>
+          {renderPeerSearch(q, () => setQ(""))}
           {/* Recent callers horizontal strip - TrueCaller style */}
           {logsSubView === "recents" && (() => {
             const seen = new Set<string>();
@@ -6630,7 +7350,7 @@ export default function GridCaller({
               </button>
               <button
                 type="button"
-                onClick={() => setLogsSubView(logsSubView === "keypad" ? "recents" : "keypad")}
+                onClick={() => setLogsSubView("keypad")}
                 style={{ marginLeft: "auto", border: "none", background: tokens.fill, color: tokens.text, borderRadius: 12, width: 44, height: 34, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", transition: "all 0.15s" }}
                 title="Keypad"
               >
@@ -6667,7 +7387,7 @@ export default function GridCaller({
             <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: tokens.fill, borderRadius: 24, padding: "8px 14px" }}>
               <Search size={15} color={tokens.label} />
               <input
-                placeholder="Search mesh calls &amp; messages"
+                placeholder="Search mesh calls, messages & peers"
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
                 style={{ flex: 1, border: "none", background: "transparent", outline: "none", color: tokens.text, fontSize: 14 }}
@@ -6678,6 +7398,7 @@ export default function GridCaller({
             <button type="button" onClick={() => setLogFiltersOpen((p) => !p)} style={{ border: "none", background: tokens.fill, color: tokens.text, borderRadius: 999, width: 36, height: 36, display: "grid", placeItems: "center", cursor: "pointer" }} title="Filters"><EllipsisVertical size={16} /></button>
             <button type="button" onClick={() => setMeshSubView(meshSubView === "keypad" ? "recents" : "keypad")} style={{ border: "none", background: meshSubView === "keypad" ? tokens.blue : tokens.fill, color: meshSubView === "keypad" ? "#fff" : tokens.text, borderRadius: 999, width: 36, height: 36, display: "grid", placeItems: "center", cursor: "pointer" }} title="Dialpad"><Grid3X3 size={16} /></button>
           </div>
+          {renderPeerSearch(q, () => setQ(""))}
           {/* Filter chips */}
           {meshSubView !== "people" && (() => {
             const ml = localCommLog.filter((e) => classifyLogSource(e) === "mesh-network");
@@ -6701,7 +7422,7 @@ export default function GridCaller({
                 })}
                 <button
                   type="button"
-                  onClick={() => setMeshSubView(meshSubView === "people" ? "recents" : "people")}
+                  onClick={() => setMeshSubView("people")}
                   style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.text, borderRadius: 999, padding: "6px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}
                 >
                   <Users size={12} /> People
@@ -6718,7 +7439,7 @@ export default function GridCaller({
         </div>
       )}
 
-      <div className="gc-scroll" style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", paddingBottom: 16, WebkitOverflowScrolling: "touch" as any }}>
+      <div className="gc-scroll" style={{ flex: 1, minHeight: 0, overflowY: (activeGroup || thread) ? "hidden" : "auto", overflowX: "hidden", paddingBottom: (activeGroup || thread) ? 0 : 16, WebkitOverflowScrolling: "touch" as any }}>
         {logsSelectMode && visibleLogIds.length > 0 ? (
           <div style={{ margin: "8px 12px", padding: "8px 10px", borderRadius: 12, border: `1px solid ${tokens.sep}`, background: tokens.fill, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: tokens.text }}>{selectedLogIds.length} selected</div>
@@ -6788,7 +7509,7 @@ export default function GridCaller({
                     })}
                     {selectedGroupPeers.length > 0 && (
                       <div style={{ padding: "10px 16px 0", display: "flex", gap: 8 }}>
-                        <button type="button" onClick={startMeshGroupCall} style={{ border: "none", background: tokens.blue, color: "#fff", borderRadius: 999, padding: "8px 16px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Group call ({selectedGroupPeers.length})</button>
+                        <button type="button" onClick={() => { void startMeshGroupCall(); }} style={{ border: "none", background: tokens.blue, color: "#fff", borderRadius: 999, padding: "8px 16px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Group call ({selectedGroupPeers.length})</button>
                         <button type="button" onClick={clearGroupSelection} style={{ border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, borderRadius: 999, padding: "8px 16px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Clear selection</button>
                       </div>
                     )}
@@ -7745,7 +8466,7 @@ export default function GridCaller({
                 <input
                   value={composeTo}
                   onChange={(e) => setComposeTo(e.target.value)}
-                  placeholder="Number, name, or user ID"
+                  placeholder="Number, name, or mesh peer ID"
                   style={{
                     width: "100%",
                     boxSizing: "border-box",
@@ -7756,28 +8477,72 @@ export default function GridCaller({
                     padding: "10px 12px",
                     fontSize: 14,
                     outline: "none",
-                    marginBottom: 8,
+                    marginBottom: 6,
                   }}
                 />
-                <textarea
-                  value={smsDraft}
-                  onChange={(e) => setSmsDraft(e.target.value)}
-                  placeholder="Write your message…"
-                  rows={3}
-                  style={{
-                    width: "100%",
-                    boxSizing: "border-box",
-                    border: `1px solid ${tokens.sep}`,
-                    background: tokens.inputBg,
-                    color: tokens.text,
-                    borderRadius: 10,
-                    padding: "10px 12px",
-                    fontSize: 14,
-                    outline: "none",
-                    resize: "vertical",
-                    fontFamily: "inherit",
-                  }}
-                />
+                {/* Online contacts + search suggestions (always visible) */}
+                {renderPeerSearch(composeTo, () => setComposeTo(""), true)}
+                {/* Message textarea with AI compose */}
+                <div style={{ position: "relative", marginTop: 8 }}>
+                  <textarea
+                    value={smsDraft}
+                    onChange={(e) => setSmsDraft(e.target.value)}
+                    placeholder="Write your message…"
+                    rows={3}
+                    style={{
+                      width: "100%",
+                      boxSizing: "border-box",
+                      border: `1px solid ${tokens.sep}`,
+                      background: tokens.inputBg,
+                      color: tokens.text,
+                      borderRadius: 10,
+                      padding: "10px 36px 10px 12px",
+                      fontSize: 14,
+                      outline: "none",
+                      resize: "vertical",
+                      fontFamily: "inherit",
+                    }}
+                  />
+                  {/* AI ✨ compose button */}
+                  <button type="button" title="AI write message (Ollama)"
+                    onClick={() => { setShowComposeAi((v) => !v); setComposeAiDraft(smsDraft); setComposeAiInstruction(""); }}
+                    style={{ position: "absolute", right: 8, top: 8, width: 28, height: 28, borderRadius: 999, border: "none", background: showComposeAi ? `${tokens.blue}33` : tokens.fill, color: showComposeAi ? tokens.blue : tokens.label, display: "grid", placeItems: "center", cursor: "pointer" }}>
+                    <Sparkles size={14} />
+                  </button>
+                </div>
+                {/* AI compose panel */}
+                {showComposeAi && (
+                  <div style={{ marginTop: 6, padding: "10px 12px", borderRadius: 10, background: tokens.dark ? "#1a1a2e" : "#f0f4ff", border: `1px solid ${tokens.blue}44` }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: tokens.blue }}>✨ AI Message Writer</span>
+                      <button type="button" onClick={() => setShowComposeAi(false)} style={{ border: "none", background: "transparent", color: tokens.label, cursor: "pointer", fontSize: 16 }}>×</button>
+                    </div>
+                    {!aiAvailable && <div style={{ fontSize: 11, color: tokens.orange, marginBottom: 6 }}>⚠️ Ollama offline — start Ollama to use AI</div>}
+                    <input
+                      value={composeAiInstruction}
+                      onChange={(e) => setComposeAiInstruction(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void runComposeAi(); } }}
+                      placeholder='e.g. "write a friendly intro" or "make it shorter"'
+                      disabled={!aiAvailable}
+                      style={{ ...settingsInputStyle(tokens), margin: "0 0 6px", fontSize: 12 }}
+                    />
+                    {composeAiDraft && (
+                      <div style={{ fontSize: 12, color: tokens.text, background: tokens.fill, borderRadius: 8, padding: "8px 10px", marginBottom: 6, whiteSpace: "pre-wrap", lineHeight: 1.4 }}>{composeAiDraft}</div>
+                    )}
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button type="button" disabled={!aiAvailable || composeAiBusy} onClick={() => void runComposeAi()}
+                        style={{ flex: 1, border: "none", borderRadius: 8, padding: "7px 10px", background: tokens.blue, color: "#fff", fontWeight: 700, fontSize: 12, cursor: composeAiBusy || !aiAvailable ? "default" : "pointer", opacity: composeAiBusy || !aiAvailable ? 0.6 : 1 }}>
+                        {composeAiBusy ? "⏳ Writing…" : composeAiDraft ? "✨ Refine" : "✨ Generate"}
+                      </button>
+                      {composeAiDraft && (
+                        <button type="button" onClick={() => { setSmsDraft(composeAiDraft.trim()); setShowComposeAi(false); }}
+                          style={{ flex: 1, border: "none", borderRadius: 8, padding: "7px 10px", background: tokens.green, color: "#041510", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
+                          Use this ↑
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
                 <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
                   <button
                     type="button"
@@ -8036,7 +8801,7 @@ export default function GridCaller({
             </CardList>
             </div>
 
-            <div style={{ display: tab === "groups" ? "block" : "none" }}>
+            <div style={{ display: tab === "groups" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0 }}>
               <div style={{ background: tokens.bg }}>
                 {/* WhatsApp-style top header */}
                 <div ref={gridchatHeaderRef} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px 6px", position: "relative" }}>
@@ -8215,13 +8980,270 @@ export default function GridCaller({
                   <input
                     value={gridchatSearch}
                     onChange={(e) => setGridchatSearch(e.target.value)}
-                    placeholder="Ask Meta AI or Search"
+                    placeholder="Search mesh contacts, map users, IDs…"
                     style={{ flex: 1, border: "none", background: "transparent", outline: "none", color: tokens.text, fontSize: 14 }}
                   />
                   {gridchatSearch ? <button type="button" onClick={() => setGridchatSearch("")} style={{ border: "none", background: "none", color: tokens.label, cursor: "pointer", padding: 0 }}><X size={14} /></button> : null}
                 </div>
 
-                {gridchatSubTab === "chats" && <div style={{ display: "flex", gap: 8, padding: "6px 16px 8px", overflowX: "auto" }}>
+                {/* ── People tabs: Live / Contacts / Map ── (hidden while searching) */}
+                {!gridchatSearch && gridchatSubTab === "chats" && (() => {
+                  const onlinePeers = (() => {
+                    const seen = new Set<string>();
+                    const out: { id: string; name: string; handle?: string; phone?: string; online: boolean; lat?: number; lng?: number; distance?: number; source: string }[] = [];
+                    for (const p of peers) { if (!seen.has(p.id) && !isSelfPeer(p.id)) { seen.add(p.id); out.push({ id: p.id, name: p.name, handle: p.handle, phone: p.phone, online: !!p.online, source: "mesh" }); } }
+                    for (const p of globalPeers) { if (!seen.has(p.id) && !isSelfPeer(p.id)) { seen.add(p.id); out.push({ id: p.id, name: p.name, handle: p.handle, online: !!p.online, source: "global" }); } }
+                    for (const p of meshMapPeers) { if (!seen.has(p.id) && !isSelfPeer(p.id)) { seen.add(p.id); out.push({ id: p.id, name: p.name, phone: p.phone, online: !!p.online, lat: p.lat, lng: p.lng, distance: p.distance, source: "map" }); } }
+                    return out.sort((a, b) => Number(b.online) - Number(a.online));
+                  })();
+                  const onlineCount = onlinePeers.filter((p) => p.online).length;
+
+                  // ── Peer card helper used by both Live and Map
+                  const peerActions = (p: typeof onlinePeers[0]) => (
+                    <div style={{ display: "flex", gap: 5, flexShrink: 0 }}>
+                      <button type="button" title="Call" onClick={() => { setGcSelectedPeerId(null); void placeCallLocal(p.id, p.name); }}
+                        style={{ width: 30, height: 30, borderRadius: 999, border: "none", background: `${tokens.green}22`, color: tokens.green, display: "grid", placeItems: "center", cursor: "pointer" }}>
+                        <Phone size={13} />
+                      </button>
+                      <button type="button" title="Message" onClick={() => {
+                        setGcSelectedPeerId(null);
+                        const ex = sms.find((s) => s.peerId === p.id || (p.phone && s.peerId === p.phone.replace(/\D/g, "")));
+                        if (ex) { setThread(ex.peerId); setTab("sms"); } else { setDial(p.id); setTab("keypad"); }
+                      }} style={{ width: 30, height: 30, borderRadius: 999, border: "none", background: `${tokens.blue}22`, color: tokens.blue, display: "grid", placeItems: "center", cursor: "pointer" }}>
+                        <MessageCircle size={13} />
+                      </button>
+                      <button type="button" title="Open chat" onClick={() => {
+                        setGcSelectedPeerId(null);
+                        const dmId = [MeshEngine.localId, p.id].sort().join("_");
+                        const ex = groupChats.find((g) => g.id === dmId || (g.members.length === 2 && g.members.includes(p.id) && g.members.some((m) => isCallAddressedToMe(m))));
+                        if (ex) { setGroupViewId(ex.id); } else { const ng = { id: dmId, name: p.name || p.id, members: [MeshEngine.localId, p.id], createdAt: Date.now(), updatedAt: Date.now() }; setGroupChats((prev) => [ng, ...prev]); setGroupViewId(dmId); }
+                      }} style={{ width: 30, height: 30, borderRadius: 999, border: "none", background: `${tokens.orange}22`, color: tokens.orange, display: "grid", placeItems: "center", cursor: "pointer" }}>
+                        <MessageSquare size={13} />
+                      </button>
+                      <button type="button" title="Add to group" onClick={() => { setGcSelectedPeerId(null); setGcAddGroupTarget({ id: p.id, name: p.name }); }}
+                        style={{ width: 30, height: 30, borderRadius: 999, border: "none", background: `${tokens.label}14`, color: tokens.label, display: "grid", placeItems: "center", cursor: "pointer" }}>
+                        <UserPlus size={13} />
+                      </button>
+                    </div>
+                  );
+
+                  return (
+                    <>
+                      {/* Tab chips with collapse toggle */}
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 16px 4px", overflowX: "auto" }}>
+                        {([
+                          { id: "live", label: `Live ${onlineCount > 0 ? `· ${onlineCount}` : ""}` },
+                          { id: "contacts", label: `Chats ${gridchatItems.length > 0 ? `· ${gridchatItems.length}` : ""}` },
+                          { id: "map", label: `Map ${meshMapPeers.filter((p) => !isSelfPeer(p.id)).length > 0 ? `· ${meshMapPeers.filter((p) => !isSelfPeer(p.id)).length}` : ""}` },
+                        ] as const).map((chip) => {
+                          const active = gridchatPeopleTab === chip.id;
+                          return (
+                            <button key={chip.id} type="button" onClick={() => { setGridchatPeopleTab(chip.id); setGcSelectedPeerId(null); setGcPeopleCollapsed(false); }}
+                              style={{ border: "none", borderRadius: 999, padding: "6px 14px", background: active ? tokens.green : tokens.fill, color: active ? "#fff" : tokens.text, fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap" }}>
+                              {chip.label}
+                            </button>
+                          );
+                        })}
+                        {/* Collapse / expand toggle */}
+                        <button type="button" onClick={() => setGcPeopleCollapsed((v) => !v)}
+                          style={{ border: "none", background: "transparent", color: tokens.label, cursor: "pointer", padding: "4px 6px", marginLeft: "auto", flexShrink: 0, display: "flex", alignItems: "center" }}
+                          title={gcPeopleCollapsed ? "Show panel" : "Hide panel"}>
+                          {gcPeopleCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+                        </button>
+                      </div>
+
+                      {/* ── LIVE TAB ── */}
+                      {!gcPeopleCollapsed && gridchatPeopleTab === "live" && (
+                        <div className="gc-scroll" style={{ overflowY: "auto", maxHeight: 360, margin: "4px 16px 6px", borderRadius: 12, border: `1px solid ${tokens.sep}`, background: tokens.card }}>
+                          {onlinePeers.length === 0 ? (
+                            <div style={{ padding: "20px 16px", textAlign: "center", color: tokens.label, fontSize: 13 }}>
+                              <div style={{ fontSize: 28, marginBottom: 8 }}>📡</div>
+                              Swarm is active — waiting for nearby mesh nodes.<br />
+                              <span style={{ fontSize: 11 }}>Other GridCaller users will appear here.</span>
+                            </div>
+                          ) : onlinePeers.map((p) => {
+                            const initials = (p.name || p.id).slice(0, 2).toUpperCase();
+                            const srcColor = p.source === "mesh" ? tokens.green : p.source === "map" ? tokens.blue : tokens.orange;
+                            const isSelected = gcSelectedPeerId === p.id;
+                            return (
+                              <div key={p.id}
+                                onPointerDown={() => { gcLongPressTimer.current = setTimeout(() => setGcAddGroupTarget({ id: p.id, name: p.name }), 600); }}
+                                onPointerUp={() => { if (gcLongPressTimer.current) clearTimeout(gcLongPressTimer.current); }}
+                                onPointerLeave={() => { if (gcLongPressTimer.current) clearTimeout(gcLongPressTimer.current); }}
+                                style={{ borderTop: `1px solid ${tokens.sep}` }}
+                              >
+                                <div
+                                  onClick={() => setGcSelectedPeerId(isSelected ? null : p.id)}
+                                  style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", cursor: "pointer", background: isSelected ? `${tokens.green}0d` : "transparent" }}
+                                >
+                                  <div style={{ width: 40, height: 40, borderRadius: 999, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14, background: p.online ? `${tokens.green}22` : tokens.fill, color: p.online ? tokens.green : tokens.label, border: `2px solid ${p.online ? tokens.green : tokens.sep}`, position: "relative" }}>
+                                    {initials}
+                                    {p.online && <span style={{ position: "absolute", bottom: 0, right: 0, width: 10, height: 10, borderRadius: 999, background: tokens.green, border: `2px solid ${tokens.card}` }} />}
+                                  </div>
+                                  <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{ fontWeight: 700, fontSize: 13, color: tokens.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name || p.id}</div>
+                                    <div style={{ fontSize: 10, color: tokens.label, marginTop: 1 }}>
+                                      <span style={{ color: srcColor, fontWeight: 700 }}>{p.source === "mesh" ? "Mesh" : p.source === "map" ? "Map" : "Global"}</span>
+                                      {p.handle ? ` · @${p.handle}` : ""}
+                                      {p.distance != null ? ` · ${p.distance < 1000 ? `${Math.round(p.distance)}m` : `${(p.distance / 1000).toFixed(1)}km`}` : ""}
+                                      {" · "}<span style={{ color: p.online ? tokens.green : tokens.label }}>{p.online ? "online" : "offline"}</span>
+                                    </div>
+                                  </div>
+                                  <span style={{ fontSize: 10, color: tokens.label }}>{isSelected ? "▲" : "▼"}</span>
+                                </div>
+                                {/* Expanded actions on tap */}
+                                {isSelected && (
+                                  <div style={{ padding: "6px 12px 10px", display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                                    {peerActions(p)}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* ── MAP TAB ── Leaflet full-screen map ── */}
+                      {!gcPeopleCollapsed && gridchatPeopleTab === "map" && (() => {
+                        const mapPeers = meshMapPeers.filter((p) => !isSelfPeer(p.id) && p.lat != null && p.lng != null);
+                        const noGpsPeers = onlinePeers.filter((p) => p.lat == null && !isSelfPeer(p.id));
+
+                        return (
+                          <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+                            {/* Leaflet map container */}
+                            <div
+                              ref={(el) => {
+                                if (!el || gcLeafletInstanceRef.current) return;
+                                gcLeafletMapRef.current = el;
+                                import("leaflet").then(async (mod) => {
+                                  const L = mod.default;
+                                  await import("leaflet/dist/leaflet.css");
+                                  // Fix default marker icons (webpack/vite asset path issue)
+                                  (L.Icon.Default.prototype as any)._getIconUrl = undefined;
+                                  L.Icon.Default.mergeOptions({
+                                    iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+                                    iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+                                    shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+                                  });
+                                  const center: [number, number] = myGps
+                                    ? [myGps.lat, myGps.lng]
+                                    : mapPeers.length > 0
+                                      ? [mapPeers[0].lat, mapPeers[0].lng]
+                                      : [20.5937, 78.9629]; // India center default
+                                  const map = L.map(el, { zoomControl: true, attributionControl: false }).setView(center, 13);
+                                  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+                                    maxZoom: 19,
+                                    attribution: "© OpenStreetMap",
+                                  }).addTo(map);
+                                  gcLeafletInstanceRef.current = map;
+                                }).catch(() => {});
+                              }}
+                              style={{ flex: 1, minHeight: 320, height: 320, borderRadius: 12, overflow: "hidden", margin: "0 12px 4px", border: `1px solid ${tokens.sep}` }}
+                            />
+                            {/* Peer list below map for offline / no-GPS peers */}
+                            {noGpsPeers.length > 0 && (
+                              <div style={{ padding: "4px 12px 8px", fontSize: 11, color: tokens.label }}>
+                                📡 {noGpsPeers.length} peer{noGpsPeers.length !== 1 ? "s" : ""} online (no GPS):{" "}
+                                {noGpsPeers.slice(0, 5).map((p) => p.name || p.id.slice(0, 8)).join(", ")}
+                              </div>
+                            )}
+                            {/* Selected peer action bar */}
+                            {gcSelectedPeerId && (() => {
+                              const selOnline = onlinePeers.find((p) => p.id === gcSelectedPeerId);
+                              const selMap = mapPeers.find((p) => p.id === gcSelectedPeerId);
+                              const sel = selOnline || (selMap ? { id: selMap.id, name: selMap.name, phone: selMap.phone, online: selMap.online, lat: selMap.lat, lng: selMap.lng, distance: selMap.distance } : undefined);
+                              if (!sel) return null;
+                              return (
+                                <div style={{ margin: "0 12px 8px", padding: "10px 12px", borderRadius: 10, background: tokens.fill, border: `1px solid ${tokens.sep}`, display: "flex", alignItems: "center", gap: 8 }}>
+                                  <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{ fontWeight: 700, fontSize: 13, color: tokens.text }}>{sel.name}</div>
+                                    <div style={{ fontSize: 10, color: tokens.label }}>{sel.id.slice(0, 16)}</div>
+                                  </div>
+                                  {peerActions(sel as any)}
+                                </div>
+                              );
+                            })()}
+                          </div>
+                        );
+                      })()}
+                      {/* Leaflet markers synced via useEffect above */}
+
+                      {/* ── Add to group context menu ── */}
+                      {gcAddGroupTarget && (
+                        <div style={{ position: "fixed", inset: 0, zIndex: 9999, display: "flex", alignItems: "flex-end" }} onClick={() => setGcAddGroupTarget(null)}>
+                          <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", background: tokens.card, borderRadius: "16px 16px 0 0", padding: 16, boxShadow: "0 -8px 32px rgba(0,0,0,0.5)" }}>
+                            <div style={{ fontWeight: 700, fontSize: 15, color: tokens.text, marginBottom: 12 }}>
+                              Add <span style={{ color: tokens.green }}>{gcAddGroupTarget.name}</span> to group
+                            </div>
+                            {groupChats.filter((g) => g.members.length > 1).length === 0 ? (
+                              <div style={{ color: tokens.label, fontSize: 13, marginBottom: 12 }}>No groups yet. Create one first.</div>
+                            ) : (
+                              <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 260, overflowY: "auto", marginBottom: 12 }}>
+                                {groupChats.filter((g) => g.members.length > 1).map((g) => (
+                                  <button key={g.id} type="button"
+                                    onClick={() => {
+                                      if (!g.members.includes(gcAddGroupTarget!.id)) {
+                                        setGroupChats((prev) => prev.map((gr) => gr.id === g.id ? { ...gr, members: [...gr.members, gcAddGroupTarget!.id], updatedAt: Date.now() } : gr));
+                                      }
+                                      setGcAddGroupTarget(null);
+                                    }}
+                                    style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", borderRadius: 10, border: `1px solid ${tokens.sep}`, background: tokens.fill, color: tokens.text, cursor: "pointer", textAlign: "left" }}>
+                                    <Users size={16} color={tokens.blue} />
+                                    <div>
+                                      <div style={{ fontWeight: 700, fontSize: 13 }}>{g.name}</div>
+                                      <div style={{ fontSize: 10, color: tokens.label }}>{g.members.length} members{g.members.includes(gcAddGroupTarget.id) ? " · already in group" : ""}</div>
+                                    </div>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                            <button type="button" onClick={() => setGcAddGroupTarget(null)} style={{ width: "100%", padding: "12px", border: "none", borderRadius: 10, background: tokens.fill, color: tokens.label, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
+
+                {/* Search results (shown when actively searching) */}
+                {gridchatSearch.trim() && (() => {
+                  const qx = gridchatSearch.trim().toLowerCase();
+                  const seen = new Set<string>();
+                  const allPeers: { id: string; name: string; handle?: string; phone?: string; online: boolean; lat?: number; lng?: number; distance?: number; source: string }[] = [];
+                  for (const p of peers) { if (!seen.has(p.id) && !isSelfPeer(p.id)) { seen.add(p.id); allPeers.push({ id: p.id, name: p.name, handle: p.handle, phone: p.phone, online: !!p.online, source: "mesh" }); } }
+                  for (const p of globalPeers) { if (!seen.has(p.id) && !isSelfPeer(p.id)) { seen.add(p.id); allPeers.push({ id: p.id, name: p.name, handle: p.handle, online: !!p.online, source: "global" }); } }
+                  for (const p of meshMapPeers) { if (!seen.has(p.id) && !isSelfPeer(p.id)) { seen.add(p.id); allPeers.push({ id: p.id, name: p.name, phone: p.phone, online: !!p.online, lat: p.lat, lng: p.lng, distance: p.distance, source: "map" }); } }
+                  const hits = allPeers.filter((p) => `${p.name} ${p.handle || ""} ${p.phone || ""} ${p.id}`.toLowerCase().includes(qx)).slice(0, 8);
+                  if (!hits.length) return <div style={{ margin: "4px 16px", padding: "10px 12px", borderRadius: 10, background: tokens.fill, color: tokens.label, fontSize: 12 }}>No mesh peers found for "{gridchatSearch}"</div>;
+                  return (
+                    <div style={{ margin: "4px 16px 6px", borderRadius: 12, border: `1px solid ${tokens.sep}`, background: tokens.card, overflow: "hidden" }}>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: tokens.label, padding: "8px 12px 4px", textTransform: "uppercase", letterSpacing: 0.5 }}>Mesh Peers — tap to connect</div>
+                      {hits.map((p) => {
+                        const initials = (p.name || p.id).slice(0, 2).toUpperCase();
+                        const srcColor = p.source === "mesh" ? tokens.green : p.source === "map" ? tokens.blue : tokens.orange;
+                        return (
+                          <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", borderTop: `1px solid ${tokens.sep}` }}>
+                            <div style={{ width: 38, height: 38, borderRadius: 999, background: p.online ? `${tokens.green}33` : tokens.fill, color: p.online ? tokens.green : tokens.label, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 13, flexShrink: 0, border: `2px solid ${p.online ? tokens.green : tokens.sep}` }}>{initials}</div>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontWeight: 700, fontSize: 13, color: tokens.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name || p.id}</div>
+                              <div style={{ fontSize: 10, color: tokens.label, marginTop: 1 }}><span style={{ color: srcColor, fontWeight: 700 }}>{p.source === "mesh" ? "Mesh" : p.source === "map" ? "Map" : "Global"}</span>{p.handle ? ` · @${p.handle}` : ""}{p.phone ? ` · ${p.phone}` : ""}{p.distance != null ? ` · ${p.distance < 1000 ? `${Math.round(p.distance)}m` : `${(p.distance / 1000).toFixed(1)}km`}` : ""}{" · "}<span style={{ color: p.online ? tokens.green : tokens.label }}>{p.online ? "online" : "offline"}</span></div>
+                            </div>
+                            <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                              <button type="button" title="Call" onClick={() => { setGridchatSearch(""); void placeCallLocal(p.id, p.name); }} style={{ width: 32, height: 32, borderRadius: 999, border: "none", background: `${tokens.green}22`, color: tokens.green, display: "grid", placeItems: "center", cursor: "pointer" }}><Phone size={14} /></button>
+                              <button type="button" title="Message" onClick={() => { setGridchatSearch(""); const ex = sms.find((s) => s.peerId === p.id || (p.phone && s.peerId === p.phone.replace(/\D/g, ""))); if (ex) { setThread(ex.peerId); setTab("sms"); } else { setDial(p.id); setTab("keypad"); } }} style={{ width: 32, height: 32, borderRadius: 999, border: "none", background: `${tokens.blue}22`, color: tokens.blue, display: "grid", placeItems: "center", cursor: "pointer" }}><MessageCircle size={14} /></button>
+                              <button type="button" title="Open chat" onClick={() => { setGridchatSearch(""); const dmId = [MeshEngine.localId, p.id].sort().join("_"); const ex = groupChats.find((g) => g.id === dmId || (g.members.length === 2 && g.members.includes(p.id) && g.members.some((m) => isCallAddressedToMe(m)))); if (ex) { setGroupViewId(ex.id); } else { const ng = { id: dmId, name: p.name || p.id, members: [MeshEngine.localId, p.id], createdAt: Date.now(), updatedAt: Date.now() }; setGroupChats((prev) => [ng, ...prev]); setGroupViewId(dmId); } setGridchatSubTab("chats"); setGridchatPeopleTab("contacts"); }} style={{ width: 32, height: 32, borderRadius: 999, border: "none", background: `${tokens.orange}22`, color: tokens.orange, display: "grid", placeItems: "center", cursor: "pointer" }}><MessageSquare size={14} /></button>
+                              <button type="button" title="Add to group" onClick={() => { setGridchatSearch(""); setGcAddGroupTarget({ id: p.id, name: p.name }); }} style={{ width: 32, height: 32, borderRadius: 999, border: "none", background: `${tokens.label}14`, color: tokens.label, display: "grid", placeItems: "center", cursor: "pointer" }}><UserPlus size={14} /></button>
+                              {p.lat != null && p.lng != null && <button type="button" title="Locate on map" onClick={() => { setGridchatSearch(""); setGridchatPeopleTab("map"); bus.emit("map:focus_peer", { id: p.id, lat: p.lat, lng: p.lng }); }} style={{ width: 32, height: 32, borderRadius: 999, border: "none", background: `${tokens.blue}14`, color: tokens.blue, display: "grid", placeItems: "center", cursor: "pointer" }}><MapPin size={14} /></button>}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+
+                {/* Show filter chips only in Contacts tab when not collapsed */}
+                {!gcPeopleCollapsed && gridchatPeopleTab === "contacts" && gridchatSubTab === "chats" && <div style={{ display: "flex", gap: 8, padding: "2px 16px 8px", overflowX: "auto" }}>
                   {[
                     { id: "all" as GridchatFilter, label: "All" },
                     { id: "unread" as GridchatFilter, label: `Unread ${gridchatUnreadTotal > 0 ? gridchatUnreadTotal : ""}`.trim() },
@@ -8250,6 +9272,8 @@ export default function GridCaller({
                     );
                   })}
                   <button type="button" style={{ border: `1px solid ${tokens.sep}`, background: gridchatShowCreateForm ? tokens.green : tokens.card, color: gridchatShowCreateForm ? "#fff" : tokens.text, borderRadius: 999, padding: "5px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", gap: 5 }} onClick={() => setGridchatShowCreateForm(v => !v)}>Groups {gridchatItems.filter(r => r.kind === "group").length}</button>
+                  <button type="button" style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.label, borderRadius: 999, padding: "5px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", gap: 5 }} onClick={() => {}}><Download size={12} /> Archived</button>
+                  <button type="button" onClick={() => { setGcNewDirectOpen((v) => !v); setGridchatShowCreateForm(false); }} style={{ border: `1px solid ${tokens.sep}`, background: gcNewDirectOpen ? tokens.blue : tokens.card, color: gcNewDirectOpen ? "#fff" : tokens.text, borderRadius: 999, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", gap: 5 }}><MessageCircle size={12} /> Direct</button>
                   <button type="button" onClick={openGridchatCreatePanel} style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.text, borderRadius: 999, width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}><Plus size={14} /></button>
                 </div>}
 
@@ -8495,7 +9519,8 @@ export default function GridCaller({
                 </div>}
               </div>
 
-              {gridchatSubTab === "chats" && <>
+              {/* Chat list: shows when on Contacts tab, OR when any tab is collapsed (chat is the fallback view) */}
+              {gridchatSubTab === "chats" && (gridchatPeopleTab === "contacts" || gcPeopleCollapsed) && !activeGroup && <>
               {gridchatListSelectMode && (
                 <div style={{ margin: "6px 12px 8px", padding: "8px 10px", borderRadius: 12, border: `1px solid ${tokens.sep}`, background: tokens.fill, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
                   <div style={{ fontSize: 12, fontWeight: 700, color: tokens.text }}>{selectedGridchatRowIds.length} selected</div>
@@ -8510,20 +9535,21 @@ export default function GridCaller({
                   </div>
                 </div>
               )}
-              {/* Archived row - WhatsApp style */}
-              <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 16px", borderBottom: `0.5px solid ${tokens.sep}`, cursor: "pointer" }} onClick={() => {}}>
-                <div style={{ width: 46, height: 46, borderRadius: 23, background: tokens.fill, display: "grid", placeItems: "center", flexShrink: 0 }}>
-                  <Download size={18} color={tokens.label} />
-                </div>
-                <div style={{ fontSize: 15, fontWeight: 500, color: tokens.text }}>Archived</div>
-              </div>
               {/* Floating + FAB */}
               <div style={{ position: "relative" }}>
               <CardList>
-                {gridchatItems.length === 0 ? (
-                  <EmptyState title="No Gridchat groups yet" body="Groups sync over the mesh with no central server. Create a group to start — members join as they come online." />
-                ) : (
-                  gridchatItems.map((row) => {
+                {gridchatItems.length === 0 ? null : (() => {
+                  const dmRows = gridchatItems.filter((r) => r.kind === "direct");
+                  const groupRows = gridchatItems.filter((r) => r.kind === "group");
+                  const hasBoth = dmRows.length > 0 && groupRows.length > 0;
+
+                  const SectionHeader = ({ label, count }: { label: string; count: number }) => (
+                    <div style={{ padding: "10px 14px 4px", fontSize: 11, fontWeight: 800, color: tokens.label, textTransform: "uppercase", letterSpacing: 0.8, background: tokens.bar, borderBottom: `0.5px solid ${tokens.sep}` }}>
+                      {label} <span style={{ fontWeight: 500, color: tokens.label, opacity: 0.7 }}>{count}</span>
+                    </div>
+                  );
+
+                  const renderRow = (row: typeof gridchatItems[0]) => {
                     const rowSelected = selectedGridchatRowIds.includes(row.id);
                     return (
                     <div
@@ -8675,8 +9701,18 @@ export default function GridCaller({
                         </button>
                       </div>
                     </div>
-                  );})
-                )}
+                  );};
+
+                  return (
+                    <>
+                      {hasBoth && <SectionHeader label="Direct Messages" count={dmRows.length} />}
+                      {dmRows.map(renderRow)}
+                      {hasBoth && <SectionHeader label="Groups" count={groupRows.length} />}
+                      {groupRows.map(renderRow)}
+                      {!hasBoth && gridchatItems.map(renderRow)}
+                    </>
+                  );
+                })()}
               </CardList>
 
               </div>
@@ -8691,95 +9727,186 @@ export default function GridCaller({
                   <button type="button" onClick={openGridchatCreatePanel} style={{ padding: "10px 28px", background: tokens.green, color: "#041510", border: "none", borderRadius: 999, fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Create community</button>
                 </div>
               )}
-              {/* Green floating + FAB */}
-              <button
-                type="button"
-                onClick={openGridchatCreatePanel}
-                style={{ position: "absolute", bottom: 16, right: 16, width: 54, height: 54, borderRadius: 14, border: "none", background: tokens.green, color: "#041510", display: "grid", placeItems: "center", cursor: "pointer", boxShadow: `0 4px 16px ${tokens.green}66`, zIndex: 5 }}
-                title="New chat"
-              >
-                <Plus size={22} />
-              </button>
+              {/* ── New Direct Chat panel ── */}
+              {gcNewDirectOpen && (
+                <div style={{ margin: "10px 12px", padding: 14, borderRadius: 14, background: tokens.card, border: `1px solid ${tokens.sep}` }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                    <div style={{ fontSize: 13, fontWeight: 800, color: tokens.text }}>New Direct Chat</div>
+                    <button type="button" onClick={() => { setGcNewDirectOpen(false); setGcNewDirectSearch(""); }} style={{ border: "none", background: tokens.fill, color: tokens.label, borderRadius: 999, width: 26, height: 26, display: "grid", placeItems: "center", cursor: "pointer" }}><X size={13} /></button>
+                  </div>
+                  <div style={{ position: "relative", marginBottom: 8 }}>
+                    <input value={gcNewDirectSearch} onChange={(e) => setGcNewDirectSearch(e.target.value)} placeholder="Search by name, ID, handle…" style={{ ...settingsInputStyle(tokens), margin: 0, paddingLeft: 32 }} />
+                    <Search size={13} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: tokens.label, pointerEvents: "none" }} />
+                  </div>
+                  {/* People list */}
+                  <div style={{ maxHeight: 260, overflowY: "auto", borderRadius: 10, border: `1px solid ${tokens.sep}`, background: tokens.bg }}>
+                    {(() => {
+                      const q = gcNewDirectSearch.trim().toLowerCase();
+                      const all: { id: string; name: string; online: boolean; source: string }[] = [
+                        ...peers.map((p) => ({ id: p.id, name: p.name || p.id, online: true, source: "Nearby" })),
+                        ...globalPeers.map((p) => ({ id: p.id, name: p.name || p.id, online: p.online, source: "Live" })),
+                        ...radarPeers.map((p) => ({ id: p.id, name: p.name || p.id, online: p.online, source: "Map" })),
+                      ];
+                      const seen = new Set<string>();
+                      const unique = all.filter((p) => { if (seen.has(p.id) || isSelfPeer(p.id)) return false; seen.add(p.id); return true; });
+                      const filtered = q ? unique.filter((p) => p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q)) : unique.slice(0, 20);
+                      if (filtered.length === 0) return <div style={{ padding: "12px 14px", fontSize: 12, color: tokens.label }}>No peers found — check Live tab or enter an ID</div>;
+                      return filtered.map((p) => (
+                        <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", borderBottom: `0.5px solid ${tokens.sep}`, background: "transparent" }}>
+                          <div style={{ width: 36, height: 36, borderRadius: 18, background: p.online ? tokens.green : tokens.fill, display: "grid", placeItems: "center", flexShrink: 0, fontSize: 13, fontWeight: 800, color: p.online ? "#fff" : tokens.label }}>
+                            {(p.name[0] || "?").toUpperCase()}
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontWeight: 700, fontSize: 13, color: tokens.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                            <div style={{ fontSize: 10, color: tokens.label }}>{p.source} · {p.id.slice(0, 16)}</div>
+                          </div>
+                          <div style={{ display: "flex", gap: 6 }}>
+                            {/* Chat button */}
+                            <button type="button" title="Chat" onClick={() => {
+                              const dmId = [MeshEngine.localId, p.id].sort().join("_");
+                              const ex = groupChats.find((g) => g.id === dmId);
+                              if (!ex) setGroupChats((prev) => [{ id: dmId, name: p.name, members: [MeshEngine.localId, p.id], createdAt: Date.now(), updatedAt: Date.now() }, ...prev]);
+                              setGroupViewId(dmId);
+                              setGcNewDirectOpen(false);
+                              setGcNewDirectSearch("");
+                            }} style={{ border: "none", background: `${tokens.blue}22`, color: tokens.blue, borderRadius: 999, width: 32, height: 32, display: "grid", placeItems: "center", cursor: "pointer" }}>
+                              <MessageCircle size={15} />
+                            </button>
+                            {/* Call button */}
+                            <button type="button" title="Call" onClick={() => { void placeCallLocal(p.id, p.name); setGcNewDirectOpen(false); }}
+                              style={{ border: "none", background: `${tokens.green}22`, color: tokens.green, borderRadius: 999, width: 32, height: 32, display: "grid", placeItems: "center", cursor: "pointer" }}>
+                              <Phone size={15} />
+                            </button>
+                          </div>
+                        </div>
+                      ));
+                    })()}
+                  </div>
+                </div>
+              )}
+
               {gridchatShowCreateForm && <div
                 ref={gridchatCreatePanelRef}
                 style={{
                   margin: "10px 12px",
-                  padding: 12,
-                  borderRadius: 12,
+                  padding: 14,
+                  borderRadius: 14,
                   background: tokens.card,
                   border: `1px solid ${tokens.sep}`,
                 }}
               >
-                <div style={{ fontSize: 12, color: tokens.label, fontWeight: 700, marginBottom: 8 }}>
-                  Create Gridchat group (full stack sync)
+                {/* Header with close */}
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                  <div style={{ fontSize: 13, color: tokens.text, fontWeight: 800 }}>New Group</div>
+                  <button type="button" onClick={() => { setGridchatShowCreateForm(false); setGroupNameInput(""); setGroupMembersInput(""); setGcMemberSearch(""); setGcMemberSelected([]); }} style={{ border: "none", background: tokens.fill, color: tokens.label, borderRadius: 999, width: 26, height: 26, display: "grid", placeItems: "center", cursor: "pointer" }}><X size={13} /></button>
                 </div>
                 <input
                   value={groupNameInput}
                   onChange={(e) => setGroupNameInput(e.target.value)}
                   placeholder="Group name"
-                  style={{ ...settingsInputStyle(tokens), margin: "0 0 8px" }}
+                  style={{ ...settingsInputStyle(tokens), margin: "0 0 10px" }}
                 />
+
+                {/* Smart member search */}
+                <div style={{ position: "relative", marginBottom: 8 }}>
+                  <input
+                    value={gcMemberSearch}
+                    onChange={(e) => setGcMemberSearch(e.target.value)}
+                    placeholder="Search contacts, IDs, numbers, handles…"
+                    style={{ ...settingsInputStyle(tokens), margin: 0, paddingLeft: 32 }}
+                  />
+                  <Search size={13} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: tokens.label, pointerEvents: "none" }} />
+                </div>
+
+                {/* Selected member chips */}
+                {gcMemberSelected.length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                    {gcMemberSelected.map((p) => (
+                      <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 5, background: `${tokens.green}22`, border: `1px solid ${tokens.green}`, borderRadius: 999, padding: "3px 8px 3px 10px", fontSize: 12, fontWeight: 700, color: tokens.green }}>
+                        {p.name}
+                        <button type="button" onClick={() => setGcMemberSelected((prev) => prev.filter((x) => x.id !== p.id))} style={{ border: "none", background: "transparent", color: tokens.green, cursor: "pointer", padding: 0, lineHeight: 1, fontSize: 14 }}>×</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Suggestion list from live/map/contacts (search-filtered) */}
+                {(() => {
+                  // Merge all sources: live peers, radar, global peers
+                  const allSources: { id: string; name: string; source: string }[] = [
+                    ...peers.map((p) => ({ id: p.id, name: p.name || p.id, source: "Nearby" })),
+                    ...radarPeers.map((p) => ({ id: p.id, name: p.name || p.id, source: "Map" })),
+                    ...globalPeers.map((p) => ({ id: p.id, name: p.name || p.id, source: "Live" })),
+                  ];
+                  // Deduplicate
+                  const seen = new Set<string>();
+                  const unique = allSources.filter((p) => { if (seen.has(p.id)) return false; seen.add(p.id); return true; });
+                  // Filter by search query
+                  const q = gcMemberSearch.trim().toLowerCase();
+                  const filtered = q
+                    ? unique.filter((p) => p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q))
+                    : unique.slice(0, 12);
+                  if (filtered.length === 0 && !q) return null;
+                  return (
+                    <div style={{ maxHeight: 180, overflowY: "auto", borderRadius: 10, border: `1px solid ${tokens.sep}`, marginBottom: 8, background: tokens.bg }}>
+                      {filtered.length === 0 ? (
+                        <div style={{ padding: "10px 12px", fontSize: 12, color: tokens.label }}>No matches — you can still type an ID below</div>
+                      ) : filtered.map((p) => {
+                        const already = gcMemberSelected.some((x) => x.id === p.id);
+                        return (
+                          <button
+                            key={p.id}
+                            type="button"
+                            onClick={() => {
+                              if (already) {
+                                setGcMemberSelected((prev) => prev.filter((x) => x.id !== p.id));
+                              } else {
+                                setGcMemberSelected((prev) => [...prev, { id: p.id, name: p.name }]);
+                              }
+                              setGcMemberSearch("");
+                            }}
+                            style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", border: "none", background: already ? `${tokens.green}18` : "transparent", padding: "9px 12px", cursor: "pointer", textAlign: "left", borderBottom: `0.5px solid ${tokens.sep}` }}
+                          >
+                            <div style={{ width: 32, height: 32, borderRadius: 16, background: already ? tokens.green : tokens.fill, display: "grid", placeItems: "center", flexShrink: 0, fontSize: 13, fontWeight: 800, color: already ? "#fff" : tokens.text }}>
+                              {already ? <Check size={14} /> : (p.name[0] || "?").toUpperCase()}
+                            </div>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontWeight: 700, fontSize: 13, color: tokens.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                              <div style={{ fontSize: 10, color: tokens.label }}>{p.source} · {p.id.slice(0, 16)}</div>
+                            </div>
+                            {already ? <span style={{ fontSize: 11, color: tokens.green, fontWeight: 700 }}>✓ Added</span> : <span style={{ fontSize: 11, color: tokens.label }}>Tap to add</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+
+                {/* Manual ID entry fallback */}
                 <input
                   value={groupMembersInput}
                   onChange={(e) => setGroupMembersInput(e.target.value)}
-                  placeholder="Member IDs / numbers / handles (comma separated)"
-                  style={{ ...settingsInputStyle(tokens), margin: 0 }}
+                  placeholder="Paste IDs / handles (comma separated)"
+                  style={{ ...settingsInputStyle(tokens), margin: "0 0 10px", fontSize: 12, color: tokens.label }}
                 />
-                <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
-                  {peers.slice(0, 10).map((p) => (
-                    <button
-                      key={`gpick_${p.id}`}
-                      type="button"
-                      onClick={() => {
-                        setGroupMembersInput((prev) => {
-                          const add = p.id;
-                          const parts = Array.from(new Set(prev.split(/[,\n]/).map((x) => x.trim()).filter(Boolean)));
-                          if (!parts.includes(add)) parts.push(add);
-                          return parts.join(", ");
-                        });
-                      }}
-                      style={{
-                        border: `1px solid ${tokens.sep}`,
-                        background: tokens.fill,
-                        color: tokens.text,
-                        borderRadius: 999,
-                        padding: "5px 8px",
-                        fontSize: 11,
-                        fontWeight: 700,
-                        cursor: "pointer",
-                      }}
-                    >
-                      + {gridchatAlias(p.name, p.id)}
-                    </button>
-                  ))}
-                </div>
                 <button
                   type="button"
                   onClick={createGroupChat}
-                  style={{
-                    width: "100%",
-                    marginTop: 10,
-                    border: "none",
-                    background: tokens.green,
-                    color: "#041510",
-                    borderRadius: 10,
-                    padding: 11,
-                    fontWeight: 800,
-                    cursor: "pointer",
-                  }}
+                  style={{ width: "100%", border: "none", background: tokens.green, color: "#041510", borderRadius: 10, padding: 11, fontWeight: 800, cursor: "pointer" }}
                 >
-                  Create Gridchat
+                  Create Group {gcMemberSelected.length > 0 ? `(${gcMemberSelected.length} added)` : ""}
                 </button>
               </div>}
 
               {activeGroup && (
                 <div
                   style={{
-                    margin: "10px 12px",
-                    padding: 0,
-                    borderRadius: 12,
-                    background: tokens.card,
-                    border: `1px solid ${tokens.sep}`,
+                    display: "flex",
+                    flexDirection: "column",
+                    flex: 1,
+                    minHeight: 0,
+                    borderRadius: 0,
+                    background: tokens.bg,
                     overflow: "hidden",
                   }}
                 >
@@ -8945,9 +10072,13 @@ export default function GridCaller({
                     </div>
                   )}
                   <div
+                    ref={groupMsgsEndRef}
+                    className="gc-scroll"
                     style={{
-                      maxHeight: 280,
+                      flex: 1,
+                      minHeight: 0,
                       overflowY: "auto",
+                      overflowX: "hidden",
                       padding: "12px 10px",
                       backgroundColor: tokens.dark ? "#0e0e10" : "#efeae2",
                       backgroundImage:
@@ -8962,13 +10093,19 @@ export default function GridCaller({
                       visibleGroupMsgs.slice(-80).map((m) => {
                         const isStarred = starredMessageIds.includes(m.id);
                         const isSelected = groupSelectedMessageIds.includes(m.id);
+                        const isEditing = groupEditingMessageId === m.id;
                         return (
                         <div key={m.id} style={{ marginBottom: 8, display: "flex", justifyContent: m.mine ? "flex-end" : "flex-start" }}>
                           <div
                             onContextMenu={(e) => {
                               e.preventDefault();
-                              setGroupSelectMode(true);
-                              toggleGroupMessageSelection(m.id);
+                              if (!m.deletedForAll && m.mine && !groupSelectMode) {
+                                setGroupEditingMessageId(m.id);
+                                setGroupEditText(m.text);
+                              } else {
+                                setGroupSelectMode(true);
+                                toggleGroupMessageSelection(m.id);
+                              }
                             }}
                             onClick={() => {
                               if (groupSelectMode) toggleGroupMessageSelection(m.id);
@@ -8995,7 +10132,30 @@ export default function GridCaller({
                               >
                                 {m.fromName}
                               </button>
-                              {m.system ? <span style={{ color: tokens.orange }}> · system</span> : null}: {m.text}
+                              {m.system ? <span style={{ color: tokens.orange }}> · system</span> : null}:{" "}
+                              {m.deletedForAll ? (
+                                <em style={{ color: tokens.label, opacity: 0.7 }}>🚫 This message was deleted</em>
+                              ) : isEditing ? (
+                                <span style={{ display: "inline-flex", gap: 4, alignItems: "center", width: "100%" }}>
+                                  <input
+                                    autoFocus
+                                    value={groupEditText}
+                                    onChange={(e) => setGroupEditText(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); editGroupMessage(m.id, groupEditText); }
+                                      if (e.key === "Escape") { setGroupEditingMessageId(null); setGroupEditText(""); }
+                                    }}
+                                    style={{ flex: 1, fontSize: 13, padding: "2px 6px", borderRadius: 8, border: `1px solid ${tokens.blue}`, background: tokens.fill, color: tokens.text }}
+                                  />
+                                  <button type="button" onClick={() => editGroupMessage(m.id, groupEditText)} style={{ border: "none", background: tokens.blue, color: "#fff", borderRadius: 8, padding: "2px 8px", cursor: "pointer", fontSize: 12 }}>Save</button>
+                                  <button type="button" onClick={() => { setGroupEditingMessageId(null); setGroupEditText(""); }} style={{ border: "none", background: tokens.fill, color: tokens.text, borderRadius: 8, padding: "2px 8px", cursor: "pointer", fontSize: 12 }}>✕</button>
+                                </span>
+                              ) : (
+                                <span>
+                                  {m.text}
+                                  {m.edited ? <em style={{ fontSize: 10, color: tokens.label, marginLeft: 4 }}>(edited)</em> : null}
+                                </span>
+                              )}
                             </div>
                             {m.attachment?.kind === "location" && m.attachment.lat != null && m.attachment.lng != null ? (
                               <div style={{ fontSize: 12, marginTop: 2 }}>
@@ -9020,6 +10180,31 @@ export default function GridCaller({
                             <div style={{ fontSize: 10, color: m.mine ? "rgba(255,255,255,0.8)" : tokens.label, marginTop: 2, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
                               <span>{fullDateTime(m.ts)}</span>
                               <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                                {m.mine && !m.deletedForAll && !isEditing ? (
+                                  <>
+                                    <button
+                                      type="button"
+                                      title="Edit message"
+                                      onClick={() => { setGroupEditingMessageId(m.id); setGroupEditText(m.text); }}
+                                      style={{ border: "none", background: "rgba(0,0,0,0.12)", color: tokens.text, borderRadius: 10, padding: "2px 6px", cursor: "pointer", fontSize: 10, fontWeight: 700 }}
+                                    >
+                                      ✏️
+                                    </button>
+                                    <button
+                                      type="button"
+                                      title="Delete for everyone"
+                                      onClick={() => deleteGroupMessageForAll(m.id)}
+                                      style={{ border: "none", background: "rgba(0,0,0,0.12)", color: tokens.red, borderRadius: 10, padding: "2px 6px", cursor: "pointer", fontSize: 10, fontWeight: 700 }}
+                                    >
+                                      🗑
+                                    </button>
+                                  </>
+                                ) : null}
+                                {m.mine ? (
+                                  <span title={m.status === "delivered" ? "Delivered" : "Sent"} style={{ color: m.status === "delivered" ? tokens.blue : "rgba(255,255,255,0.5)", fontWeight: 900, fontSize: 11, letterSpacing: -1 }}>
+                                    {m.status === "delivered" ? "✓✓" : "✓"}
+                                  </span>
+                                ) : null}
                                 <button
                                   type="button"
                                   title={isStarred ? "Unstar" : "Star"}
@@ -9028,7 +10213,7 @@ export default function GridCaller({
                                 >
                                   {isStarred ? <Star size={12} fill="#ffd54a" color="#ffd54a" /> : <StarOff size={12} />}
                                 </button>
-                                {m.text ? (
+                                {m.text && !m.deletedForAll ? (
                                   <button
                                     type="button"
                                     title="Copy message"
@@ -9055,55 +10240,31 @@ export default function GridCaller({
                       );})
                     )}
                   </div>
-                  <div style={{ position: "relative", padding: "10px 10px 12px", background: tokens.dark ? "#1b1b1f" : "#f0f2f5", borderTop: `1px solid ${tokens.sep}` }}>
+                  <div className="gc-chat-input-bar" style={{ flexShrink: 0, position: "relative", padding: "10px 10px 0", background: tokens.dark ? "#1b1b1f" : "#f0f2f5", borderTop: `1px solid ${tokens.sep}` }}>
                     {groupAttachMenuOpen && (
-                      <div
-                        style={{
-                          position: "absolute",
-                          left: 0,
-                          bottom: 56,
-                          width: "min(92vw, 280px)",
-                          borderRadius: 14,
-                          border: `1px solid ${tokens.sep}`,
-                          background: tokens.card,
-                          boxShadow: tokens.shadow,
-                          zIndex: 3,
-                          overflow: "hidden",
-                        }}
-                      >
-                        {[
-                          { id: "document" as const, label: "Document", icon: <Download size={16} color={tokens.blue} /> },
-                          { id: "photos" as const, label: "Photos & videos", icon: <ImageIcon size={16} color={tokens.green} /> },
-                          { id: "camera" as const, label: "Camera", icon: <Camera size={16} color={tokens.red} /> },
-                          { id: "audio" as const, label: "Audio", icon: <Mic size={16} color={tokens.orange} /> },
-                          { id: "contact" as const, label: "Contact", icon: <IdCard size={16} color={tokens.blue} /> },
-                          { id: "poll" as const, label: "Poll", icon: <CheckCircle2 size={16} color={tokens.green} /> },
-                          { id: "event" as const, label: "Event", icon: <CalendarDays size={16} color={tokens.orange} /> },
-                          { id: "sticker" as const, label: "Sticker", icon: <Sparkles size={16} color={tokens.red} /> },
-                        ].map((item) => (
-                          <button
-                            key={item.id}
-                            type="button"
-                            onClick={() => runGridchatAttachAction(activeGroup.id, item.id)}
-                            style={{
-                              width: "100%",
-                              border: "none",
-                              borderBottom: `1px solid ${tokens.sep}`,
-                              background: tokens.card,
-                              color: tokens.text,
-                              padding: "11px 12px",
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 10,
-                              fontWeight: 700,
-                              cursor: "pointer",
-                              textAlign: "left",
-                            }}
-                          >
-                            {item.icon}
-                            {item.label}
-                          </button>
-                        ))}
+                      <div style={{ position: "fixed", inset: 0, zIndex: 9995, display: "flex", flexDirection: "column", justifyContent: "flex-end" }} onClick={() => setGroupAttachMenuOpen(false)}>
+                        <div onClick={(e) => e.stopPropagation()} style={{ background: tokens.card, borderRadius: "20px 20px 0 0", paddingBottom: "env(safe-area-inset-bottom, 16px)", boxShadow: "0 -8px 40px rgba(0,0,0,0.5)" }}>
+                          <div style={{ padding: "16px 16px 8px", fontWeight: 700, fontSize: 14, color: tokens.label, borderBottom: `1px solid ${tokens.sep}` }}>Attach</div>
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 0 }}>
+                            {[
+                              { id: "document" as const, label: "Document", icon: <Download size={22} color={tokens.blue} /> },
+                              { id: "photos" as const, label: "Photos", icon: <ImageIcon size={22} color={tokens.green} /> },
+                              { id: "camera" as const, label: "Camera", icon: <Camera size={22} color={tokens.red} /> },
+                              { id: "audio" as const, label: "Audio", icon: <Mic size={22} color={tokens.orange} /> },
+                              { id: "contact" as const, label: "Contact", icon: <IdCard size={22} color={tokens.blue} /> },
+                              { id: "location" as const, label: "Location", icon: <MapPin size={22} color={tokens.green} /> },
+                              { id: "poll" as const, label: "Poll", icon: <CheckCircle2 size={22} color={tokens.blue} /> },
+                              { id: "event" as const, label: "Event", icon: <CalendarDays size={22} color={tokens.orange} /> },
+                              { id: "sticker" as const, label: "Sticker", icon: <Sparkles size={22} color={tokens.red} /> },
+                            ].map((item) => (
+                              <button key={item.id} type="button" onClick={() => { setGroupAttachMenuOpen(false); runGridchatAttachAction(activeGroup.id, item.id); }}
+                                style={{ border: "none", background: "transparent", padding: "20px 8px 16px", display: "flex", flexDirection: "column", alignItems: "center", gap: 10, cursor: "pointer" }}>
+                                <div style={{ width: 52, height: 52, borderRadius: 999, background: tokens.fill, display: "grid", placeItems: "center" }}>{item.icon}</div>
+                                <span style={{ fontSize: 11, color: tokens.text, fontWeight: 600 }}>{item.label}</span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
                       </div>
                     )}
 
@@ -9154,9 +10315,11 @@ export default function GridCaller({
                         onChange={(e) => setGroupDraft(e.target.value)}
                         placeholder="Type a message"
                         style={{ ...settingsInputStyle(tokens), margin: 0, flex: 1, borderRadius: 999, boxShadow: "none", background: tokens.dark ? "#2f2f32" : "#ffffff" }}
-                        onFocus={() => {
+                        onFocus={(e) => {
                           setGroupAttachMenuOpen(false);
                           setGroupChatMenuOpen(false);
+                          // Scroll input into view after keyboard opens
+                          setTimeout(() => e.target.scrollIntoView({ block: "nearest", behavior: "smooth" }), 300);
                         }}
                         onKeyDown={(e) => {
                           if (e.key === "Enter" && groupDraft.trim()) {
@@ -9189,16 +10352,117 @@ export default function GridCaller({
                       >
                         {groupDraft.trim() ? <MessageCircle size={17} /> : <Mic size={17} />}
                       </button>
+                      {/* AI Compose button */}
+                      {aiAvailable && (
+                        <button type="button" title="AI Compose" onClick={() => { setShowGroupAiCompose((v) => !v); if (!showGroupAiCompose) { setGroupAiDraft(groupDraft); setGroupAiInstruction(""); } }}
+                          style={{ width: 38, height: 38, borderRadius: 999, border: "none", background: showGroupAiCompose ? `${tokens.blue}33` : tokens.dark ? "#38383d" : "#ffffff", color: showGroupAiCompose ? tokens.blue : tokens.label, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}>
+                          <Sparkles size={16} />
+                        </button>
+                      )}
                     </div>
 
+                    {/* ── AI Compose Panel ── */}
+                    {showGroupAiCompose && (
+                      <div style={{ marginTop: 8, borderRadius: 14, border: `1px solid ${tokens.blue}44`, background: tokens.dark ? "#16213e" : "#eef4ff", padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                          <span style={{ fontSize: 11, fontWeight: 800, color: tokens.blue, textTransform: "uppercase", letterSpacing: 0.5 }}>✨ AI Compose</span>
+                          <button type="button" onClick={() => setShowGroupAiCompose(false)} style={{ border: "none", background: "transparent", color: tokens.label, cursor: "pointer", fontSize: 16, lineHeight: 1 }}>\u00d7</button>
+                        </div>
+                        {/* AI draft — editable */}
+                        <textarea
+                          value={groupAiDraft}
+                          onChange={(e) => setGroupAiDraft(e.target.value)}
+                          placeholder="AI draft will appear here… or type your own"  
+                          rows={3}
+                          style={{ resize: "none", border: `1px solid ${tokens.sep}`, borderRadius: 10, padding: "8px 10px", background: tokens.bg, color: tokens.text, fontSize: 13, fontFamily: "inherit", outline: "none", width: "100%", boxSizing: "border-box" }}
+                        />
+                        {/* Instruction input */}
+                        <div style={{ display: "flex", gap: 6 }}>
+                          <input
+                            value={groupAiInstruction}
+                            onChange={(e) => setGroupAiInstruction(e.target.value)}
+                            placeholder={groupAiDraft ? "Refine: shorter, formal, add emoji…" : "What to write? e.g. agree and schedule a meeting"}
+                            style={{ flex: 1, border: `1px solid ${tokens.sep}`, borderRadius: 999, padding: "7px 12px", background: tokens.bg, color: tokens.text, fontSize: 12, outline: "none" }}
+                            onKeyDown={async (e) => { if (e.key === "Enter") { e.preventDefault(); await runGroupAiCompose(); } }}
+                          />
+                          <button type="button" disabled={groupAiComposeBusy}
+                            onClick={async () => { await runGroupAiCompose(); }}
+                            style={{ border: "none", borderRadius: 999, padding: "7px 14px", background: tokens.blue, color: "#fff", fontWeight: 700, fontSize: 12, cursor: groupAiComposeBusy ? "default" : "pointer", opacity: groupAiComposeBusy ? 0.6 : 1 }}>
+                            {groupAiComposeBusy ? "⏳" : groupAiDraft ? "✨ Refine" : "✨ Generate"}
+                          </button>
+                        </div>
+                        {/* Action buttons */}
+                        <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                          <button type="button" onClick={() => setShowGroupAiCompose(false)}
+                            style={{ border: `1px solid ${tokens.sep}`, borderRadius: 999, padding: "6px 14px", background: "transparent", color: tokens.label, fontSize: 12, cursor: "pointer" }}>Discard</button>
+                          <button type="button" disabled={!groupAiDraft.trim()}
+                            onClick={() => { setGroupDraft(groupAiDraft.trim()); setShowGroupAiCompose(false); }}
+                            style={{ border: "none", borderRadius: 999, padding: "6px 14px", background: groupAiDraft.trim() ? tokens.green : tokens.sep, color: groupAiDraft.trim() ? "#fff" : tokens.label, fontWeight: 700, fontSize: 12, cursor: groupAiDraft.trim() ? "pointer" : "default" }}>Use this reply ↑</button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* ── AI Smart Replies (group chat) ───────────────────── */}
+                    {aiAvailable && (
+                      <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
+                        <button
+                          type="button"
+                          disabled={groupAiBusy}
+                          onClick={async () => {
+                            const lastMsg = activeGroupMsgs.slice().reverse().find((m) => !m.mine);
+                            if (!lastMsg?.text) return;
+                            setGroupAiBusy(true);
+                            setGroupAiReplies([]);
+                            try {
+                              const r = await localAiEngine.smartReplies(lastMsg.text, activeGroup.name);
+                              setGroupAiReplies(r);
+                            } catch { /* silent */ }
+                            finally { setGroupAiBusy(false); }
+                          }}
+                          style={{
+                            border: `1px solid ${tokens.blue}55`,
+                            background: "transparent",
+                            color: tokens.blue,
+                            borderRadius: 999,
+                            padding: "4px 10px",
+                            fontSize: 11,
+                            fontWeight: 700,
+                            cursor: groupAiBusy ? "default" : "pointer",
+                            opacity: groupAiBusy ? 0.5 : 1,
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 4,
+                          }}
+                        >
+                          <Sparkles size={11} />
+                          {groupAiBusy ? "Thinking…" : "AI Reply"}
+                        </button>
+                        {groupAiReplies.map((r, i) => (
+                          <button
+                            key={i}
+                            type="button"
+                            onClick={() => { setGroupDraft(r); setGroupAiReplies([]); }}
+                            style={{
+                              border: `1px solid ${tokens.sep}`,
+                              background: tokens.card,
+                              color: tokens.text,
+                              borderRadius: 999,
+                              padding: "4px 10px",
+                              fontSize: 12,
+                              cursor: "pointer",
+                              maxWidth: 160,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {r}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
                     <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
-                      <button
-                        type="button"
-                        onClick={() => shareGroupLocation(activeGroup.id)}
-                        style={{ ...compactActionBtn(tokens), borderRadius: 999, padding: "6px 10px" }}
-                      >
-                        <MapIcon size={13} /> Share location
-                      </button>
                     </div>
                   </div>
 
@@ -9255,7 +10519,7 @@ export default function GridCaller({
       </div>
 
       {/* Bottom navigation */}
-      <div style={{ display: "flex", background: tokens.card, borderTop: `1px solid ${tokens.sep}`, flexShrink: 0, paddingBottom: "env(safe-area-inset-bottom, 0px)", position: "relative", zIndex: 150 }}>
+      <div style={{ display: "flex", background: tokens.card, borderTop: `1px solid ${tokens.sep}`, flexShrink: 0, paddingBottom: "env(safe-area-inset-bottom, 0px)", position: "relative", zIndex: 50 }}>
         {tab === "groups" ? (
           // WhatsApp-style nav for Gridchat tab
           [{ id: "chats", label: "Chats", icon: <MessageCircle size={22} />, badge: gridchatUnreadTotal > 0 ? gridchatUnreadTotal : 0 },
@@ -9290,16 +10554,15 @@ export default function GridCaller({
               key={t.id}
               type="button"
               onClick={() => {
-                if (t.id === "radio") { openMenuFeature("radio"); return; }
                 setMenuOpen(false);
                 setMenuFullscreen(false);
                 setTab(t.id as Tab);
                 if (t.id === "logs") setLogsSubView("recents");
               }}
-              style={{ flex: 1, border: "none", background: "transparent", padding: "10px 4px 8px", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, color: (tab === t.id || (t.id === "radio" && menuOpen && menuView === "radio")) ? tokens.blue : tokens.label, cursor: "pointer" }}
+              style={{ flex: 1, border: "none", background: "transparent", padding: "10px 4px 8px", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, color: tab === t.id ? tokens.blue : tokens.label, cursor: "pointer" }}
             >
               {t.icon}
-              <span style={{ fontSize: 10, fontWeight: (tab === t.id || (t.id === "radio" && menuOpen && menuView === "radio")) ? 700 : 500 }}>{t.label}</span>
+              <span style={{ fontSize: 10, fontWeight: tab === t.id ? 700 : 500 }}>{t.label}</span>
             </button>
           ))
         )}
@@ -9455,6 +10718,7 @@ export default function GridCaller({
                   {(
                     [
                       { id: "home" as const, icon: <Home size={20} color={tokens.blue} />, title: "Home" },
+                      { id: "ai" as const, icon: <Sparkles size={20} color={aiAvailable ? tokens.blue : tokens.label} />, title: "AI Chat" },
                       {
                         id: "emergency" as const,
                         icon: <Shield size={20} color={isPrivacyMode() ? tokens.green : tokens.orange} />,
@@ -9493,6 +10757,12 @@ export default function GridCaller({
                             )
                           );
                         }
+                        if (item.id === "ai") {
+                          setMenuOpen(false);
+                          setMenuFullscreen(false);
+                          setShowAiPanel(true);
+                          return;
+                        }
                         if (item.id === "groupchat") {
                           setTab("groups");
                           setMenuOpen(false);
@@ -9528,7 +10798,7 @@ export default function GridCaller({
                   ))}
 
                   <div style={{ marginTop: 16, fontSize: 12, color: tokens.label, lineHeight: 1.45 }}>
-                    {myGridDisplay && <div>Number: {myGridDisplay}</div>}
+                    {(myGridDisplay || getImmutableDisplayNumber()) && <div style={{ userSelect: "all", cursor: "text" }}>Number: <strong>{myGridDisplay || getImmutableDisplayNumber()}</strong> 🔒</div>}
                     {mySerial && <div>Device: {mySerial}</div>}
                     {lanUrl && <div>LAN: {lanUrl}</div>}
                   </div>
@@ -10561,6 +11831,47 @@ export default function GridCaller({
 
               {menuView === "tower" && (
                 <>
+                  {/* Mesh Economy — real local ledger export */}
+                  {(() => {
+                    const balGC = Number(S.get("mesh_earn_balance_gc", 0)) || 0;
+                    const bwMB = +((S.get("meshcloud_node_stats", null) as any)?.bandwidthSoldMB || 0).toFixed(3);
+                    const ledger = (S.get("meshcloud_earnings", []) as any[]) || [];
+                    return (
+                      <div style={{ background: tokens.fill, borderRadius: 12, padding: 12, marginBottom: 12, border: `1px solid ${tokens.sep}` }}>
+                        <div style={{ fontWeight: 700, fontSize: 13, color: tokens.text, marginBottom: 6 }}>Mesh Economy</div>
+                        <div style={{ display: "flex", gap: 12, marginBottom: 8 }}>
+                          <div style={{ flex: 1, background: tokens.card, borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
+                            <div style={{ fontSize: 20, fontWeight: 800, color: tokens.green }}>{balGC.toFixed(2)}</div>
+                            <div style={{ fontSize: 10, color: tokens.label }}>GridCoins</div>
+                          </div>
+                          <div style={{ flex: 1, background: tokens.card, borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
+                            <div style={{ fontSize: 20, fontWeight: 800, color: tokens.blue }}>{bwMB}</div>
+                            <div style={{ fontSize: 10, color: tokens.label }}>MB relayed</div>
+                          </div>
+                          <div style={{ flex: 1, background: tokens.card, borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
+                            <div style={{ fontSize: 20, fontWeight: 800, color: tokens.orange }}>{ledger.length}</div>
+                            <div style={{ fontSize: 10, color: tokens.label }}>events</div>
+                          </div>
+                        </div>
+                        <div style={{ fontSize: 10, color: tokens.label, marginBottom: 8, lineHeight: 1.4 }}>
+                          GridCoins = local contribution credits. No real money. Export ledger for transparency or future settlement.
+                        </div>
+                        <button type="button"
+                          onClick={() => {
+                            const nodeId = S.get("meshcloud_node_stats", null) as any;
+                            const record = { exportedAt: new Date().toISOString(), nodeId: nodeId?.nodeId || MeshEngine.localId, balanceGC: balGC, bandwidthRelayedMB: bwMB, earningEvents: ledger, note: "Local contribution ledger — no real monetary value without a settlement layer." };
+                            const blob = new Blob([JSON.stringify(record, null, 2)], { type: "application/json" });
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement("a"); a.href = url; a.download = `gridcaller-earnings-${Date.now()}.json`; a.click();
+                            URL.revokeObjectURL(url);
+                            setContactBusy("Earnings ledger exported"); setTimeout(() => setContactBusy(""), 2000);
+                          }}
+                          style={{ width: "100%", padding: "9px", border: "none", borderRadius: 8, background: tokens.blue, color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
+                          ⬇ Export Earnings Ledger (JSON)
+                        </button>
+                      </div>
+                    );
+                  })()}
                   {(() => {
                     const h = softTowerHop.getNetworkHealth();
                     let fab: any = null;
@@ -10955,12 +12266,10 @@ export default function GridCaller({
                     onChange={(v) => setMyCard({ ...myCard, phone: v })}
                     placeholder="Your number"
                   />
-                  <ContactField
-                    label="Display number on card"
-                    value={myCard.displayNumber || ""}
-                    onChange={(v) => setMyCard({ ...myCard, displayNumber: v })}
-                    placeholder="+91 …"
-                  />
+                  <div style={{ fontSize: 12, color: tokens.label, fontWeight: 600, marginBottom: 2 }}>Grid Number (device-locked)</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: tokens.text, padding: "8px 10px", background: tokens.dark ? "#0d1117" : "#e8e8e8", borderRadius: 8, marginBottom: 8, userSelect: "all" }}>
+                    {myGridDisplay || getImmutableDisplayNumber() || "—"} <span style={{ fontSize: 10, color: tokens.label }}>🔒</span>
+                  </div>
                   <ContactField
                     label="Email"
                     value={myCard.email || ""}
@@ -12428,14 +13737,27 @@ export default function GridCaller({
                   />
 
                   <label style={{ fontSize: 12, color: tokens.label, fontWeight: 600 }}>
-                    Display number
+                    Grid Number (device-locked, auto-assigned)
                   </label>
-                  <input
-                    value={settingsDisplayNum}
-                    onChange={(e) => setSettingsDisplayNum(e.target.value)}
-                    placeholder="Optional"
-                    style={settingsInputStyle(tokens)}
-                  />
+                  <div
+                    style={{
+                      ...settingsInputStyle(tokens),
+                      background: tokens.dark ? "#0d1117" : "#e8e8e8",
+                      color: tokens.label,
+                      userSelect: "all",
+                      cursor: "default",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 8,
+                    }}
+                    title="This number is hardware-bound to your device and cannot be changed"
+                  >
+                    <span style={{ fontWeight: 700, letterSpacing: 0.5 }}>
+                      {myGridDisplay || getImmutableDisplayNumber() || "Generating…"}
+                    </span>
+                    <span style={{ fontSize: 10, color: tokens.label, opacity: 0.7 }}>🔒 locked</span>
+                  </div>
 
                   <button
                     type="button"
@@ -12673,6 +13995,46 @@ export default function GridCaller({
                   )}
                 </>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Incoming SOS alert overlay ── */}
+      {incomingSos && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,0.85)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div style={{ background: "#1a0000", border: "2px solid #ff3b30", borderRadius: 20, padding: 24, maxWidth: 340, width: "100%", textAlign: "center" }}>
+            <div style={{ fontSize: 48, marginBottom: 8 }}>🆘</div>
+            <div style={{ fontSize: 22, fontWeight: 800, color: "#ff3b30", marginBottom: 4 }}>SOS ALERT</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "#fff", marginBottom: 8 }}>{incomingSos.user}</div>
+            <div style={{ fontSize: 14, color: "#ffccc7", marginBottom: 12, lineHeight: 1.5 }}>{incomingSos.message}</div>
+            {incomingSos.lat !== 0 && (
+              <div style={{ fontSize: 12, color: "#ff9390", marginBottom: 16 }}>
+                📍 {incomingSos.lat.toFixed(5)}, {incomingSos.lng.toFixed(5)}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+              <button type="button"
+                onClick={() => { void placeCallLocal(incomingSos.id, incomingSos.user); setIncomingSos(null); }}
+                style={{ border: "none", borderRadius: 10, padding: "10px 18px", background: "#30d158", color: "#000", fontWeight: 800, fontSize: 14, cursor: "pointer" }}>
+                📞 Call Back
+              </button>
+              <button type="button"
+                onClick={() => {
+                  if (incomingSos.lat !== 0) bus.emit("map:focus_peer", { id: incomingSos.id, lat: incomingSos.lat, lng: incomingSos.lng });
+                  setTab("mesh");
+                  setIncomingSos(null);
+                }}
+                style={{ border: "none", borderRadius: 10, padding: "10px 18px", background: "#0a84ff", color: "#fff", fontWeight: 800, fontSize: 14, cursor: "pointer" }}>
+                🗺 Locate
+              </button>
+              <button type="button" onClick={() => setIncomingSos(null)}
+                style={{ border: "none", borderRadius: 10, padding: "10px 18px", background: "rgba(255,255,255,0.1)", color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>
+                Dismiss
+              </button>
+            </div>
+            <div style={{ fontSize: 10, color: "#ff9390", marginTop: 12, opacity: 0.7 }}>
+              {new Date(incomingSos.ts).toLocaleTimeString()} via mesh
             </div>
           </div>
         </div>

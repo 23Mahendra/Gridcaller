@@ -2,9 +2,13 @@
  * AiAssistantCard — in-app offline AI panel
  * Tabs: Chat · Image · Voice
  * Uses localAiEngine — zero API keys, zero cloud.
+ * STT: Web Speech API (primary, browser-native) → Off Grid AI Whisper (optional)
+ * TTS: speechSynthesis (primary, OS-native) → Off Grid AI Kokoro (optional)
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import localAiEngine, {
+  browserHasSpeechRecognition,
+  browserHasSpeechSynthesis,
   type AiChatMessage,
   type AiPullProgress,
   type AiStatusSnapshot,
@@ -86,6 +90,8 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
   const [ttsBusy, setTtsBusy] = useState(false);
   const mediaRecorder = useRef<MediaRecorder | null>(null);
   const audioChunks = useRef<Blob[]>([]);
+  // Native Web Speech API refs
+  const speechRecRef = useRef<any>(null);
 
   // Model pull
   const [pulling, setPulling] = useState(false);
@@ -213,45 +219,93 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
     }
   }, [imgPrompt, imgBusy]);
 
-  // ─── Voice recording + STT ─────────────────────────────────────────────
+  // ─── Voice: STT via Web Speech API (primary) → Off Grid AI Whisper (fallback) ───
 
-  const startRecording = async () => {
+  const startRecording = () => {
     setVoiceError("");
     setTranscript("");
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mr = new MediaRecorder(stream);
-      audioChunks.current = [];
-      mr.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.current.push(e.data); };
-      mr.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        const blob = new Blob(audioChunks.current, { type: "audio/webm" });
-        try {
-          const text = await localAiEngine.transcribeAudio(blob);
-          setTranscript(text);
-          setTtsText(text);
-        } catch (err: any) {
-          setVoiceError(err?.message || "Transcription failed.");
-        }
+
+    // Primary: Web Speech API — browser-native, no server account or key required
+    if (browserHasSpeechRecognition()) {
+      const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      const rec = new SR() as any;
+      rec.continuous = false;
+      rec.interimResults = true;
+      rec.lang = navigator.language || "en-US";
+      rec.onresult = (e: any) => {
+        const text = Array.from(e.results as any[])
+          .map((r: any) => r[0].transcript)
+          .join("");
+        setTranscript(text);
+        setTtsText(text);
       };
-      mr.start();
-      mediaRecorder.current = mr;
+      rec.onerror = (e: any) => {
+        setRecording(false);
+        if (e.error !== "no-speech") setVoiceError(`Speech recognition: ${e.error}`);
+      };
+      rec.onend = () => setRecording(false);
+      rec.start();
+      speechRecRef.current = rec;
       setRecording(true);
-    } catch (err: any) {
-      setVoiceError(err?.message || "Microphone access denied.");
+      return;
     }
+
+    // Fallback: MediaRecorder → Off Grid AI Whisper (if available)
+    if (status.audioBackend === "none") {
+      setVoiceError("Speech recognition not available in this browser and no local AI backend is running.");
+      return;
+    }
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then((stream) => {
+        const mr = new MediaRecorder(stream);
+        audioChunks.current = [];
+        mr.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.current.push(e.data); };
+        mr.onstop = async () => {
+          stream.getTracks().forEach((t) => t.stop());
+          const blob = new Blob(audioChunks.current, { type: "audio/webm" });
+          try {
+            const text = await localAiEngine.transcribeAudio(blob);
+            setTranscript(text);
+            setTtsText(text);
+          } catch (err: any) {
+            setVoiceError(err?.message || "Transcription failed.");
+          }
+        };
+        mr.start();
+        mediaRecorder.current = mr;
+        setRecording(true);
+      })
+      .catch((err: any) => setVoiceError(err?.message || "Microphone access denied."));
   };
 
   const stopRecording = () => {
+    // Stop Web Speech API recognition
+    try { speechRecRef.current?.stop(); } catch {}
+    speechRecRef.current = null;
+    // Stop MediaRecorder fallback
     mediaRecorder.current?.stop();
     setRecording(false);
   };
 
+  // TTS via speechSynthesis (primary, OS-native, fully offline) → Off Grid AI (fallback)
   const speakText = async () => {
     if (!ttsText.trim() || ttsBusy) return;
     setTtsBusy(true);
     setVoiceError("");
     try {
+      // Primary: OS/browser speechSynthesis — no server, no key, works offline
+      if (browserHasSpeechSynthesis()) {
+        await new Promise<void>((resolve, reject) => {
+          const utt = new SpeechSynthesisUtterance(ttsText.trim());
+          utt.lang = navigator.language || "en-US";
+          utt.onend = () => resolve();
+          utt.onerror = (e) => reject(new Error(e.error));
+          window.speechSynthesis.cancel(); // clear queue
+          window.speechSynthesis.speak(utt);
+        });
+        return;
+      }
+      // Fallback: Off Grid AI TTS (requires running localhost:7878)
       const buf = await localAiEngine.textToSpeech(ttsText.trim());
       const AC = window.AudioContext || (window as any).webkitAudioContext;
       if (!AC) throw new Error("AudioContext not supported.");
@@ -338,10 +392,12 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
     status.chatBackend === "ollama"
       ? "Ollama"
       : status.chatBackend === "openai_compat"
-      ? "Off Grid AI"
+      ? (status.detectedBackend?.name ?? "Local AI")
       : null;
 
   const noBackend = status.chatBackend === "none";
+  // Voice tab is available if browser has native speech APIs OR an audio backend is detected
+  const voiceAvailable = status.nativeStt || status.nativeTts || status.audioBackend !== "none";
 
   const tabBtn = (id: Tab, label: string) => (
     <button
@@ -927,7 +983,7 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
         {/* ── VOICE TAB ── */}
         {tab === "voice" && (
           <>
-            {status.audioBackend === "none" ? (
+            {!voiceAvailable ? (
               <div
                 style={{
                   color: T.label,
@@ -939,19 +995,12 @@ export default function AiAssistantCard({ dark = true, onClose }: Props) {
                 }}
               >
                 <div style={{ fontWeight: 700, color: T.text, marginBottom: 6 }}>
-                  Voice features not available
+                  Voice not available on this platform
                 </div>
-                Install{" "}
-                <a
-                  href="https://github.com/off-grid-ai/desktop/releases/latest"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={{ color: T.blue }}
-                >
-                  Off Grid AI
-                </a>{" "}
-                to enable on-device speech-to-text (Whisper) and
-                text-to-speech (Kokoro). No cloud, no key needed.
+                This browser does not expose a speech API and no local AI backend
+                was detected. Try Chrome, Edge, or install{" "}
+                <a href="https://ollama.com/download" target="_blank" rel="noopener noreferrer" style={{ color: T.blue }}>Ollama</a>
+                {" "}with a speech-capable model.
               </div>
             ) : (
               <>

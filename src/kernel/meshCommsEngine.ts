@@ -634,10 +634,19 @@ class MeshCommsEngine {
     // 4. Walkie broadcast on emergency channel
     this.sendWalkieTextMessage("EMERGENCY_SOS", `🆘 SOS from ${userName}: ${message} | GPS: ${lat.toFixed(5)},${lng.toFixed(5)}`, "emergency");
 
-    // 5. Play emergency beep
+    // 5. Direct mesh broadcast over all transports (works even when Gun.js is unavailable)
+    try { MeshEngine.broadcast("SOS_ALERT", sos); } catch {}
+
+    // 6. Retry after 15 s so peers who come online shortly after receive it too
+    setTimeout(() => {
+      try { MeshEngine.broadcast("SOS_ALERT", sos); } catch {}
+      if (this.gun) this.conflictSafePut("gridalive.mesh.sos", eventId, { ...sos, retry: true }).catch(() => {});
+    }, 15_000);
+
+    // 7. Play emergency beep
     this.playEmergencyBeep();
 
-    // 6. Vibrate through the shared feedback helper, gated by the user preference
+    // 8. Vibrate
     triggerHapticFeedback([500, 200, 500, 200, 500]);
 
     bus.emit("mesh_comms:sos_sent", sos);
@@ -965,13 +974,22 @@ class MeshCommsEngine {
     // real-time RTCStatsReport (packet loss, RTT, available bandwidth).
     attachAdaptiveBitrate(pc);
 
-    // Signal via Gun.js (no copy-paste signaling!)
+    // Signal via Gun.js AND MeshEngine.broadcast (dual-path: works on LAN without internet)
     const callId = `call_${this.myPeerId}_${targetPeerId}_${Date.now()}`;
 
-    pc.onicecandidate = (e) => {
-      if (e.candidate && this.gun) {
-        this.gun.get("gridalive.webrtc.ice").get(callId).get(`${Date.now()}`).put(JSON.stringify(e.candidate));
+    const sendIce = (candidate: RTCIceCandidate) => {
+      const raw = JSON.stringify(candidate);
+      if (this.gun) {
+        this.gun.get("gridalive.webrtc.ice").get(callId).get(`${Date.now()}`).put(raw);
       }
+      // Also via broadcast path (LAN hub / BroadcastChannel / Trystero)
+      try {
+        MeshEngine.broadcast("WEBRTC_ICE", { callId, to: targetPeerId, from: this.myPeerId, candidate: raw });
+      } catch {}
+    };
+
+    pc.onicecandidate = (e) => {
+      if (e.candidate) sendIce(e.candidate);
     };
 
     // Create offer
@@ -987,7 +1005,7 @@ class MeshCommsEngine {
         timestamp: Date.now(),
       });
 
-      // Listen for answer
+      // Listen for answer via Gun.js
       let answerApplied = false;
       this.gun.get("gridalive.webrtc.answer").get(callId).on(async (data: any) => {
         if (answerApplied || !data?.answer) return;
@@ -1002,7 +1020,7 @@ class MeshCommsEngine {
         }
       });
 
-      // Listen for ICE candidates from remote
+      // Listen for ICE candidates from remote via Gun.js
       this.gun.get("gridalive.webrtc.ice_remote").get(callId).map().on(async (data: any) => {
         if (!data) return;
         try { await pc.addIceCandidate(JSON.parse(data)); } catch (err) {
@@ -1010,6 +1028,51 @@ class MeshCommsEngine {
         }
       });
     }
+
+    // Also broadcast offer via MeshEngine (LAN hub path — no Gun.js needed)
+    let answerAppliedBroadcast = false;
+    try {
+      MeshEngine.broadcast("WEBRTC_OFFER", {
+        callId,
+        from: this.myPeerId,
+        to: targetPeerId,
+        offer: JSON.stringify(offer),
+        timestamp: Date.now(),
+      });
+    } catch {}
+
+    // Listen for answer via broadcast path
+    const offBroadcastAnswer = MeshEngine.onMessage((msg: any) => {
+      if (msg?.type !== "WEBRTC_ANSWER" || msg.data?.callId !== callId) return;
+      if (answerAppliedBroadcast || !msg.data?.answer) return;
+      try {
+        const answer = JSON.parse(msg.data.answer);
+        if (pc.signalingState !== "stable") {
+          pc.setRemoteDescription(answer).catch(console.warn);
+        }
+        answerAppliedBroadcast = true;
+      } catch {}
+    });
+
+    // Listen for ICE from remote via broadcast path
+    const offBroadcastIce = MeshEngine.onMessage((msg: any) => {
+      if (msg?.type !== "WEBRTC_ICE" || msg.data?.callId !== callId || msg.data?.to !== this.myPeerId) return;
+      try { pc.addIceCandidate(JSON.parse(msg.data.candidate)).catch(() => {}); } catch {}
+    });
+
+    // Clean up broadcast listeners on call end OR after 60s timeout (prevents permanent leak)
+    const listenerTimeout = setTimeout(() => { offBroadcastAnswer(); offBroadcastIce(); }, 60_000);
+    pc.onconnectionstatechange = () => {
+      bus.emit("mesh_comms:call_state", { state: pc.connectionState, peerId: targetPeerId });
+      if (pc.connectionState === "closed" || pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+        clearTimeout(listenerTimeout);
+        offBroadcastAnswer();
+        offBroadcastIce();
+      }
+    };
+    pc.onsignalingstatechange = () => {
+      if (pc.signalingState === "closed") { clearTimeout(listenerTimeout); offBroadcastAnswer(); offBroadcastIce(); }
+    };
 
     pc.ontrack = (e) => {
       const remoteAudio = document.getElementById("meshCommsRemoteAudio") as HTMLAudioElement;
@@ -1020,18 +1083,12 @@ class MeshCommsEngine {
       bus.emit("mesh_comms:call_audio", { from: targetPeerId });
     };
 
-    pc.onconnectionstatechange = () => {
-      bus.emit("mesh_comms:call_state", { state: pc.connectionState, peerId: targetPeerId });
-    };
-
     this.activeCallPeers.set(targetPeerId, pc);
     return pc;
   }
 
-  // Answer incoming call published to Gun.js
+  // Answer incoming call published via Gun.js OR MeshEngine.broadcast (dual-path)
   async listenForIncomingCalls(onCall: (from: string, accept: () => void, reject: () => void) => void) {
-    if (!this.gun) return;
-
     const handleOffer = async (data: any, key: string) => {
       if (!data || data.to !== this.myPeerId) return;
       if (this.incomingCallIds.has(key)) return;
@@ -1039,16 +1096,12 @@ class MeshCommsEngine {
       const age = Date.now() - (data.timestamp || 0);
       if (age > 60000) return; // ignore stale calls
 
-      onCall(
-        data.from,
-        async () => {
+      const acceptCall = async () => {
           this.hangUpCall(data.from);
           this.enforcePcBudget();
           const iceServers = await getWebRtcIceServers();
           const pc = this.createPeerConnection(iceServers);
-          if (!pc) {
-            return;
-          }
+          if (!pc) return;
           let stream: MediaStream;
           try {
             stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -1059,31 +1112,52 @@ class MeshCommsEngine {
           stream.getTracks().forEach(t => pc.addTrack(t, stream));
 
           const callId = key;
+
+          // Send ICE via both paths
           pc.onicecandidate = (e) => {
-            if (e.candidate && this.gun) {
-              this.gun.get("gridalive.webrtc.ice_remote").get(callId).get(`${Date.now()}`).put(JSON.stringify(e.candidate));
+            if (!e.candidate) return;
+            const raw = JSON.stringify(e.candidate);
+            if (this.gun) {
+              this.gun.get("gridalive.webrtc.ice_remote").get(callId).get(`${Date.now()}`).put(raw);
             }
+            try {
+              MeshEngine.broadcast("WEBRTC_ICE", { callId, to: data.from, from: this.myPeerId, candidate: raw });
+            } catch {}
           };
 
-          // Set remote offer and create answer
           const offer = JSON.parse(data.offer);
           await pc.setRemoteDescription(offer);
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
 
-          this.gun.get("gridalive.webrtc.answer").get(callId).put({
+          const answerPayload = {
             from: this.myPeerId,
             to: data.from,
+            callId,
             answer: JSON.stringify(answer),
             timestamp: Date.now(),
-          });
+          };
 
-          // Listen for ICE from caller
-          this.gun.get("gridalive.webrtc.ice").get(callId).map().on(async (candData: any) => {
-            if (!candData) return;
-            try { await pc.addIceCandidate(JSON.parse(candData)); } catch (err) {
-              console.warn("[MeshComms] addIceCandidate failed:", err);
-            }
+          // Send answer via both paths
+          if (this.gun) {
+            this.gun.get("gridalive.webrtc.answer").get(callId).put(answerPayload);
+          }
+          try {
+            MeshEngine.broadcast("WEBRTC_ANSWER", answerPayload);
+          } catch {}
+
+          // Receive ICE from caller via Gun.js
+          if (this.gun) {
+            this.gun.get("gridalive.webrtc.ice").get(callId).map().on(async (candData: any) => {
+              if (!candData) return;
+              try { await pc.addIceCandidate(JSON.parse(candData)); } catch {}
+            });
+          }
+
+          // Receive ICE from caller via broadcast path
+          const offIce = MeshEngine.onMessage((msg: any) => {
+            if (msg?.type !== "WEBRTC_ICE" || msg.data?.callId !== callId || msg.data?.to !== this.myPeerId) return;
+            try { pc.addIceCandidate(JSON.parse(msg.data.candidate)).catch(() => {}); } catch {}
           });
 
           pc.ontrack = (e) => {
@@ -1093,26 +1167,241 @@ class MeshCommsEngine {
 
           pc.onconnectionstatechange = () => {
             bus.emit("mesh_comms:call_state", { state: pc.connectionState, peerId: data.from });
+            if (pc.connectionState === "closed" || pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+              offIce();
+            }
           };
 
           this.activeCallPeers.set(data.from, pc);
-        },
+      };
+
+      onCall(
+        data.from,
+        acceptCall,
         () => {
           if (this.gun) {
             this.gun.get("gridalive.webrtc.answer").get(key).put({ declined: true, from: this.myPeerId, timestamp: Date.now() });
           }
+          try {
+            MeshEngine.broadcast("WEBRTC_DECLINE", { callId: key, from: this.myPeerId, to: data.from });
+          } catch {}
         }
       );
     };
 
-    this.gun.get("gridalive.webrtc.offer").map().on(handleOffer);
-    this.gun.get("gridalive.webrtc.call").map().on((data: any, key: string) => {
-      if (!data || data.type !== "lone_offer" || data.to !== this.myPeerId) return;
-      handleOffer(data, key);
+    // Path 1: Gun.js offers
+    if (this.gun) {
+      this.gun.get("gridalive.webrtc.offer").map().on(handleOffer);
+      this.gun.get("gridalive.webrtc.call").map().on((data: any, key: string) => {
+        if (!data || data.type !== "lone_offer" || data.to !== this.myPeerId) return;
+        handleOffer(data, key);
+      });
+    }
+
+    // Path 2: broadcast offers (LAN hub / BroadcastChannel / Trystero — works without Gun.js)
+    MeshEngine.onMessage((msg: any) => {
+      if (msg?.type !== "WEBRTC_OFFER" || !msg.data?.callId) return;
+      handleOffer(msg.data, msg.data.callId);
+    });
+  }
+
+  // ─── LAN-only WebRTC — no STUN/TURN, pure local IP candidates ──
+  // Works on same WiFi/LAN without any internet or relay server.
+  // Signaling still goes via MeshEngine.broadcast (LAN hub WS).
+  async callLocalLan(targetPeerId: string): Promise<RTCPeerConnection | null> {
+    if (!("RTCPeerConnection" in window)) return null;
+    this.hangUpCall(targetPeerId);
+    this.enforcePcBudget();
+    // Use minimal STUN (local) so Chrome generates host+srflx candidates without relay
+    const pc = this.createPeerConnection([{ urls: ["stun:stun.l.google.com:19302"] }]);
+    if (!pc) return null;
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      try { pc.close(); } catch {}
+      return null;
+    }
+    stream.getTracks().forEach(t => pc.addTrack(t, stream));
+    attachAdaptiveBitrate(pc);
+
+    const callId = `lanc_${this.myPeerId}_${targetPeerId}_${Date.now()}`;
+
+    pc.onicecandidate = (e) => {
+      // Only forward non-relay candidates (LAN-only — skip TURN relay candidates)
+      if (e.candidate && e.candidate.type !== "relay") {
+        try { MeshEngine.broadcast("WEBRTC_ICE", { callId, to: targetPeerId, from: this.myPeerId, candidate: JSON.stringify(e.candidate) }); } catch {}
+        if (this.gun) this.gun.get("gridalive.webrtc.ice").get(callId).get(`${Date.now()}`).put(JSON.stringify(e.candidate));
+      }
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    const offerPayload = { callId, from: this.myPeerId, to: targetPeerId, offer: JSON.stringify(offer), timestamp: Date.now(), mode: "lan-only" };
+    try { MeshEngine.broadcast("WEBRTC_OFFER", offerPayload); } catch {}
+    if (this.gun) this.gun.get("gridalive.webrtc.offer").get(callId).put(offerPayload);
+
+    let answerApplied = false;
+    const offAnswer = MeshEngine.onMessage((msg: any) => {
+      if (msg?.type !== "WEBRTC_ANSWER" || msg.data?.callId !== callId || answerApplied || !msg.data?.answer) return;
+      try { pc.setRemoteDescription(JSON.parse(msg.data.answer)).then(() => { answerApplied = true; }).catch(() => {}); } catch {}
+    });
+    if (this.gun) {
+      this.gun.get("gridalive.webrtc.answer").get(callId).on((data: any) => {
+        if (answerApplied || !data?.answer) return;
+        try { pc.setRemoteDescription(JSON.parse(data.answer)).then(() => { answerApplied = true; }).catch(() => {}); } catch {}
+      });
+    }
+
+    const offIce = MeshEngine.onMessage((msg: any) => {
+      if (msg?.type !== "WEBRTC_ICE" || msg.data?.callId !== callId || msg.data?.to !== this.myPeerId) return;
+      try { pc.addIceCandidate(JSON.parse(msg.data.candidate)).catch(() => {}); } catch {}
+    });
+
+    pc.ontrack = (e) => {
+      const el = document.getElementById("meshCommsRemoteAudio") as HTMLAudioElement;
+      if (el) { el.srcObject = e.streams[0]; el.play().catch(console.warn); }
+      bus.emit("mesh_comms:call_audio", { from: targetPeerId, mode: "lan-only" });
+    };
+
+    pc.onconnectionstatechange = () => {
+      bus.emit("mesh_comms:call_state", { state: pc.connectionState, peerId: targetPeerId, mode: "lan-only" });
+      if (pc.connectionState === "closed" || pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+        offAnswer(); offIce();
+      }
+    };
+
+    this.activeCallPeers.set(targetPeerId, pc);
+    return pc;
+  }
+
+  // ─── Audio-stream call — bidirectional opus chunks via mesh broadcast ──
+  // Zero-RTT fallback: no WebRTC handshake needed.
+  // Works when STUN/TURN/LAN-WebRTC all fail (pure store-and-forward path).
+  private audioStreamSessions = new Map<string, { recorder: MediaRecorder; stop: () => void }>();
+  private audioStreamCtx: AudioContext | null = null;
+  private audioStreamCurrentSrc: AudioBufferSourceNode | null = null;
+
+  async startAudioStreamCall(targetPeerId: string): Promise<{ stop: () => void } | null> {
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch { return null; }
+
+    const callId = `asc_${this.myPeerId}_${targetPeerId}_${Date.now()}`;
+    // Cross-browser MIME selection: mp4 for Safari iOS, webm/opus for Chrome/Firefox
+    const MIMES = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"];
+    const MIME = MIMES.find(m => MediaRecorder.isTypeSupported(m));
+    let recorder: MediaRecorder;
+    try {
+      recorder = MIME
+        ? new MediaRecorder(stream, { mimeType: MIME, audioBitsPerSecond: 16000 })
+        : new MediaRecorder(stream, { audioBitsPerSecond: 16000 });
+    } catch (err) {
+      console.error("[MeshComms] MediaRecorder creation failed:", err);
+      stream.getTracks().forEach(t => t.stop());
+      return null;
+    }
+    const chunks: Blob[] = [];
+
+    recorder.ondataavailable = async (e) => {
+      if (!e.data.size) return;
+      chunks.push(e.data);
+      const blob = new Blob(chunks.splice(0), { type: MIME });
+      const ab = await blob.arrayBuffer();
+      const b64 = btoa(String.fromCharCode(...new Uint8Array(ab)));
+      try {
+        MeshEngine.broadcast("AUDIO_STREAM_CHUNK", {
+          callId, from: this.myPeerId, to: targetPeerId,
+          chunk: b64, mime: MIME, ts: Date.now(),
+        });
+      } catch {}
+    };
+
+    recorder.start(200); // 200ms chunks
+
+    // Signal call start to remote
+    try { MeshEngine.broadcast("AUDIO_STREAM_START", { callId, from: this.myPeerId, to: targetPeerId, ts: Date.now() }); } catch {}
+
+    const stop = () => {
+      try { recorder.stop(); } catch {}
+      stream.getTracks().forEach(t => t.stop());
+      try { MeshEngine.broadcast("AUDIO_STREAM_END", { callId, from: this.myPeerId, to: targetPeerId }); } catch {}
+      this.audioStreamSessions.delete(targetPeerId);
+      bus.emit("mesh_comms:call_state", { state: "closed", peerId: targetPeerId, mode: "audio-stream" });
+    };
+
+    this.audioStreamSessions.set(targetPeerId, { recorder, stop });
+    bus.emit("mesh_comms:call_state", { state: "connected", peerId: targetPeerId, mode: "audio-stream" });
+    return { stop };
+  }
+
+  stopAudioStreamCall(peerId?: string) {
+    if (peerId) {
+      this.audioStreamSessions.get(peerId)?.stop();
+    } else {
+      for (const s of this.audioStreamSessions.values()) s.stop();
+    }
+  }
+
+  // Subscribe to incoming audio stream chunks and play them
+  listenForAudioStreamCalls(onStart: (from: string, accept: () => void, reject: () => void) => void): () => void {
+    const pendingCalls = new Map<string, boolean>();
+    return MeshEngine.onMessage(async (msg: any) => {
+      if (msg?.type === "AUDIO_STREAM_START" && msg.data?.to === this.myPeerId) {
+        const { callId, from } = msg.data;
+        if (pendingCalls.has(callId)) return;
+        pendingCalls.set(callId, false);
+        onStart(from, () => {
+          // Accept: start mic → send chunks back
+          pendingCalls.set(callId, true);
+          void this.startAudioStreamCall(from);
+        }, () => {
+          try { MeshEngine.broadcast("AUDIO_STREAM_END", { callId, from: this.myPeerId, to: from }); } catch {}
+        });
+      }
+
+      if (msg?.type === "AUDIO_STREAM_CHUNK" && msg.data?.to === this.myPeerId) {
+        const { chunk } = msg.data;
+        try {
+          // Resume context if suspended (browser autoplay policy)
+          if (!this.audioStreamCtx) {
+            this.audioStreamCtx = new AudioContext();
+          }
+          if (this.audioStreamCtx.state === "suspended") {
+            await this.audioStreamCtx.resume().catch((err) => {
+              console.warn("[MeshComms] AudioContext resume blocked:", err);
+              bus.emit("mesh_comms:audio_blocked", {});
+            });
+          }
+          // Slice buffer to avoid transfer/detachment issues on duplicate chunks
+          const bytes = Uint8Array.from(atob(chunk), c => c.charCodeAt(0));
+          const bufferCopy = bytes.buffer.slice(0);
+          const decoded = await this.audioStreamCtx.decodeAudioData(bufferCopy).catch(() => null);
+          if (!decoded) return;
+          // Stop any still-playing source to prevent overlap (keep only latest chunk)
+          if (this.audioStreamCurrentSrc) {
+            try { this.audioStreamCurrentSrc.stop(); } catch {}
+          }
+          const src = this.audioStreamCtx.createBufferSource();
+          src.buffer = decoded;
+          src.connect(this.audioStreamCtx.destination);
+          src.start();
+          this.audioStreamCurrentSrc = src;
+          src.onended = () => { if (this.audioStreamCurrentSrc === src) this.audioStreamCurrentSrc = null; };
+        } catch {}
+      }
+
+      if (msg?.type === "AUDIO_STREAM_END" && msg.data?.to === this.myPeerId) {
+        const from = msg.data?.from;
+        if (from) this.audioStreamSessions.get(from)?.stop();
+      }
     });
   }
 
   hangUpCall(peerId?: string) {
+    // Close WebRTC PCs first, then stop audio streams
     const toClose = peerId ? [this.activeCallPeers.get(peerId)] : [...this.activeCallPeers.values()];
     toClose.forEach((pc) => {
       if (!pc) return;
@@ -1129,6 +1418,8 @@ class MeshCommsEngine {
     });
     if (peerId) this.activeCallPeers.delete(peerId);
     else this.activeCallPeers.clear();
+    // Stop audio streams AFTER closing PCs
+    this.stopAudioStreamCall(peerId);
     bus.emit("mesh_comms:call_ended", { peerId });
   }
 
@@ -1270,43 +1561,57 @@ class MeshCommsEngine {
   }
 
   // ─── callWithFallback — cascading call strategy ─────────────────
-  // 1. If mesh peers exist AND target is reachable → normal mesh call
-  // 2. Else if internet reachable → TURN lone-ranger call
-  // 3. Else → native tel: call (requires phone number)
-  //
+  // 1. Mesh WebRTC (Gun.js + broadcast signaling, STUN/TURN ICE)
+  // 2. LAN-only WebRTC (no STUN/TURN — same WiFi, no internet needed)
+  // 3. TURN relay (cross-network, requires internet)
+  // 4. Audio-stream (bidirectional 200ms audio chunks via mesh broadcast — fully offline on LAN)
+  // 5. Native tel: (requires phone number)
+  // Each attempt has 8s timeout to prevent indefinite blocking.
   async callWithFallback(
     targetPeerId: string,
     opts: { phone?: string; name?: string } = {}
-  ): Promise<{ method: "mesh" | "turn" | "tel" | "failed"; pc?: RTCPeerConnection | null }> {
+  ): Promise<{ method: "mesh" | "lan" | "turn" | "stream" | "tel" | "failed"; pc?: RTCPeerConnection | null; stop?: () => void }> {
     const hasInternet = typeof navigator !== "undefined" && navigator.onLine;
-
-    // Always clear stale PCs first (browser limit)
+    const TIMEOUT = 8_000;
     this.hangUpCall();
 
-    // ── Strategy 1: mesh WebRTC once ──
+    const withTimeout = <T>(p: Promise<T>): Promise<T> =>
+      Promise.race([p, new Promise<never>((_, r) => setTimeout(() => r(new Error("timeout")), TIMEOUT))]);
+
+    // ── Strategy 1: mesh WebRTC (STUN/TURN + dual-path signaling) ──
     try {
-      const pc = await this.callMeshPeer(targetPeerId);
+      const pc = await withTimeout(this.callMeshPeer(targetPeerId));
       if (pc && pc.connectionState !== "failed" && pc.connectionState !== "closed") {
         return { method: "mesh", pc };
       }
-      // Failed mesh PC — close before next attempt
       this.hangUpCall(targetPeerId);
-    } catch {
-      this.hangUpCall(targetPeerId);
-    }
+    } catch { this.hangUpCall(targetPeerId); }
 
-    // ── Strategy 2: TURN relay once (cross-network / any data) ──
+    // ── Strategy 2: LAN-only WebRTC (same WiFi, zero internet) ──
+    try {
+      const pc = await withTimeout(this.callLocalLan(targetPeerId));
+      if (pc && pc.connectionState !== "failed" && pc.connectionState !== "closed") {
+        return { method: "lan", pc };
+      }
+      this.hangUpCall(targetPeerId);
+    } catch { this.hangUpCall(targetPeerId); }
+
+    // ── Strategy 3: TURN relay (cross-network) ──
     if (hasInternet) {
       try {
-        const pc = await this.callLoneRanger(targetPeerId);
+        const pc = await withTimeout(this.callLoneRanger(targetPeerId));
         if (pc) return { method: "turn", pc };
         this.hangUpCall(targetPeerId);
-      } catch {
-        this.hangUpCall(targetPeerId);
-      }
+      } catch { this.hangUpCall(targetPeerId); }
     }
 
-    // ── Strategy 3: native tel: only when explicit phone provided ──
+    // ── Strategy 4: Audio-stream (200ms chunks via broadcast — no WebRTC needed) ──
+    try {
+      const session = await this.startAudioStreamCall(targetPeerId);
+      if (session) return { method: "stream", stop: session.stop };
+    } catch {}
+
+    // ── Strategy 5: native tel: only when explicit phone provided ──
     if (opts.phone) {
       const ok = this.callByPhone(opts.phone, opts.name || targetPeerId);
       return { method: ok ? "tel" : "failed" };
@@ -1318,6 +1623,13 @@ class MeshCommsEngine {
   // ─── Lone walkie-talkie via Gun.js only ─────────────────────────
   // When Trystero finds no peers, audio chunks are relayed through Gun.js.
   // Latency is higher (~500ms) but works with only cellular data and no peers.
+  /** Write a group message to Gun.js for offline delivery to peers who reconnect later */
+  putGroupMessage(groupId: string, msgId: string, payload: any) {
+    if (this.gun) {
+      this.gun.get(`gridalive.group.${groupId}`).get(msgId).put({ ...payload, _writer: this.myPeerId, _writtenAt: Date.now() });
+    }
+  }
+
   async sendWalkieLoneRanger(channelId: string, text: string): Promise<void> {
     if (!this.gun) return;
     const msg: WalkieMessage = {

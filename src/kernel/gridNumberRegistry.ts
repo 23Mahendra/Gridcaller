@@ -23,6 +23,9 @@ import { deviceVault } from "./deviceVault";
 import Gun from "gun/gun";
 import { gunPeersForMesh } from "./offlineMode";
 import { isOwnerUser } from "../accessPolicy";
+// Dynamic import — @capacitor/device only works in Capacitor native; web gets a null stub
+let _CapDevice: any = null;
+import("@capacitor/device").then((m) => { _CapDevice = m.Device; }).catch(() => {});
 
 // ─── Types ───────────────────────────────────────────────────────
 
@@ -129,7 +132,8 @@ export interface VipListing {
   display: string;
   vipTier: VipTier;
   priceGC: number;
-  priceInr: number;
+  /** INR reference — no payment mechanism exists yet; do not display in purchase UI */
+  _priceInrFutureOnly: number;
   status: "for_sale" | "reserved" | "sold";
   note: string;
 }
@@ -254,12 +258,32 @@ function simpleHash(text: string): string {
   return (h >>> 0).toString(16).padStart(8, "0");
 }
 
-/** Browser/device fingerprint for serial stability */
+/** Hardware-bound device fingerprint — stable across app reinstalls on same hardware */
 async function deviceFingerprint(): Promise<string> {
   try {
+    // 1. Try Capacitor Device UUID (Android/iOS hardware-bound)
+    let hardwareId = "";
+    try {
+      if (_CapDevice?.getId) {
+        const info = await _CapDevice.getId();
+        if (info?.identifier) hardwareId = info.identifier;
+      }
+    } catch {}
+
+    // 2. Try Capacitor Device Info for platform details
+    let platformInfo = "";
+    try {
+      if (_CapDevice?.getInfo) {
+        const di = await _CapDevice.getInfo();
+        platformInfo = [di.manufacturer || "", di.model || "", di.operatingSystem || "", di.osVersion || ""].join("|");
+      }
+    } catch {}
+
     const nav = typeof navigator !== "undefined" ? navigator : ({} as Navigator);
     const scr = typeof screen !== "undefined" ? screen : ({} as Screen);
-    const parts = [
+
+    // 3. Stable browser signals (avoid time-varying ones)
+    const browserParts = [
       nav.userAgent || "",
       nav.language || "",
       String((scr as any).width || 0),
@@ -268,14 +292,53 @@ async function deviceFingerprint(): Promise<string> {
       String((nav as any).deviceMemory || ""),
       String(nav.hardwareConcurrency || ""),
       Intl.DateTimeFormat().resolvedOptions().timeZone || "",
-      S.get("omni_node_id", "") || "",
     ];
-    const raw = parts.join("|");
+
+    // 4. Canvas fingerprint (GPU/driver-bound, stable per device)
+    let canvasFp = "";
+    try {
+      const c = document.createElement("canvas");
+      const ctx = c.getContext("2d");
+      if (ctx) {
+        ctx.textBaseline = "top";
+        ctx.font = "14px Arial";
+        ctx.fillStyle = "#f60";
+        ctx.fillRect(0, 0, 100, 20);
+        ctx.fillStyle = "#069";
+        ctx.fillText("GridCaller🔒", 2, 2);
+        canvasFp = simpleHash(c.toDataURL()).toString();
+      }
+    } catch {}
+
+    // 5. Persistent install UUID locked in IndexedDB (survives localStorage clear)
+    let installUuid = "";
+    try {
+      installUuid = (await deviceVault.get("gc_install_uuid")) as string || "";
+      if (!installUuid) {
+        // First time: generate and lock it
+        installUuid = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+        await deviceVault.put("gc_install_uuid", installUuid);
+      }
+    } catch {}
+
+    const parts = [
+      hardwareId,        // Capacitor hardware UUID (best signal on native)
+      platformInfo,
+      ...browserParts,
+      canvasFp,
+      installUuid,       // IndexedDB-locked fallback
+    ];
+    const raw = parts.filter(Boolean).join("|");
     const hex = await sha256Hex(raw);
-    return hex.slice(0, 24);
+    return hex.slice(0, 32);
   } catch {
     return "000000000000000000000000";
   }
+}
+
+/** Get hardware ID synchronously from cache, or generate from saved fingerprint */
+function getLockedInstallUuid(): string {
+  return S.get("gc_locked_install_uuid", "") as string;
 }
 
 function platformLabel(): string {
@@ -422,12 +485,19 @@ class GridNumberRegistry {
     }
 
     // Sync path: fingerprint may be async — use sync seed first, upgrade hash later
+    // Use only stable signals (no Date.now) so serial is deterministic per device
     const seed =
       S.get("omni_node_id") ||
       S.get("mesh_id") ||
-      `seed_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-    const h = simpleHash(seed + "|" + navigator.userAgent + "|" + (screen?.width || 0));
-    const h2 = simpleHash(h + "|GAD|" + (navigator.language || ""));
+      S.get("ga_mesh_id") ||
+      "";
+    // fallback install UUID from IndexedDB (already persisted on prior run)
+    const lockedUuid = getLockedInstallUuid();
+    const nav = typeof navigator !== "undefined" ? navigator : ({} as Navigator);
+    const scr = typeof screen !== "undefined" ? screen : ({} as Screen);
+    const stableSeed = seed || lockedUuid || (nav.userAgent || "") + "|" + (scr?.width || "");
+    const h = simpleHash(stableSeed + "|GAD|" + (nav.language || "") + "|" + (nav.hardwareConcurrency || ""));
+    const h2 = simpleHash(h + "|GAD-v2|" + ((scr as any)?.colorDepth || 0) + "|" + ((scr as any)?.height || 0));
     const body = (h + h2).slice(0, 12).toUpperCase();
     const serial = `GAD-${body.slice(0, 4)}-${body.slice(4, 8)}-${body.slice(8, 12)}`;
 
@@ -451,13 +521,16 @@ class GridNumberRegistry {
       meta: { platform: rec.platform },
     });
 
-    // Strengthen fingerprint async
+    // Strengthen fingerprint async using Capacitor hardware ID
     void deviceFingerprint().then((fp) => {
       const cur = S.get(KEYS.serialRec, null) as DeviceSerialRecord | null;
       if (cur && cur.serial === serial) {
         cur.fingerprint = fp;
         S.set(KEYS.serialRec, cur);
       }
+      // Cache locked UUID for future sync path
+      const lockedUuid = fp.slice(0, 16);
+      S.set("gc_locked_install_uuid", lockedUuid);
     });
 
     return rec;
@@ -501,16 +574,17 @@ class GridNumberRegistry {
     const serial = this.getDeviceSerial();
     let body = "";
     let attempts = 0;
+    // Derive number DETERMINISTICALLY from serial so same device always gets same number
+    // Serial itself is derived from hardware fingerprint (no Date.now)
     do {
-      const counter = (Number(S.get(KEYS.issueCounter, 0)) || 0) + 1;
-      S.set(KEYS.issueCounter, counter);
-      // Mix counter + serial hash for uniqueness
-      const mix = simpleHash(serial + ":" + counter + ":" + Date.now());
-      const n = (parseInt(mix.slice(0, 8), 16) % 90_000_000) + 10_000_000; // 8 digits 10000000–99999999
+      const salt = attempts === 0 ? "" : `:retry${attempts}`;
+      const mix = simpleHash(serial + ":gridnumber" + salt);
+      const mix2 = simpleHash(mix + ":v2" + serial.slice(-4));
+      const combined = mix + mix2;
+      const n = (parseInt(combined.slice(0, 8), 16) % 80_000_000) + 10_000_000;
       body = String(n).padStart(8, "0");
       attempts++;
       if (attempts > 40) {
-        // force non-vip by flipping last digit
         body = body.slice(0, 7) + String((attempts % 9) + 1);
         break;
       }
@@ -716,7 +790,7 @@ class GridNumberRegistry {
         display: r.display,
         vipTier: r.vipTier,
         priceGC: r.priceGC,
-        priceInr: r.priceInr,
+        _priceInrFutureOnly: r.priceInr,
         status: r.status === "reserved" ? ("reserved" as const) : ("for_sale" as const),
         note: classifyVip(r.number).reason,
       }))
