@@ -67,5 +67,11 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.1": true,
+    "protobufjs@7.6.5": true,
+    "@firebase/util@1.15.1": true
   }
 }
