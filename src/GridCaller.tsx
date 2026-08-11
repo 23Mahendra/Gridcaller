@@ -2567,7 +2567,7 @@ export default function GridCaller({
       } catch {}
       mapObjRef.current = null;
     };
-  }, [menuOpen, menuView, radarPeers, myGps, myName, myGridDisplay, blocked, peers, meshMapPeers]);
+  }, [menuOpen, menuView, myGps, myName, myGridDisplay, blocked, peers, meshMapPeers]);
 
   const networkPeopleCount = useMemo(() => {
     // Real connected devices only (no fabric ghosts / self duplicates)
