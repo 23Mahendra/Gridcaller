@@ -11559,176 +11559,23 @@ export default function GridCaller({
                               : "Starting mesh discovery · no server needed · searching for nodes…"}
                           </div>
                         ) : (
-                          cd.devices.map((d) => {
-                            const isSelf = d.kind === "self";
-                            const isActionable = !isSelf && !!d.id;
-
-                            return (
-                              <div
-                                key={d.kind + ":" + d.id}
-                                style={{
-                                  padding: "9px 0",
-                                  borderBottom: `1px solid ${tokens.sep}`,
-                                  fontSize: 13,
-                                  color: tokens.text,
-                                }}
-                              >
-                                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                  <div style={{ flex: 1, minWidth: 0 }}>
-                                    <div
-                                      style={{
-                                        fontWeight: 700,
-                                        overflow: "hidden",
-                                        textOverflow: "ellipsis",
-                                        whiteSpace: "nowrap",
-                                      }}
-                                    >
-                                      {d.online ? "●" : "○"} {d.name}
-                                    </div>
-
-                                    <div style={{ fontSize: 11, color: tokens.label, marginTop: 2 }}>
-                                      {d.kind}
-                                      {d.hops != null ? ` · hop ${d.hops}` : ""} · {d.detail}
-                                    </div>
-                                  </div>
-
-                                  {isActionable && (
-                                    <div
-                                      style={{
-                                        display: "flex",
-                                        gap: 5,
-                                        flexShrink: 0,
-                                      }}
-                                    >
-                                      <button
-                                        type="button"
-                                        title="Call"
-                                        onClick={() => {
-                                          void placeCallLocal(d.id, d.name);
-                                        }}
-                                        style={{
-                                          width: 30,
-                                          height: 30,
-                                          borderRadius: 999,
-                                          border: "none",
-                                          background: `${tokens.green}22`,
-                                          color: tokens.green,
-                                          display: "grid",
-                                          placeItems: "center",
-                                          cursor: "pointer",
-                                        }}
-                                      >
-                                        <Phone size={13} />
-                                      </button>
-
-                                      <button
-                                        type="button"
-                                        title="Message"
-                                        onClick={() => {
-                                          const ex = sms.find((s) => s.peerId === d.id);
-
-                                          if (ex) {
-                                            setThread(ex.peerId);
-                                            setTab("sms");
-                                          } else {
-                                            setDial(d.id);
-                                            setTab("keypad");
-                                          }
-                                        }}
-                                        style={{
-                                          width: 30,
-                                          height: 30,
-                                          borderRadius: 999,
-                                          border: "none",
-                                          background: `${tokens.blue}22`,
-                                          color: tokens.blue,
-                                          display: "grid",
-                                          placeItems: "center",
-                                          cursor: "pointer",
-                                        }}
-                                      >
-                                        <MessageCircle size={13} />
-                                      </button>
-
-                                      <button
-                                        type="button"
-                                        title="Open chat"
-                                        onClick={() => {
-                                          const dmId = [MeshEngine.localId, d.id].sort().join("_");
-
-                                          const ex = groupChats.find(
-                                            (g) =>
-                                              g.id === dmId ||
-                                              (
-                                                g.members.length === 2 &&
-                                                g.members.includes(d.id) &&
-                                                g.members.some((m) => isCallAddressedToMe(m))
-                                              )
-                                          );
-
-                                          if (ex) {
-                                            setGroupViewId(ex.id);
-                                          } else {
-                                            const ng = {
-                                              id: dmId,
-                                              name: d.name || d.id,
-                                              members: [MeshEngine.localId, d.id],
-                                              createdAt: Date.now(),
-                                              updatedAt: Date.now(),
-                                            };
-
-                                            setGroupChats((prev) => [ng, ...prev]);
-                                            setGroupViewId(dmId);
-                                          }
-
-                                          setTab("groups");
-                                          setGridchatSubTab("chats");
-                                          setGridchatPeopleTab("contacts");
-                                        }}
-                                        style={{
-                                          width: 30,
-                                          height: 30,
-                                          borderRadius: 999,
-                                          border: "none",
-                                          background: `${tokens.orange}22`,
-                                          color: tokens.orange,
-                                          display: "grid",
-                                          placeItems: "center",
-                                          cursor: "pointer",
-                                        }}
-                                      >
-                                        <MessageSquare size={13} />
-                                      </button>
-
-                                      <button
-                                        type="button"
-                                        title="Save contact"
-                                        onClick={() => {
-                                          saveGridNumberToDevice({
-                                            name: d.name || d.id,
-                                            peerId: d.id,
-                                          });
-                                        }}
-                                        style={{
-                                          width: 30,
-                                          height: 30,
-                                          borderRadius: 999,
-                                          border: "none",
-                                          background: `${tokens.label}14`,
-                                          color: tokens.label,
-                                          display: "grid",
-                                          placeItems: "center",
-                                          cursor: "pointer",
-                                        }}
-                                      >
-                                        <UserPlus size={13} />
-                                      </button>
-                                    </div>
-                                  )}
-                                </div>
+                          cd.devices.map((d) => (
+                            <div
+                              key={d.kind + ":" + d.id}
+                              style={{
+                                padding: "8px 0",
+                                borderBottom: `1px solid ${tokens.sep}`,
+                                fontSize: 13,
+                                color: tokens.text,
+                              }}
+                            >
+                              {d.online ? "●" : "○"} {d.name}
+                              <div style={{ fontSize: 11, color: tokens.label }}>
+                                {d.kind}
+                                {d.hops != null ? ` · hop ${d.hops}` : ""} · {d.detail}
                               </div>
-                            );
-                          })
+                            </div>
+                          ))
                         )}
                         <div style={{ height: 12 }} />
                       </>

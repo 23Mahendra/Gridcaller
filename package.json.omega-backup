@@ -28,11 +28,11 @@
   },
   "dependencies": {
     "@capacitor-community/bluetooth-le": "7.1.1",
-    "@capacitor-community/sqlite": "^7.0.3",
+    "@capacitor-community/sqlite": "^6.0.1",
     "@capacitor/android": "^7.2.0",
     "@capacitor/app": "^7.0.1",
     "@capacitor/core": "^7.2.0",
-    "@capacitor/device": "^7.0.5",
+    "@capacitor/device": "^8.0.3",
     "@capacitor/filesystem": "^7.1.1",
     "@capacitor/geolocation": "7.1.5",
     "@capacitor/network": "7.0.2",

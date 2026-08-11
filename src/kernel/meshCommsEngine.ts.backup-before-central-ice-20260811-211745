@@ -1013,7 +1013,6 @@ class MeshCommsEngine {
           const answer = JSON.parse(data.answer);
           if (pc.signalingState !== "stable") {
             await pc.setRemoteDescription(answer);
-            await this.flushRemoteIce(pc);
           }
           answerApplied = true;
         } catch (err) {
@@ -1024,16 +1023,8 @@ class MeshCommsEngine {
       // Listen for ICE candidates from remote via Gun.js
       this.gun.get("gridalive.webrtc.ice_remote").get(callId).map().on(async (data: any) => {
         if (!data) return;
-        try {
-          await this.addRemoteIceCandidate(
-            pc,
-            JSON.parse(data)
-          );
-        } catch (err) {
-          console.warn(
-            "[MeshComms] Gun remote ICE handling failed:",
-            err
-          );
+        try { await pc.addIceCandidate(JSON.parse(data)); } catch (err) {
+          console.warn("[MeshComms] addIceCandidate failed:", err);
         }
       });
     }
@@ -1057,14 +1048,7 @@ class MeshCommsEngine {
       try {
         const answer = JSON.parse(msg.data.answer);
         if (pc.signalingState !== "stable") {
-          void pc.setRemoteDescription(answer)
-            .then(() => this.flushRemoteIce(pc))
-            .catch((err) => {
-              console.warn(
-                "[MeshComms] Broadcast answer SDP failed:",
-                err
-              );
-            });
+          pc.setRemoteDescription(answer).catch(console.warn);
         }
         answerAppliedBroadcast = true;
       } catch {}
@@ -1073,17 +1057,7 @@ class MeshCommsEngine {
     // Listen for ICE from remote via broadcast path
     const offBroadcastIce = MeshEngine.onMessage((msg: any) => {
       if (msg?.type !== "WEBRTC_ICE" || msg.data?.callId !== callId || msg.data?.to !== this.myPeerId) return;
-      try {
-        void this.addRemoteIceCandidate(
-          pc,
-          JSON.parse(msg.data.candidate)
-        );
-      } catch (err) {
-        console.warn(
-          "[MeshComms] Broadcast remote ICE parsing failed:",
-          err
-        );
-      }
+      try { pc.addIceCandidate(JSON.parse(msg.data.candidate)).catch(() => {}); } catch {}
     });
 
     // Clean up broadcast listeners on call end OR after 60s timeout (prevents permanent leak)
@@ -1153,8 +1127,6 @@ class MeshCommsEngine {
 
           const offer = JSON.parse(data.offer);
           await pc.setRemoteDescription(offer);
-          await this.flushRemoteIce(pc);
-
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
 
@@ -1178,34 +1150,14 @@ class MeshCommsEngine {
           if (this.gun) {
             this.gun.get("gridalive.webrtc.ice").get(callId).map().on(async (candData: any) => {
               if (!candData) return;
-              try {
-                await this.addRemoteIceCandidate(
-                  pc,
-                  JSON.parse(candData)
-                );
-              } catch (err) {
-                console.warn(
-                  "[MeshComms] Incoming Gun ICE handling failed:",
-                  err
-                );
-              }
+              try { await pc.addIceCandidate(JSON.parse(candData)); } catch {}
             });
           }
 
           // Receive ICE from caller via broadcast path
           const offIce = MeshEngine.onMessage((msg: any) => {
             if (msg?.type !== "WEBRTC_ICE" || msg.data?.callId !== callId || msg.data?.to !== this.myPeerId) return;
-            try {
-              void this.addRemoteIceCandidate(
-                pc,
-                JSON.parse(msg.data.candidate)
-              );
-            } catch (err) {
-              console.warn(
-                "[MeshComms] Incoming broadcast ICE parsing failed:",
-                err
-              );
-            }
+            try { pc.addIceCandidate(JSON.parse(msg.data.candidate)).catch(() => {}); } catch {}
           });
 
           pc.ontrack = (e) => {
@@ -1293,66 +1245,18 @@ class MeshCommsEngine {
     let answerApplied = false;
     const offAnswer = MeshEngine.onMessage((msg: any) => {
       if (msg?.type !== "WEBRTC_ANSWER" || msg.data?.callId !== callId || answerApplied || !msg.data?.answer) return;
-      try {
-        void pc.setRemoteDescription(
-          JSON.parse(msg.data.answer)
-        )
-          .then(async () => {
-            await this.flushRemoteIce(pc);
-            answerApplied = true;
-          })
-          .catch((err) => {
-            console.warn(
-              "[MeshComms] LAN broadcast answer failed:",
-              err
-            );
-          });
-      } catch (err) {
-        console.warn(
-          "[MeshComms] LAN broadcast answer parse failed:",
-          err
-        );
-      }
+      try { pc.setRemoteDescription(JSON.parse(msg.data.answer)).then(() => { answerApplied = true; }).catch(() => {}); } catch {}
     });
     if (this.gun) {
       this.gun.get("gridalive.webrtc.answer").get(callId).on((data: any) => {
         if (answerApplied || !data?.answer) return;
-        try {
-          void pc.setRemoteDescription(
-            JSON.parse(data.answer)
-          )
-            .then(async () => {
-              await this.flushRemoteIce(pc);
-              answerApplied = true;
-            })
-            .catch((err) => {
-              console.warn(
-                "[MeshComms] LAN Gun answer failed:",
-                err
-              );
-            });
-        } catch (err) {
-          console.warn(
-            "[MeshComms] LAN Gun answer parse failed:",
-            err
-          );
-        }
+        try { pc.setRemoteDescription(JSON.parse(data.answer)).then(() => { answerApplied = true; }).catch(() => {}); } catch {}
       });
     }
 
     const offIce = MeshEngine.onMessage((msg: any) => {
       if (msg?.type !== "WEBRTC_ICE" || msg.data?.callId !== callId || msg.data?.to !== this.myPeerId) return;
-      try {
-        void this.addRemoteIceCandidate(
-          pc,
-          JSON.parse(msg.data.candidate)
-        );
-      } catch (err) {
-        console.warn(
-          "[MeshComms] LAN remote ICE parsing failed:",
-          err
-        );
-      }
+      try { pc.addIceCandidate(JSON.parse(msg.data.candidate)).catch(() => {}); } catch {}
     });
 
     pc.ontrack = (e) => {
@@ -1522,84 +1426,6 @@ class MeshCommsEngine {
   /** Max concurrent peer connections — browsers hard-fail past ~50 */
   private readonly MAX_PEER_CONNECTIONS = 4;
 
-  /**
-   * Centralized remote ICE handling.
-   *
-   * WebRTC signaling can deliver ICE candidates before
-   * setRemoteDescription() has completed. In that situation
-   * addIceCandidate() can fail with InvalidStateError.
-   *
-   * Each RTCPeerConnection gets an isolated queue.
-   */
-  private readonly remoteIceQueues = new WeakMap<
-    RTCPeerConnection,
-    RTCIceCandidateInit[]
-  >();
-
-  private async addRemoteIceCandidate(
-    pc: RTCPeerConnection,
-    candidate: RTCIceCandidateInit | string
-  ): Promise<void> {
-    if (!candidate) return;
-
-    let normalized: RTCIceCandidateInit;
-
-    try {
-      normalized =
-        typeof candidate === "string"
-          ? JSON.parse(candidate)
-          : candidate;
-    } catch (err) {
-      console.warn("[MeshComms] Invalid remote ICE payload:", err);
-      return;
-    }
-
-    if (!pc.remoteDescription) {
-      const queue = this.remoteIceQueues.get(pc) || [];
-      queue.push(normalized);
-      this.remoteIceQueues.set(pc, queue);
-      return;
-    }
-
-    try {
-      await pc.addIceCandidate(
-        new RTCIceCandidate(normalized)
-      );
-    } catch (err) {
-      console.warn(
-        "[MeshComms] Remote ICE candidate rejected:",
-        err
-      );
-    }
-  }
-
-  private async flushRemoteIce(
-    pc: RTCPeerConnection
-  ): Promise<void> {
-    if (!pc.remoteDescription) return;
-
-    const queue = this.remoteIceQueues.get(pc);
-
-    if (!queue || queue.length === 0) {
-      return;
-    }
-
-    this.remoteIceQueues.delete(pc);
-
-    for (const candidate of queue) {
-      try {
-        await pc.addIceCandidate(
-          new RTCIceCandidate(candidate)
-        );
-      } catch (err) {
-        console.warn(
-          "[MeshComms] Queued remote ICE candidate rejected:",
-          err
-        );
-      }
-    }
-  }
-
   private enforcePcBudget() {
     if (this.activeCallPeers.size < this.MAX_PEER_CONNECTIONS) return;
     // Close oldest / all extra
@@ -1713,28 +1539,14 @@ class MeshCommsEngine {
           clearTimeout(timeout);
           try {
             const answer = JSON.parse(data.answer);
-
-            // Register ICE listener BEFORE applying remote SDP.
-            // Early candidates are queued by the centralized helper.
+            await pc.setRemoteDescription(answer);
             const iceNode = this.gun!.get("gridalive.webrtc.ice_remote").get(callId);
             iceNode.map().on(async (raw: string) => {
               if (!raw) return;
-
-              try {
-                await this.addRemoteIceCandidate(
-                  pc,
-                  JSON.parse(raw)
-                );
-              } catch (err) {
-                console.warn(
-                  "[MeshComms] Lone call remote ICE handling failed:",
-                  err
-                );
+              try { await pc.addIceCandidate(JSON.parse(raw)); } catch (err) {
+                console.warn("[MeshComms] Lone call addIceCandidate failed:", err);
               }
             });
-
-            await pc.setRemoteDescription(answer);
-            await this.flushRemoteIce(pc);
           } catch (err) {
             console.warn("[MeshComms] Lone call SDP error:", err);
           }
