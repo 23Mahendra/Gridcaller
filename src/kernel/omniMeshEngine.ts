@@ -4,11 +4,11 @@
  * ═══════════════════════════════════════════════════════════════════
  *
  * ZERO dongle / LoRa / USB radio dependency.
- * Every device on every platform is an equal NODE:
+ * Each runtime can participate when at least one real transport is connected:
  *   · RAM store-and-forward buffer (size from device memory)
  *   · Network IN/OUT (Wi‑Fi/LAN WebSocket + WebRTC + BroadcastChannel + Gun)
- *   · TRANSMIT · RECEIVE · RELAY (multi-hop)
- *   · AI permutation bonding of software paths only
+ *   · validated transmit / receive / relay packet lifecycle
+ *   · bounded RAM-only retry queue
  *
  * Optional BLE/LoRa (if OS exposes them) may attach as EXTRA edges —
  * they are NEVER required for the mesh to run.
@@ -20,6 +20,11 @@ import { bus } from "./bus";
 import { S } from "./storage";
 import { MeshEngine } from "./mesh";
 import meshComms from "./meshCommsEngine";
+import { resolveMeshWsUrl } from "./meshHubConfig";
+import {
+  OmniLanWebSocketTransport,
+  type WebSocketFactory,
+} from "./omniLanWebSocketTransport";
 
 // ── Software-only transports (always the product core) ───────────
 export type OmniTransport =
@@ -30,7 +35,7 @@ export type OmniTransport =
   | "gun-graph" // offline graph + multi-device sync
   | "trystero-sw"; // software P2P room (no dongle)
 
-/** Core set — identical behavior on all platforms */
+/** Adapter identifiers. Availability is established at runtime, not assumed. */
 export const SOFTWARE_TRANSPORTS: OmniTransport[] = [
   "ram-relay",
   "broadcast-tab",
@@ -75,6 +80,8 @@ export interface OmniPacket {
   from: string;
   fromName?: string;
   to?: string;
+  /** Immediate LAN recipient; final application destination remains `to`. */
+  nextHop?: string;
   ts: number;
   hops: number;
   ttl: number;
@@ -85,7 +92,48 @@ export interface OmniPacket {
   priority: "sos" | "call" | "sms" | "data" | "presence" | "relay";
   /** Store-forward: deliver later if peer offline */
   holdUntil?: number;
+  /** Wall-clock expiry, independent from hop TTL. */
+  expiresAt: number;
+  /** Application ACK packets correlate to the delivered logical packet. */
+  ackFor?: string;
 }
+
+export type DeliveryState = "queued" | "transport-sent" | "destination-delivered" | "acked" | "failed";
+
+export interface DispatchResult {
+  packetId: string;
+  attempted: OmniTransport[];
+  succeeded: OmniTransport[];
+  failed: OmniTransport[];
+  transportAccepted: boolean;
+  destinationDelivered: boolean;
+  endToEndAck: boolean;
+}
+
+export type OmniTransportSender = (packet: OmniPacket) => void | Promise<void>;
+
+export interface OmniMeshEngineOptions {
+  nodeId?: string;
+  nodeName?: string;
+  now?: () => number;
+  transportSenders?: Partial<Record<OmniTransport, OmniTransportSender>>;
+  /** Deterministic harnesses opt out of browser/network startup. */
+  manualStart?: boolean;
+}
+
+export type OmniTraceEvent = {
+  event: "TX" | "RX" | "RELAY" | "DELIVER" | "ACK_TX" | "ACK_RX";
+  nodeId: string;
+  packetId: string;
+  type: string;
+  from: string;
+  to?: string;
+  nextHop?: string;
+  hops: number;
+  ttl: number;
+  path: string[];
+  at: number;
+};
 
 export interface OmniStats {
   mode: "software-mesh";
@@ -105,27 +153,27 @@ export interface OmniStats {
   estimatedRangeLabel: string;
   aiMode: string;
   uptime: number;
-  platformEqual: true;
+  platformEqual: boolean;
 }
 
 type Handler = (pkt: OmniPacket) => void;
 
 const RANGE_HINT: Record<OmniTransport, number> = {
-  "ram-relay": 0, // local buffer, enables multi-hop time
-  "broadcast-tab": 5,
-  "wifi-lan-ws": 100,
-  "webrtc-p2p": 150,
-  "gun-graph": 2000, // grows with peer density
-  "trystero-sw": 3000,
+  "ram-relay": 0,
+  "broadcast-tab": 0,
+  "wifi-lan-ws": 0,
+  "webrtc-p2p": 0,
+  "gun-graph": 0,
+  "trystero-sw": 0,
 };
 
 const LABELS: Record<OmniTransport, string> = {
-  "ram-relay": "Device RAM relay buffer",
-  "broadcast-tab": "Local multi-instance bus",
-  "wifi-lan-ws": "Wi‑Fi / LAN mesh node",
-  "webrtc-p2p": "WebRTC peer path",
-  "gun-graph": "Offline graph sync",
-  "trystero-sw": "Software P2P room",
+  "ram-relay": "RAM-only retry queue (not a transport)",
+  "broadcast-tab": "Same-device, same-origin tab bus",
+  "wifi-lan-ws": "Configured HTTP/WebSocket hub path",
+  "webrtc-p2p": "WebRTC peer data path (requires signaling)",
+  "gun-graph": "Gun graph path (requires a reachable peer for cross-device sync)",
+  "trystero-sw": "Trystero WebRTC room (requires signaling/discovery)",
 };
 
 type GunStoreLike = {
@@ -189,7 +237,7 @@ function permutations(list: OmniTransport[], max = 20): OmniTransport[][] {
   return out.slice(0, max);
 }
 
-class OmniMeshEngine {
+export class OmniMeshEngine {
   private nodeId: string;
   private nodeName: string;
   private health = new Map<OmniTransport, TransportHealth>();
@@ -212,41 +260,109 @@ class OmniMeshEngine {
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private gunUnsub: (() => void) | null = null;
 
-  /** RAM store-and-forward queue — every device is a relay */
-  private storeForward: OmniPacket[] = [];
+  /** Bounded, RAM-only retry queue. It is not crash-safe persistence. */
+  private storeForward: Array<{ packet: OmniPacket; attempts: number; nextAttemptAt: number }> = [];
   private ramBudgetMB = detectRamBudgetMB();
   private stripeBuf = new Map<string, { n: number; parts: Map<number, string>; meta: OmniPacket }>();
+  private delivery = new Map<string, DeliveryState>();
+  private acked = new Set<string>();
+  private readonly now: () => number;
+  private readonly transportSenders: Partial<Record<OmniTransport, OmniTransportSender>>;
+  private readonly manualStart: boolean;
+  private readonly seenRetentionMs = 5 * 60_000;
+  private readonly maxAttempts = 4;
+  private lanTransport: OmniLanWebSocketTransport | null = null;
+  private traceHandlers = new Set<(event: OmniTraceEvent) => void>();
 
-  constructor() {
-    this.nodeId =
+  constructor(options: OmniMeshEngineOptions = {}) {
+    this.now = options.now || Date.now;
+    this.transportSenders = options.transportSenders || {};
+    this.manualStart = options.manualStart === true;
+    this.nodeId = options.nodeId ||
       S.get("omni_node_id") ||
       (() => {
         const id = "omni_" + uid();
         S.set("omni_node_id", id);
         return id;
       })();
-    this.nodeName = S.get("user_name") || S.get("mesh_name") || "Node";
+    this.nodeName = options.nodeName || S.get("user_name") || S.get("mesh_name") || "Node";
     for (const t of SOFTWARE_TRANSPORTS) {
       this.health.set(t, {
         id: t,
-        available: t === "ram-relay", // RAM always on
+        available: t === "ram-relay" || !!this.transportSenders[t],
         score: t === "ram-relay" ? 70 : 40,
         latencyMs: t === "ram-relay" ? 0 : 999,
         successRate: t === "ram-relay" ? 1 : 0.5,
         rangeHintM: RANGE_HINT[t],
         powerCost: t === "ram-relay" ? 1 : 4,
-        lastOk: t === "ram-relay" ? Date.now() : 0,
+        lastOk: t === "ram-relay" ? this.now() : 0,
         lastErr: 0,
         tx: 0,
         rx: 0,
         label: LABELS[t],
-        required: true,
+        required: false,
       });
     }
   }
 
   get id() {
     return this.nodeId;
+  }
+
+  /** Explicit receive entry used by every transport and deterministic adapters. */
+  receive(raw: unknown, via: OmniTransport) {
+    this.ingest(raw, via);
+  }
+
+  getDeliveryState(packetId: string): DeliveryState | undefined {
+    return this.delivery.get(packetId);
+  }
+
+  getQueuedPacketIds(): string[] {
+    return this.storeForward.map((entry) => entry.packet.id);
+  }
+
+  async flushRetries() {
+    await this.flushStoreForward();
+  }
+
+  async retransmitQueued(packetId: string): Promise<boolean> {
+    const entry = this.storeForward.find((candidate) => candidate.packet.id === packetId);
+    if (!entry) return false;
+    const result = await this.dispatchCombo(
+      entry.packet,
+      this.availableTransports().filter((transport) => transport !== "ram-relay")
+    );
+    return result.transportAccepted;
+  }
+
+  /** Transmit an already-created local packet, used by durable/recovery adapters. */
+  transmitExistingPacket(packet: OmniPacket) {
+    if (packet.from !== this.nodeId || !this.validPacket(packet)) {
+      throw new Error("Cannot transmit an invalid or foreign packet");
+    }
+    if (!this.lanTransport) throw new Error("LAN WebSocket transport is not configured");
+    this.trace(packet.type === "OMNI_ACK" ? "ACK_TX" : "TX", packet);
+    this.lanTransport.send(packet);
+  }
+
+  onTrace(handler: (event: OmniTraceEvent) => void) {
+    this.traceHandlers.add(handler);
+    return () => this.traceHandlers.delete(handler);
+  }
+
+  async connectLan(url = resolveMeshWsUrl(), createWebSocket?: WebSocketFactory, reconnect = true) {
+    this.lanTransport?.close();
+    this.lanTransport = new OmniLanWebSocketTransport({
+      url,
+      nodeId: this.nodeId,
+      nodeName: this.nodeName,
+      createWebSocket,
+      reconnect,
+      onPacket: (packet) => this.ingest(packet, "wifi-lan-ws"),
+      onState: (state) => this.markAvailable("wifi-lan-ws", state === "open", 0),
+    });
+    await this.lanTransport.connect();
   }
 
   /** Boot software mesh — same on every platform, no hardware required */
@@ -261,7 +377,7 @@ class OmniMeshEngine {
       S.set("user_name", name);
     }
 
-    // Always-on RAM relay
+    // Always-on RAM queue
     this.markAvailable("ram-relay", true, 0);
 
     // Multi-instance bus
@@ -276,6 +392,11 @@ class OmniMeshEngine {
     // Kernel mesh bridge
     try {
       MeshEngine.onMessage((msg: any) => {
+        const embedded = msg?.data?._omni;
+        if (embedded && typeof embedded === "object") {
+          this.ingest({ ...embedded, via: ["wifi-lan-ws"] }, "wifi-lan-ws");
+          return;
+        }
         this.ingest(
           {
             id: msg.id || fnv(JSON.stringify(msg).slice(0, 80) + msg.from),
@@ -283,13 +404,15 @@ class OmniMeshEngine {
             payload: msg.data ?? msg,
             from: msg.from,
             fromName: msg.fromName,
-            to: msg.data?.to,
-            ts: msg.time || Date.now(),
-            hops: msg.hops || 0,
-            ttl: msg.ttl || 14,
-            path: msg.path || [msg.from],
+            to: msg.to ?? msg.data?.to,
+            ts: msg.time ?? Date.now(),
+            hops: msg.hops ?? msg.data?._omni?.hops ?? 0,
+            ttl: msg.ttl ?? msg.data?._omni?.ttl ?? 14,
+            path: msg.path ?? msg.data?._omni?.path ?? [msg.from],
             via: ["broadcast-tab"],
             priority: this.classifyPriority(msg.type),
+            expiresAt: msg.expiresAt ?? msg.data?._omni?.expiresAt ?? ((msg.time ?? this.now()) + 60000),
+            ackFor: msg.ackFor ?? msg.data?._omni?.ackFor,
           } as OmniPacket,
           "broadcast-tab"
         );
@@ -300,8 +423,9 @@ class OmniMeshEngine {
     try {
       meshComms.init(this.nodeId, this.nodeName);
       void this.attachGunGraph();
-      this.markAvailable("webrtc-p2p", typeof RTCPeerConnection !== "undefined", 35);
-      this.markAvailable("trystero-sw", true, 50);
+      // API presence is not an established peer data channel.
+      this.markAvailable("webrtc-p2p", false, 35);
+      this.markAvailable("trystero-sw", false, 50);
     } catch {
       this.markAvailable("gun-graph", false);
       this.markAvailable("webrtc-p2p", typeof RTCPeerConnection !== "undefined");
@@ -309,8 +433,9 @@ class OmniMeshEngine {
     }
 
     this.probeLanWs();
+    void this.connectLan().catch(() => this.markAvailable("wifi-lan-ws", false));
 
-    // Presence: advertise this node as a full relay with RAM budget
+    // Advertise observed adapter state; relay is true only with a cross-device edge.
     this.announcePresence();
 
     this.probeTimer = setInterval(() => this.heartbeat(), 4000);
@@ -344,6 +469,8 @@ class OmniMeshEngine {
     try {
       this.bc?.close();
     } catch {}
+    this.lanTransport?.close();
+    this.lanTransport = null;
   }
 
   onPacket(fn: Handler) {
@@ -384,13 +511,13 @@ class OmniMeshEngine {
       estimatedRangeLabel: this.rangeLabel(est),
       aiMode: this.aiModeLabel(),
       uptime: Math.floor((Date.now() - this.startTs) / 1000),
-      platformEqual: true,
+      platformEqual: false,
     };
   }
 
   /**
    * Send using only software transports + AI permutations.
-   * Every node also holds a copy in RAM relay for store-and-forward.
+   * Total transport failure is retained in the bounded RAM retry queue.
    */
   async send(
     type: string,
@@ -400,10 +527,15 @@ class OmniMeshEngine {
       priority?: OmniPacket["priority"];
       ttl?: number;
       forceTransports?: OmniTransport[];
+      expiresInMs?: number;
+      ackFor?: string;
+      nextHop?: string;
     }
   ) {
-    if (!this.started) this.start();
+    if (!this.started && !this.manualStart) this.start();
     const priority = opts?.priority || this.classifyPriority(type);
+    const ttl = opts?.ttl ?? (priority === "sos" ? 18 : priority === "call" ? 10 : 14);
+    if (!Number.isSafeInteger(ttl) || ttl < 0) throw new RangeError("ttl must be a non-negative integer");
     const available = (
       opts?.forceTransports?.length
         ? opts.forceTransports
@@ -422,17 +554,19 @@ class OmniMeshEngine {
       from: this.nodeId,
       fromName: this.nodeName,
       to: opts?.to,
+      nextHop: opts?.nextHop,
       ts: Date.now(),
       hops: 0,
-      ttl: opts?.ttl ?? (priority === "sos" ? 18 : priority === "call" ? 10 : 14),
+      ttl,
       path: [this.nodeId],
       via: ranked[0] || plan,
       priority,
-      holdUntil: Date.now() + (priority === "sos" ? 120000 : 60000),
+      holdUntil: this.now(),
+      expiresAt: this.now() + (opts?.expiresInMs ?? (priority === "sos" ? 120000 : 60000)),
+      ackFor: opts?.ackFor,
     };
-
-    // Enqueue in RAM first — every device is a relay buffer
-    this.enqueueStoreForward(pkt);
+    this.seen.set(pkt.id, this.now());
+    this.rememberDelivery(pkt.id, "queued");
 
     const combos =
       priority === "sos" || priority === "call"
@@ -441,22 +575,29 @@ class OmniMeshEngine {
           ? ranked.slice(0, 4)
           : ranked.slice(0, 3);
 
-    const raw = JSON.stringify(payload);
-    if (raw.length > 900 && (combos[0]?.length || 0) > 1) {
-      await this.sendStriped(pkt, combos[0].filter((t) => t !== "ram-relay"));
-    } else {
-      for (const combo of combos) {
-        const wire = combo.filter((t) => t !== "ram-relay");
-        if (!wire.length) continue;
-        await this.dispatchCombo(
-          { ...pkt, via: wire, id: pkt.id + "_" + wire.join(".") },
-          wire
-        );
-      }
+    const attempted = new Set<OmniTransport>();
+    const succeeded = new Set<OmniTransport>();
+    if (ttl > 0) for (const combo of combos) {
+      const wire = combo.filter((t) => t !== "ram-relay" && !attempted.has(t));
+      wire.forEach((t) => attempted.add(t));
+      if (!wire.length) continue;
+      const result = await this.dispatchCombo({ ...pkt, via: wire }, wire);
+      result.succeeded.forEach((t) => succeeded.add(t));
+    }
+
+    if (succeeded.size && this.delivery.get(pkt.id) === "queued") {
+      this.rememberDelivery(pkt.id, "transport-sent");
+    }
+    if (ttl > 0 && pkt.to && pkt.type !== "OMNI_ACK" && !this.acked.has(pkt.id)) {
+      this.enqueueStoreForward(pkt);
+    } else if (!succeeded.size && ttl > 0) {
+      this.enqueueStoreForward(pkt);
+    } else if (!succeeded.size) {
+      this.rememberDelivery(pkt.id, "failed");
     }
 
     this.stats.packetsOut++;
-    this.notify(pkt);
+    if (!pkt.to) this.notify(pkt);
     return pkt;
   }
 
@@ -476,7 +617,7 @@ class OmniMeshEngine {
     );
   }
 
-  /** Explicit relay flood — rebroadcast held + live packets to expand reach */
+  /** Explicit bounded replay of held packets over verified transports. */
   private async attachGunGraph() {
     try {
       const store = await getGunStore();
@@ -497,26 +638,29 @@ class OmniMeshEngine {
             fromName: data.fromName,
             to: data.to || undefined,
             ts: data.ts || Date.now(),
-            hops: data.hops || 1,
-            ttl: 14,
+            hops: data.hops ?? 0,
+            ttl: data.ttl ?? 14,
             path: data.path ? String(data.path).split(",") : [data.from],
             via: ["gun-graph"],
             priority: this.classifyPriority(data.type || ""),
+            expiresAt: data.expiresAt ?? ((data.ts ?? this.now()) + 60000),
+            ackFor: data.ackFor || undefined,
           } as OmniPacket,
           "gun-graph"
         );
       });
       this.gunUnsub = typeof unsub === "function" ? unsub : null;
-      this.markAvailable("gun-graph", true, 10);
+      // Local Gun initialization is not evidence of a reachable remote peer.
+      this.markAvailable("gun-graph", false, 10);
     } catch {
-      this.markAvailable("gun-graph", true, 20);
+      this.markAvailable("gun-graph", false, 20);
     }
   }
 
   async amplifyRelay() {
     const held = this.storeForward.slice(-20);
-    for (const p of held) {
-      await this.relayPacket(p, true);
+    for (const entry of held) {
+      await this.relayPacket(entry.packet);
     }
     await this.send(
       "OMNI_RELAY_PULSE",
@@ -558,7 +702,7 @@ class OmniMeshEngine {
     const powN = 1 - h.powerCost / 10;
     let s = rangeN * 30 + latN * 28 + h.successRate * 32 + powN * 10;
     if (!h.available) s *= 0.05;
-    // RAM relay always valuable for multi-hop time dimension
+    // RAM queue is useful for retry scheduling but is not a network edge.
     if (h.id === "ram-relay" && h.available) s = Math.max(s, 65);
     if (h.id === "wifi-lan-ws" && h.available) s += 12;
     if (h.id === "webrtc-p2p" && h.available) s += 10;
@@ -583,8 +727,8 @@ class OmniMeshEngine {
       score += p.length * 8; // diversity
       const bestRange = Math.max(...p.map((t) => this.health.get(t)?.rangeHintM || RANGE_HINT[t] || 0));
       score += Math.log10(bestRange + 10) * 10;
-      // Density: more peers ⇒ multi-hop software range explodes
-      score += Math.log2(online + 1) * 9;
+      // Observed peers modestly prefer adapters with demonstrated activity.
+      score += Math.log2(online + 1) * 2;
       if (priority === "call" && (p.includes("webrtc-p2p") || p.includes("wifi-lan-ws"))) score += 18;
       if (priority === "sms" && (p.includes("gun-graph") || p.includes("wifi-lan-ws"))) score += 12;
       if (priority === "sos") score += p.length * 5;
@@ -605,7 +749,8 @@ class OmniMeshEngine {
   }
 
   private enqueueStoreForward(pkt: OmniPacket) {
-    this.storeForward.push(pkt);
+    if (this.storeForward.some((entry) => entry.packet.id === pkt.id)) return;
+    this.storeForward.push({ packet: { ...pkt }, attempts: 0, nextAttemptAt: this.now() + 1000 });
     // Evict oldest until under RAM budget
     while (
       this.storeForward.length > 20 &&
@@ -622,41 +767,63 @@ class OmniMeshEngine {
 
   private async flushStoreForward() {
     if (!this.storeForward.length) return;
-    const now = Date.now();
-    const live = this.storeForward.filter((p) => !p.holdUntil || p.holdUntil > now);
-    this.storeForward = live;
-    // Retransmit a few high-priority held packets
-    const batch = live
-      .filter((p) => p.priority === "sos" || p.priority === "sms" || p.priority === "call")
-      .slice(-8);
-    for (const p of batch) {
-      if ((p.hops || 0) >= (p.ttl || 14)) continue;
-      await this.relayPacket(p, false);
+    const now = this.now();
+    this.cleanupSeen(now);
+    this.storeForward = this.storeForward.filter((entry) => {
+      const expired = entry.packet.expiresAt <= now;
+      const exhausted = entry.attempts >= this.maxAttempts;
+      if (expired || exhausted) this.rememberDelivery(entry.packet.id, "failed");
+      return !expired && !exhausted && !this.acked.has(entry.packet.id);
+    });
+    const batch = this.storeForward.filter((entry) => entry.nextAttemptAt <= now).slice(0, 8);
+    for (const entry of batch) {
+      entry.attempts++;
+      entry.nextAttemptAt = now + Math.min(30000, 1000 * 2 ** (entry.attempts - 1));
+      const result = await this.dispatchCombo(
+        entry.packet,
+        this.availableTransports().filter((t) => t !== "ram-relay")
+      );
+      if (result.transportAccepted && this.delivery.get(entry.packet.id) !== "acked") {
+        this.rememberDelivery(entry.packet.id, "transport-sent");
+      }
+      if (result.transportAccepted && entry.packet.type === "OMNI_ACK") {
+        this.storeForward = this.storeForward.filter((candidate) => candidate !== entry);
+      }
     }
   }
 
-  private async relayPacket(pkt: OmniPacket, force: boolean) {
-    if (pkt.from === this.nodeId && !force) return;
-    if ((pkt.path || []).includes(this.nodeId) && !force) return;
-    if ((pkt.hops || 0) >= (pkt.ttl || 14)) return;
+  private async relayPacket(pkt: OmniPacket): Promise<DispatchResult | null> {
+    if (pkt.from === this.nodeId) return null;
+    if (pkt.path.includes(this.nodeId)) return null;
+    if (pkt.expiresAt <= this.now() || pkt.hops >= pkt.ttl) return null;
 
     const relay: OmniPacket = {
       ...pkt,
-      hops: (pkt.hops || 0) + 1,
-      path: [...(pkt.path || []), this.nodeId],
+      nextHop: undefined,
+      hops: pkt.hops + 1,
+      path: [...pkt.path, this.nodeId],
       priority: pkt.priority === "presence" ? "relay" : pkt.priority,
     };
+    this.trace("RELAY", relay);
     this.stats.packetsRelayed++;
     // Track actual bytes relayed so bandwidth_sell earnings are measurement-based
     try {
-      const payloadBytes = JSON.stringify(relay.payload || {}).length;
+      const payloadBytes = JSON.stringify(relay.payload ?? null).length;
       bus.emit("omnimesh:bytes_relayed", { bytes: payloadBytes, packetId: relay.id });
     } catch {}
     const wire = this.availableTransports().filter((t) => t !== "ram-relay").slice(0, 3);
-    if (wire.length) await this.dispatchCombo(relay, wire);
+    if (!wire.length) {
+      this.enqueueStoreForward(relay);
+      return null;
+    }
+    const result = await this.dispatchCombo(relay, wire);
+    if (!result.transportAccepted) this.enqueueStoreForward(relay);
+    return result;
   }
 
-  private async dispatchCombo(pkt: OmniPacket, combo: OmniTransport[]) {
+  private async dispatchCombo(pkt: OmniPacket, combo: OmniTransport[]): Promise<DispatchResult> {
+    const succeeded: OmniTransport[] = [];
+    const failed: OmniTransport[] = [];
     await Promise.all(
       combo.map(async (t) => {
         const t0 = performance.now();
@@ -669,23 +836,35 @@ class OmniMeshEngine {
           h.successRate = Math.min(1, h.successRate * 0.92 + 0.08);
           h.lastOk = Date.now();
           h.score = this.scoreTransport(h);
+          succeeded.push(t);
         } catch {
           const h = this.health.get(t)!;
           h.lastErr = Date.now();
           h.successRate = Math.max(0, h.successRate * 0.8);
           h.score = this.scoreTransport(h);
+          failed.push(t);
         }
       })
     );
-    if (pkt.to) {
+    const routeEvidence = succeeded.filter((t) => t !== "broadcast-tab" && t !== "ram-relay");
+    if (pkt.to && routeEvidence.length) {
       this.routeMemory.set(pkt.to, {
-        via: combo,
-        score: combo.reduce((s, t) => s + (this.health.get(t)?.score || 0), 0),
+        via: routeEvidence,
+        score: routeEvidence.reduce((s, t) => s + (this.health.get(t)?.score || 0), 0),
         ts: Date.now(),
         hops: pkt.hops,
       });
       this.stats.pathsLearned = this.routeMemory.size;
     }
+    return {
+      packetId: pkt.id,
+      attempted: [...combo],
+      succeeded,
+      failed,
+      transportAccepted: succeeded.length > 0,
+      destinationDelivered: this.delivery.get(pkt.id) === "destination-delivered",
+      endToEndAck: this.acked.has(pkt.id),
+    };
   }
 
   private async sendStriped(pkt: OmniPacket, combo: OmniTransport[]) {
@@ -714,7 +893,13 @@ class OmniMeshEngine {
   }
 
   private async sendOn(t: OmniTransport, pkt: OmniPacket) {
+    const injected = this.transportSenders[t];
+    if (injected) {
+      await injected(structuredClone(pkt));
+      return;
+    }
     const wire = { ...pkt, omni: true, transport: t, softwareOnly: true };
+    this.trace(pkt.type === "OMNI_ACK" ? "ACK_TX" : "TX", pkt);
 
     switch (t) {
       case "ram-relay":
@@ -722,86 +907,42 @@ class OmniMeshEngine {
         break;
 
       case "broadcast-tab":
-        try {
-          this.bc?.postMessage(wire);
-        } catch {}
-        try {
-          MeshEngine.broadcast(pkt.type, { ...pkt.payload, _omni: pkt });
-        } catch {}
+        if (!this.bc) throw new Error("BroadcastChannel is unavailable");
+        this.bc.postMessage(wire);
         break;
 
       case "wifi-lan-ws":
-        await fetch("/api/mesh/publish", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            id: pkt.id,
-            type: pkt.type,
-            from: pkt.from,
-            fromName: pkt.fromName,
-            data: {
-              ...pkt.payload,
-              _omni: true,
-              via: pkt.via,
-              hops: pkt.hops,
-              path: pkt.path,
-              softwareOnly: true,
-            },
-            ts: pkt.ts,
-            hops: pkt.hops,
-            ttl: pkt.ttl,
-            to: pkt.to,
-          }),
-        });
-        try {
-          await fetch("/api/mesh/register", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              id: this.nodeId,
-              name: this.nodeName,
-              ramMB: this.ramBudgetMB,
-              relay: true,
-            }),
-          });
-        } catch {}
+        if (!this.lanTransport) throw new Error("LAN WebSocket transport is not configured");
+        this.lanTransport.send(pkt);
         break;
 
       case "gun-graph":
-        try {
+        {
           const store = await getGunStore();
-          store?.ensure?.();
-          store?.put(`gridalive.omni.sw.${pkt.id}`, {
+          if (!store) throw new Error("Gun store unavailable");
+          store.ensure?.();
+          const payload = JSON.stringify(pkt.payload);
+          if (payload.length > 6000) throw new Error("Gun packet exceeds 6000 byte adapter limit");
+          store.put(`gridalive.omni.sw.${pkt.id}`, {
             type: pkt.type,
-            payload: JSON.stringify(pkt.payload).slice(0, 6000),
+            payload,
             from: pkt.from,
             fromName: pkt.fromName || "",
             to: pkt.to || "",
             ts: pkt.ts,
             hops: pkt.hops,
-            path: (pkt.path || []).join(",").slice(0, 200),
+            path: pkt.path.join(","),
+            ttl: pkt.ttl,
+            expiresAt: pkt.expiresAt,
+            ackFor: pkt.ackFor || "",
+            priority: pkt.priority,
           });
-        } catch {
-          try {
-            (meshComms as any).gun
-              ?.get("gridalive.omni.sw")
-              .get(pkt.id)
-              .put({
-                type: pkt.type,
-                payload: JSON.stringify(pkt.payload).slice(0, 6000),
-                from: pkt.from,
-                fromName: pkt.fromName || "",
-                to: pkt.to || "",
-                ts: pkt.ts,
-                hops: pkt.hops,
-              });
-          } catch {}
         }
         break;
 
       case "webrtc-p2p":
       case "trystero-sw":
-        try {
+        {
           const ch = t === "trystero-sw" ? "omni_sw_global" : "omni_sw_mesh";
           meshComms.joinWalkieChannel?.(ch, (msg: any) => {
             if (!msg?.message?.startsWith?.("{")) return;
@@ -812,34 +953,35 @@ class OmniMeshEngine {
                   id: j.id || msg.id,
                   type: j.t || "SW_P2P",
                   payload: j.p,
-                  from: msg.peerId,
-                  fromName: msg.user,
+                  from: j.from || msg.peerId,
+                  fromName: j.fromName || msg.user,
                   to: j.to,
                   ts: msg.timestamp || Date.now(),
-                  hops: (j.hops || 0) + 1,
-                  ttl: j.ttl || 12,
-                  path: j.path || [msg.peerId],
+                  hops: j.hops ?? 0,
+                  ttl: j.ttl ?? 12,
+                  path: j.path ?? [msg.peerId],
                   via: [t],
-                  priority: "data",
+                  priority: j.priority || this.classifyPriority(j.t || ""),
+                  expiresAt: j.expiresAt ?? ((msg.timestamp ?? this.now()) + 60000),
+                  ackFor: j.ackFor,
                 } as OmniPacket,
                 t
               );
             } catch {}
           });
-          meshComms.sendWalkieTextMessage?.(
+          if (!meshComms.sendWalkieTextMessage) throw new Error("P2P sender unavailable");
+          const serialized = JSON.stringify({
+            t: pkt.type, p: pkt.payload, id: pkt.id, from: pkt.from, fromName: pkt.fromName,
+            to: pkt.to, hops: pkt.hops, ttl: pkt.ttl, path: pkt.path,
+            expiresAt: pkt.expiresAt, ackFor: pkt.ackFor, priority: pkt.priority,
+          });
+          if (serialized.length > 3500) throw new Error("P2P packet exceeds 3500 byte adapter limit");
+          await Promise.resolve(meshComms.sendWalkieTextMessage(
             ch,
-            JSON.stringify({
-              t: pkt.type,
-              p: pkt.payload,
-              id: pkt.id,
-              to: pkt.to,
-              hops: pkt.hops,
-              ttl: pkt.ttl,
-              path: pkt.path,
-            }).slice(0, 3500),
+            serialized,
             this.nodeName
-          );
-        } catch {}
+          ));
+        }
         break;
     }
   }
@@ -858,21 +1000,21 @@ class OmniMeshEngine {
         from: raw.from,
         fromName: raw.fromName,
         to: raw.to || body?.to || body?._omni?.to,
-        ts: raw.ts || raw.time || Date.now(),
-        hops: raw.hops || body?._omni?.hops || 0,
-        ttl: raw.ttl || body?._omni?.ttl || 14,
-        path: raw.path || body?._omni?.path || [raw.from],
-        via: raw.via || body?._omni?.via || [via],
+        ts: raw.ts ?? raw.time ?? this.now(),
+        hops: raw.hops ?? body?._omni?.hops ?? 0,
+        ttl: raw.ttl ?? body?._omni?.ttl ?? 14,
+        path: raw.path ?? body?.path ?? body?._omni?.path ?? [raw.from],
+        via: raw.via ?? body?.via ?? body?._omni?.via ?? [via],
         priority: this.classifyPriority(raw.type),
+        expiresAt: raw.expiresAt ?? body?._omni?.expiresAt ?? ((raw.ts ?? raw.time ?? this.now()) + 60000),
+        ackFor: raw.ackFor ?? body?._omni?.ackFor,
       };
     } else return;
 
+    if (!this.validPacket(pkt)) return;
     if (pkt.from === this.nodeId) return;
-    if (this.seen.has(pkt.id)) return;
-    this.seen.set(pkt.id, Date.now());
-    if (this.seen.size > 3000) {
-      this.seen = new Map([...this.seen.entries()].slice(-1500));
-    }
+    if (pkt.expiresAt <= this.now()) return;
+    this.cleanupSeen(this.now());
 
     const h = this.health.get(via);
     if (h) {
@@ -896,14 +1038,18 @@ class OmniMeshEngine {
         for (let i = 0; i < buf.n; i++) full += buf.parts.get(i) || "";
         this.stripeBuf.delete(key);
         try {
-          pkt = { ...pkt, payload: JSON.parse(full) };
+          pkt = { ...pkt, id: key, payload: JSON.parse(full), shardIndex: undefined, shardTotal: undefined };
         } catch {
-          pkt = { ...pkt, payload: full };
+          return;
         }
       } else return;
     }
 
-    // Peer table — every peer is a potential relay with RAM
+    if (this.seen.has(pkt.id)) return;
+    this.seen.set(pkt.id, this.now());
+    this.trace("RX", pkt);
+
+    // Peer table records observations; it does not by itself prove relay capability.
     if (pkt.from) {
       const prev = this.peers.get(pkt.from);
       const transports = new Set(prev?.transports || []);
@@ -913,7 +1059,7 @@ class OmniMeshEngine {
         name: pkt.fromName || prev?.name || pkt.from.slice(0, 12),
         transports: [...transports],
         lastSeen: Date.now(),
-        hops: pkt.hops || 1,
+        hops: pkt.hops,
         score: prev?.score || 55,
         ramMB: pkt.payload?.ramMB ?? prev?.ramMB,
         relayLoad: pkt.payload?.queue ?? prev?.relayLoad,
@@ -927,7 +1073,7 @@ class OmniMeshEngine {
         name: pkt.payload.name || pkt.payload.id,
         transports: pkt.payload.transports || SOFTWARE_TRANSPORTS,
         lastSeen: Date.now(),
-        hops: pkt.hops || 1,
+        hops: pkt.hops,
         score: 60,
         ramMB: pkt.payload.ramMB,
         relayLoad: pkt.payload.queue,
@@ -935,27 +1081,83 @@ class OmniMeshEngine {
       });
     }
 
-    // Hold for store-forward relay
-    this.enqueueStoreForward({
-      ...pkt,
-      holdUntil: Date.now() + 45000,
-    });
-
     this.stats.packetsIn++;
-    this.notify(pkt);
+    const directedToUs = pkt.to === this.nodeId;
+    const broadcast = pkt.to === undefined;
 
-    // Multi-hop: if not for us, or flood types — RELAY using our RAM + net out
-    const forUs = !pkt.to || pkt.to === this.nodeId;
-    const shouldRelay =
-      (!forUs && (pkt.hops || 0) < (pkt.ttl || 14)) ||
-      (forUs === false) ||
-      (!pkt.to &&
-        (pkt.hops || 0) < Math.min(6, pkt.ttl || 14) &&
-        ["OMNI_PRESENCE", "OMNI_SMS", "OMNI_RELAY_PULSE", "SOS", "OMNI_PROBE"].includes(pkt.type));
-
-    if (shouldRelay && !(pkt.path || []).includes(this.nodeId)) {
-      void this.relayPacket(pkt, false);
+    if (directedToUs || broadcast) {
+      this.rememberDelivery(pkt.id, "destination-delivered");
+      if (pkt.type === "OMNI_ACK" && pkt.ackFor) {
+        this.acked.add(pkt.ackFor);
+        this.rememberDelivery(pkt.ackFor, "acked");
+        this.storeForward = this.storeForward.filter((entry) => entry.packet.id !== pkt.ackFor);
+        this.trace("ACK_RX", pkt);
+      }
+      this.trace("DELIVER", pkt);
+      this.notify(pkt);
+      if (directedToUs && pkt.type !== "OMNI_ACK") void this.sendAck(pkt);
     }
+
+    if (!directedToUs && pkt.hops < pkt.ttl && !pkt.path.includes(this.nodeId)) {
+      void this.relayPacket(pkt);
+    }
+  }
+
+  private validPacket(pkt: OmniPacket): boolean {
+    return !!pkt && typeof pkt.id === "string" && pkt.id.length > 0 && pkt.id.length <= 256 &&
+      typeof pkt.type === "string" && typeof pkt.from === "string" && pkt.from.length > 0 &&
+      (pkt.to === undefined || typeof pkt.to === "string") &&
+      (pkt.nextHop === undefined || typeof pkt.nextHop === "string") && Number.isFinite(pkt.ts) &&
+      Number.isSafeInteger(pkt.hops) && pkt.hops >= 0 && Number.isSafeInteger(pkt.ttl) && pkt.ttl >= 0 &&
+      Number.isFinite(pkt.expiresAt) && Array.isArray(pkt.path) && pkt.path.length <= 128 &&
+      pkt.path.every((node) => typeof node === "string" && node.length > 0) &&
+      Array.isArray(pkt.via);
+  }
+
+  private cleanupSeen(now: number) {
+    for (const [id, seenAt] of this.seen) {
+      if (now - seenAt > this.seenRetentionMs) this.seen.delete(id);
+    }
+    while (this.seen.size > 3000) this.seen.delete(this.seen.keys().next().value!);
+    for (const [key, buffer] of this.stripeBuf) {
+      if (buffer.meta.expiresAt <= now) this.stripeBuf.delete(key);
+    }
+    while (this.delivery.size > 3000) this.delivery.delete(this.delivery.keys().next().value!);
+    while (this.acked.size > 3000) this.acked.delete(this.acked.values().next().value!);
+  }
+
+  private rememberDelivery(packetId: string, state: DeliveryState) {
+    this.delivery.delete(packetId);
+    this.delivery.set(packetId, state);
+    while (this.delivery.size > 3000) this.delivery.delete(this.delivery.keys().next().value!);
+  }
+
+  private async sendAck(delivered: OmniPacket) {
+    await this.send("OMNI_ACK", { packetId: delivered.id }, {
+      to: delivered.from,
+      priority: "relay",
+      ttl: Math.max(1, delivered.ttl),
+      expiresInMs: Math.max(1, delivered.expiresAt - this.now()),
+      ackFor: delivered.id,
+      nextHop: delivered.path.at(-1),
+    });
+  }
+
+  private trace(event: OmniTraceEvent["event"], packet: OmniPacket) {
+    const entry: OmniTraceEvent = {
+      event,
+      nodeId: this.nodeId,
+      packetId: packet.ackFor || packet.id,
+      type: packet.type,
+      from: packet.from,
+      to: packet.to,
+      nextHop: packet.nextHop,
+      hops: packet.hops,
+      ttl: packet.ttl,
+      path: [...packet.path],
+      at: this.now(),
+    };
+    for (const handler of this.traceHandlers) handler(entry);
   }
 
   private notify(pkt: OmniPacket) {
@@ -988,17 +1190,22 @@ class OmniMeshEngine {
         ramMB: this.ramBudgetMB,
         queue: this.storeForward.length,
         softwareOnly: true,
-        relay: true,
-        platformEqual: true,
+        relay: this.availableTransports().some((t) => t !== "ram-relay" && t !== "broadcast-tab"),
+        platformEqual: false,
       },
       { priority: "presence", ttl: 10 }
     );
   }
 
   private async probeLanWs() {
+    if (this.lanTransport?.connected) {
+      this.markAvailable("wifi-lan-ws", true, 0);
+      return;
+    }
     const t0 = performance.now();
     try {
-      const r = await fetch("/api/health", { cache: "no-store" });
+      const hub = String((MeshEngine as any).getHubUrl?.() || "").replace(/\/$/, "");
+      const r = await fetch(`${hub}/api/health`, { cache: "no-store" });
       if (r.ok) {
         this.markAvailable("wifi-lan-ws", true, performance.now() - t0);
         return;
@@ -1021,35 +1228,14 @@ class OmniMeshEngine {
     }
   }
 
-  /**
-   * AI learn — pure software topology:
-   * range ∝ hop depth × peer density × transport diversity (no RF hardware).
-   */
+  /** Refresh evidence scores without inventing physical range. */
   private aiLearnCycle() {
     const online = this.getPeers().filter((p) => p.online);
-    const density = online.length;
-    // Average peer RAM → collective buffer power
-    const avgRam =
-      online.reduce((s, p) => s + (p.ramMB || this.ramBudgetMB), 0) /
-        Math.max(1, online.length) || this.ramBudgetMB;
-    const densityBoost = Math.min(12, Math.log2(density + 1) * 3);
 
     for (const h of this.health.values()) {
       const baseScore = this.scoreTransport(h);
-      let adjustedScore = baseScore;
-      if (h.available) {
-        if (h.id === "wifi-lan-ws" || h.id === "webrtc-p2p") adjustedScore += densityBoost;
-        if (h.id === "ram-relay") adjustedScore += Math.min(10, avgRam / 64);
-      }
-      h.score = Math.max(0, Math.min(100, Math.round(adjustedScore)));
-      // Software multi-hop expansion
-      if (h.id === "wifi-lan-ws" || h.id === "webrtc-p2p" || h.id === "gun-graph" || h.id === "trystero-sw") {
-        h.rangeHintM = RANGE_HINT[h.id] * (1 + Math.log2(density + 1) * 1.15);
-      }
-      if (h.id === "ram-relay") {
-        // More RAM across mesh ⇒ longer store-forward “virtual range” in time
-        h.rangeHintM = Math.min(500, avgRam * 2);
-      }
+      h.score = baseScore;
+      h.rangeHintM = RANGE_HINT[h.id];
     }
 
     for (const p of this.peers.values()) {
@@ -1067,32 +1253,19 @@ class OmniMeshEngine {
   }
 
   private aiEstimateRangeM(): number {
-    const avail = this.getTransports().filter((t) => t.available && t.id !== "ram-relay");
-    if (!avail.length) return 5; // same-device only
-    let best = Math.max(...avail.map((t) => t.rangeHintM));
-    const online = this.getPeers().filter((p) => p.online).length;
-    // Each peer is a full software repeater (TX/RX/RELAY + RAM)
-    const hopFactor = online > 0 ? 1 + Math.log2(online + 1) * 1.25 : 1;
-    best = Math.max(best, 80 * hopFactor); // Wi‑Fi hop chain model
-    // Collective RAM enables delay-tolerant multi-hop further out
-    best *= 1 + Math.min(0.8, this.ramBudgetMB / 100);
-    return Math.round(best);
+    // No adapter measures physical distance or RF link budget.
+    return 0;
   }
 
-  private rangeLabel(m: number): string {
-    if (m < 30) return `~${m} m est. · same room / device mesh`;
-    if (m < 150) return `~${m} m est. · Wi‑Fi floor (software multi-hop)`;
-    if (m < 800) return `~${m} m est. · building LAN via peer relays`;
-    if (m < 5000) return `~${(m / 1000).toFixed(1)} km est. · dense peer software mesh`;
-    return `~${(m / 1000).toFixed(1)} km est. · multi-hop software mesh (no dongle)`;
+  private rangeLabel(_m: number): string {
+    return "Physical range unmeasured · software reach depends on connected transports";
   }
 
   private aiModeLabel(): string {
     const n = this.getPeers().filter((p) => p.online).length;
-    if (n >= 8) return `Dense software mesh · ${n} relays · RAM ${this.ramBudgetMB}MB`;
-    if (n >= 2) return `Multi-hop software mesh · ${n} peers · equal nodes`;
-    if (n === 1) return `Peer link · store-forward ready · RAM ${this.ramBudgetMB}MB`;
-    return `Solo node · RAM relay armed · waiting for peers`;
+    if (n >= 2) return `Software peers observed: ${n} · relay requires transport evidence`;
+    if (n === 1) return "One software peer observed";
+    return "No remote peer observed";
   }
 
   /** FreeMeshFabric can tag bonded free-spectrum links onto presence */

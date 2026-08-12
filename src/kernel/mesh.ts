@@ -15,6 +15,7 @@ import {
   type PendingOutboundMessage,
 } from "../lib/meshReliability";
 import { createLocalMeshEnvelope, readLocalMeshEnvelope } from "./serverlessMesh";
+import { iceServersForMesh } from "./offlineMode";
 
 let meshBC: BroadcastChannel | null = null;
 let meshBCListenerAttached = false;
@@ -481,10 +482,7 @@ export const MeshEngine: MeshEngineAPI = {
     if (!tryBeginPeerConnection()) return null;
     try {
       const pc = new RTCPeerConnection({
-        iceServers: [
-          { urls: "stun:stun.l.google.com:19302" },
-          { urls: "stun:stun1.l.google.com:19302" },
-        ],
+        iceServers: iceServersForMesh(),
       });
       const originalClose = pc.close.bind(pc);
       pc.close = () => {

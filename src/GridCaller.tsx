@@ -73,6 +73,7 @@ import {
   setForceLocalMesh,
 } from "./kernel/offlineMode";
 import freeRadio from "./kernel/radioMesh";
+import GridRadioPanel from "./ui/GridRadioPanel";
 import softTowerHop from "./kernel/softTowerHopNet";
 import freeMeshFabric from "./kernel/freeMeshFabric";
 import pstnBridge, { looksLikePhoneNumber } from "./kernel/pstnBridge";
@@ -1024,7 +1025,7 @@ export default function GridCaller({
   const [selectedRadioMessageIds, setSelectedRadioMessageIds] = useState<string[]>([]);
   const [radioMessageReadState, setRadioMessageReadState] = useState<Record<string, boolean>>(() => S.get("gridcaller_radio_msg_read_state", {}));
   const [hiddenRadioMessageIds, setHiddenRadioMessageIds] = useState<string[]>(() => S.get("gridcaller_hidden_radio_msg_ids", []));
-  const [radioSideTab, setRadioSideTab] = useState<"radio" | "radar">("radio");
+  const [radioSideTab, setRadioSideTab] = useState<"people" | "radio" | "radar">("people");
   const [pttOn, setPttOn] = useState(false);
   const radarMotionRef = useRef<
     Map<string, { lat: number; lng: number; at: number; speedMps: number; movedMeters: number; bearingDeg: number }>
@@ -1833,7 +1834,9 @@ export default function GridCaller({
         phone: user?.phone || S.get("user_phone", ""),
       });
       // Header number = Grid Number from registry (hardware-locked), falls back to user's phone/handle
-      const gridIdent = gidIdentity.display || gidIdentity.number ? formatGridNumber(gidIdentity.number || "") : "";
+      const gridIdent = gidIdentity.display || gidIdentity.gridNumber
+        ? formatGridNumber(gidIdentity.gridNumber || "")
+        : "";
       const displayNow = gridIdent || resolveMyPublicNumber();
       setMyGridDisplay(displayNow);
       setSettingsDisplayNum(displayNow);
@@ -4219,7 +4222,10 @@ export default function GridCaller({
         chatHistory: history,
         existingDraft: directAiDraft,
         instruction: directAiInstruction || (directAiDraft ? "improve this" : "write a helpful reply"),
-        recipientName: name,
+        recipientName:
+          peers.find((peer) => peer.id === thread)?.name ||
+          sms.find((message) => message.peerId === thread)?.name ||
+          thread,
         signal: ac.signal,
       });
       if (draft) setDirectAiDraft(draft);
@@ -12677,6 +12683,23 @@ export default function GridCaller({
                   >
                     <button
                       type="button"
+                      onClick={() => setRadioSideTab("people")}
+                      style={{
+                        flex: 1,
+                        padding: "9px 10px",
+                        borderRadius: 999,
+                        border: `1px solid ${tokens.sep}`,
+                        background: radioSideTab === "people" ? tokens.blue : tokens.fill,
+                        color: radioSideTab === "people" ? "#fff" : tokens.text,
+                        fontWeight: 700,
+                        fontSize: 12,
+                        cursor: "pointer",
+                      }}
+                    >
+                      People
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => setRadioSideTab("radio")}
                       style={{
                         flex: 1,
@@ -12690,7 +12713,7 @@ export default function GridCaller({
                         cursor: "pointer",
                       }}
                     >
-                      Radio
+                      Legacy channels
                     </button>
                     <button
                       type="button"
@@ -12711,7 +12734,17 @@ export default function GridCaller({
                     </button>
                   </div>
 
-                  {radioSideTab === "radio" ? (
+                  {radioSideTab === "people" ? (
+                    <GridRadioPanel
+                      peers={peers}
+                      localIds={[
+                        MeshEngine.localId,
+                        String(S.get("mesh_id", "") || ""),
+                        String(S.get("ga_mesh_id", "") || ""),
+                        String(S.get("omni_node_id", "") || ""),
+                      ]}
+                    />
+                  ) : radioSideTab === "radio" ? (
                     <>
 
                   <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>

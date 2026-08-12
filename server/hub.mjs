@@ -292,6 +292,7 @@ function meshBusPush(msg) {
 }
 /** forward declare — set after meshWss */
 let meshBroadcast = (_payload, _exceptId = null) => {};
+let meshRoute = (_payload, _exceptId = null) => false;
 
 function lanIPs() {
   const out = [];
@@ -348,72 +349,62 @@ function readJson(req) {
       } catch (e) {
         reject(e);
       }
-
-      async function readBodyBuffer(req) {
-        const chunks = [];
-        for await (const c of req) chunks.push(c);
-        return Buffer.concat(chunks);
-      }
-
-      function mergeProxyHeaders(upstreamHeaders = {}) {
-        const out = {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
-          "Cache-Control": "no-store",
-        };
-        for (const [k, v] of Object.entries(upstreamHeaders)) {
-          if (typeof v !== "string") continue;
-          const key = String(k).toLowerCase();
-          if (key === "transfer-encoding") continue;
-          out[k] = v;
-        }
-        return out;
-      }
-
-      async function proxyLocalApi(req, res, pathname, search, routePrefix, targetBase) {
-        const upstreamPath = pathname.startsWith(routePrefix)
-          ? pathname.slice(routePrefix.length) || "/"
-          : pathname;
-        const targetUrl = `${targetBase}${upstreamPath}${search || ""}`;
-        const method = String(req.method || "GET").toUpperCase();
-        const headers = {};
-        for (const [k, v] of Object.entries(req.headers || {})) {
-          if (k.toLowerCase() === "host" || k.toLowerCase() === "content-length") continue;
-          if (Array.isArray(v)) {
-            headers[k] = v.join(", ");
-          } else if (typeof v === "string") {
-            headers[k] = v;
-          }
-        }
-        const body =
-          method === "GET" || method === "HEAD" || method === "OPTIONS"
-            ? undefined
-            : await readBodyBuffer(req);
-
-        const upstream = await fetch(targetUrl, {
-          method,
-          headers,
-          body,
-          signal: AbortSignal.timeout(300000),
-        });
-        const responseHeaders = mergeProxyHeaders(Object.fromEntries(upstream.headers.entries()));
-        res.writeHead(upstream.status, responseHeaders);
-        if (!upstream.body) {
-          res.end();
-          return;
-        }
-        const stream = Readable.fromWeb(upstream.body);
-        stream.on("error", () => {
-          try {
-            res.end();
-          } catch {}
-        });
-        stream.pipe(res);
-      }
     });
     req.on("error", reject);
   });
+}
+
+async function readBodyBuffer(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+
+function mergeProxyHeaders(upstreamHeaders = {}) {
+  const out = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Cache-Control": "no-store",
+  };
+  for (const [name, value] of Object.entries(upstreamHeaders)) {
+    if (typeof value !== "string" || name.toLowerCase() === "transfer-encoding") continue;
+    out[name] = value;
+  }
+  return out;
+}
+
+async function proxyLocalApi(req, res, pathname, search, routePrefix, targetBase) {
+  const upstreamPath = pathname.startsWith(routePrefix)
+    ? pathname.slice(routePrefix.length) || "/"
+    : pathname;
+  const targetUrl = `${targetBase}${upstreamPath}${search || ""}`;
+  const method = String(req.method || "GET").toUpperCase();
+  const headers = {};
+  for (const [name, value] of Object.entries(req.headers || {})) {
+    if (name.toLowerCase() === "host" || name.toLowerCase() === "content-length") continue;
+    if (Array.isArray(value)) headers[name] = value.join(", ");
+    else if (typeof value === "string") headers[name] = value;
+  }
+  const body = method === "GET" || method === "HEAD" || method === "OPTIONS"
+    ? undefined
+    : await readBodyBuffer(req);
+  const upstream = await fetch(targetUrl, {
+    method,
+    headers,
+    body,
+    signal: AbortSignal.timeout(300_000),
+  });
+  res.writeHead(upstream.status, mergeProxyHeaders(Object.fromEntries(upstream.headers.entries())));
+  if (!upstream.body) {
+    res.end();
+    return;
+  }
+  const stream = Readable.fromWeb(upstream.body);
+  stream.on("error", () => {
+    try { res.end(); } catch {}
+  });
+  stream.pipe(res);
 }
 
 function listShareFiles() {
@@ -946,7 +937,7 @@ const server = http.createServer(async (req, res) => {
         return send(res, 400, JSON.stringify({ error: "invalid message" }), "application/json");
       }
       // Fan-out on WebSocket bus + durable HTTP bus (for APK without WS)
-      meshBroadcast(msg);
+      meshRoute(msg);
       const seq = meshBusPush(msg);
       if (msg.from) {
         upsertPeer({
@@ -1336,10 +1327,27 @@ const server = http.createServer(async (req, res) => {
 });
 
 // ── Legacy room /ws (kept) ─────────────────────────────────────
-const wss = new WebSocketServer({ server, path: "/ws" });
+const wss = new WebSocketServer({ noServer: true });
 
 // ── GridAlive REAL mesh bus: /mesh-ws (same protocol as GridAlive server) ──
-const meshWss = new WebSocketServer({ server, path: "/mesh-ws" });
+const meshWss = new WebSocketServer({ noServer: true });
+
+// A single HTTP server cannot safely use multiple path-bound ws servers: each
+// upgrade listener can reject another server's path with HTTP 400. Route once.
+server.on("upgrade", (request, socket, head) => {
+  let pathname = "";
+  try {
+    pathname = new URL(request.url || "/", "http://localhost").pathname;
+  } catch {}
+  const target = pathname === "/mesh-ws" ? meshWss : pathname === "/ws" ? wss : null;
+  if (!target) {
+    socket.destroy();
+    return;
+  }
+  target.handleUpgrade(request, socket, head, (ws) => {
+    target.emit("connection", ws, request);
+  });
+});
 
 meshBroadcast = function meshBroadcastImpl(payload, exceptId = null) {
   const raw = typeof payload === "string" ? payload : JSON.stringify(payload);
@@ -1351,6 +1359,22 @@ meshBroadcast = function meshBroadcastImpl(payload, exceptId = null) {
       } catch {}
     }
   }
+};
+
+meshRoute = function meshRouteImpl(payload, exceptId = null) {
+  const targetId = payload?.nextHop || payload?.to;
+  if (targetId && meshClients.has(targetId)) {
+    const target = meshClients.get(targetId);
+    if (targetId !== exceptId && target?.ws?.readyState === 1) {
+      try {
+        target.ws.send(typeof payload === "string" ? payload : JSON.stringify(payload));
+        return true;
+      } catch {}
+    }
+  }
+  if (targetId) return false;
+  meshBroadcast(payload, exceptId);
+  return true;
 };
 
 meshWss.on("connection", (ws) => {
@@ -1417,17 +1441,7 @@ meshWss.on("connection", (ws) => {
       }
     }
 
-    if (msg.to && meshClients.has(msg.to)) {
-      const target = meshClients.get(msg.to);
-      if (target?.ws?.readyState === 1) {
-        try {
-          target.ws.send(JSON.stringify(msg));
-        } catch {}
-      }
-      meshBroadcast(msg, peerId);
-    } else {
-      meshBroadcast(msg, peerId);
-    }
+    meshRoute(msg, peerId);
   });
 
   ws.on("close", () => {

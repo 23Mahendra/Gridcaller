@@ -3,6 +3,7 @@
  */
 
 import { endPeerConnection, tryBeginPeerConnection } from "./networkGuard";
+import { iceServersForMesh } from "./offlineMode";
 
 export function ensureRemoteAudioEl(): HTMLAudioElement {
   let el = document.getElementById("meshCommsRemoteAudio") as HTMLAudioElement | null;
@@ -93,27 +94,11 @@ export function createCallPeerConnection(): RTCPeerConnection {
     throw new Error("WebRTC budget exhausted; using offline-safe mode");
   }
   const pc = new RTCPeerConnection({
-    iceServers: [
-      { urls: "stun:stun.l.google.com:19302" },
-      { urls: "stun:stun1.l.google.com:19302" },
-      {
-        urls: "turn:openrelay.metered.ca:80",
-        username: "openrelayproject",
-        credential: "openrelayproject",
-      },
-      {
-        urls: "turn:openrelay.metered.ca:443",
-        username: "openrelayproject",
-        credential: "openrelayproject",
-      },
-      {
-        urls: "turn:openrelay.metered.ca:443?transport=tcp",
-        username: "openrelayproject",
-        credential: "openrelayproject",
-      },
-    ],
+    // Sovereign mode defaults to []: host candidates work on the same LAN or hotspot.
+    // Public STUN/TURN is never silently enabled; offlineMode requires explicit opt-in.
+    iceServers: iceServersForMesh(),
     iceCandidatePoolSize: 8,
-    // all = host (same Wi‑Fi) + srflx + relay
+    // "all" retains host candidates; srflx/relay exist only when explicitly configured.
     iceTransportPolicy: "all",
     bundlePolicy: "max-bundle",
     rtcpMuxPolicy: "require",

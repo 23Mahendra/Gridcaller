@@ -43,6 +43,11 @@ export type CallUiState = {
   error: string;
   video: boolean;
   secs: number;
+  mode: "call" | "radio";
+  localAudioReady: boolean;
+  remoteAudioReady: boolean;
+  localTransmitting: boolean;
+  remoteTransmitting: boolean;
 };
 
 type Listener = (s: CallUiState) => void;
@@ -72,6 +77,11 @@ let state: CallUiState = {
   error: "",
   video: false,
   secs: 0,
+  mode: "call",
+  localAudioReady: false,
+  remoteAudioReady: false,
+  localTransmitting: false,
+  remoteTransmitting: false,
 };
 
 function emit() {
@@ -226,6 +236,10 @@ function onRemoteTrack(ev: RTCTrackEvent) {
     void playRemoteStream(remoteStream);
     void setSpeakerphone(true);
     void playRemoteStream(stream0);
+    if (ev.track.kind === "audio" && ev.track.readyState === "live") {
+      setState({ remoteAudioReady: true });
+      ev.track.onended = () => setState({ remoteAudioReady: false, remoteTransmitting: false });
+    }
   } catch (e) {
     console.warn("[CallSession] ontrack", e);
   }
@@ -251,7 +265,7 @@ function wirePc(peer: RTCPeerConnection, role: "caller" | "callee", gen: number)
       } catch {}
       setState({
         phase: "active",
-        method: "Connected — speak now",
+        method: state.mode === "radio" ? "Radio connected — hold to talk" : "Connected — speak now",
         error: "",
       });
       startSecs();
@@ -310,7 +324,11 @@ function wirePc(peer: RTCPeerConnection, role: "caller" | "callee", gen: number)
     const ice = peer.iceConnectionState;
     if (ice === "connected" || ice === "completed") {
       if (state.phase !== "active" && hasRemoteDesc) {
-        setState({ phase: "active", method: "Connected — speak now", error: "" });
+        setState({
+          phase: "active",
+          method: state.mode === "radio" ? "Radio connected — hold to talk" : "Connected — speak now",
+          error: "",
+        });
         startSecs();
         stopCallSounds();
         void playRemoteStream(remoteStream);
@@ -375,6 +393,14 @@ async function handleSignal(msg: any) {
     return;
   }
 
+  if (t === "GRIDCALLER_RADIO_PTT" && msg.data?.callId === state.callId) {
+    if (state.mode !== "radio" || state.phase !== "active") return;
+    if (msg.from !== state.peerId || !isForMe(String(msg.data.to || ""))) return;
+    const transmitting = msg.data.active === true && state.remoteAudioReady;
+    setState({ remoteTransmitting: transmitting });
+    return;
+  }
+
   if (t === "GRIDCALLER_RING" && msg.data?.to) {
     if (!isForMe(String(msg.data.to))) return;
     if (state.phase === "active" || state.phase === "outgoing") return;
@@ -382,7 +408,8 @@ async function handleSignal(msg: any) {
       msg.from,
       msg.data.fromName || msg.fromName || msg.from,
       msg.data.callId || "",
-      !!msg.data.video
+      !!msg.data.video,
+      msg.data.mode === "radio" ? "radio" : "call"
     );
     return;
   }
@@ -402,7 +429,8 @@ async function handleSignal(msg: any) {
       msg.from,
       msg.data.fromName || msg.fromName || msg.from,
       msg.data.callId || "",
-      !!msg.data.video
+      !!msg.data.video,
+      msg.data.mode === "radio" ? "radio" : "call"
     );
     return;
   }
@@ -422,7 +450,13 @@ async function handleSignal(msg: any) {
   }
 }
 
-function showIncoming(peerId: string, peerName: string, callId: string, video: boolean) {
+function showIncoming(
+  peerId: string,
+  peerName: string,
+  callId: string,
+  video: boolean,
+  mode: "call" | "radio" = "call"
+) {
   registerLifecycleHooks();
   resumeAudioContext();
   const cid = callId || state.callId || `in_${Date.now()}`;
@@ -457,15 +491,25 @@ function showIncoming(peerId: string, peerName: string, callId: string, video: b
     peerId,
     peerName: who,
     callId: cid,
-    method: "Incoming call — tap Accept",
+    method: mode === "radio" ? "Incoming radio — tap Accept / Listen" : "Incoming call — tap Accept",
     error: "",
     video,
     secs: 0,
+    mode,
+    localAudioReady: false,
+    remoteAudioReady: false,
+    localTransmitting: false,
+    remoteTransmitting: false,
   });
 }
 
 /** Place outbound mesh call — stays on Calling UI until answer */
-export async function startOutgoingCall(peerId: string, peerName: string, video = false) {
+async function startOutgoingSession(
+  peerId: string,
+  peerName: string,
+  video: boolean,
+  mode: "call" | "radio"
+) {
   if (!peerId) {
     setState({ error: "No peer id", phase: "idle" });
     return;
@@ -491,6 +535,11 @@ export async function startOutgoingCall(peerId: string, peerName: string, video 
     error: "",
     video: false, // force audio-first for stability
     secs: 0,
+    mode,
+    localAudioReady: false,
+    remoteAudioReady: false,
+    localTransmitting: false,
+    remoteTransmitting: false,
   });
 
   try {
@@ -506,6 +555,8 @@ export async function startOutgoingCall(peerId: string, peerName: string, video 
     // Audio only for first hop — camera optional mid-call (prevents mic+cam deny crash)
     localStream = await getMicStream(false);
     if (gen !== callGen) return;
+    localStream.getAudioTracks().forEach((track) => { track.enabled = mode !== "radio"; });
+    setState({ localAudioReady: localStream.getAudioTracks().some((track) => track.readyState === "live") });
 
     pc = createCallPeerConnection();
     wirePc(pc, "caller", gen);
@@ -534,6 +585,7 @@ export async function startOutgoingCall(peerId: string, peerName: string, video 
       to: peerId,
       fromName: me,
       video: false,
+      mode,
     });
     MeshEngine.broadcast("GRIDCALLER_OFFER", {
       callId,
@@ -543,6 +595,7 @@ export async function startOutgoingCall(peerId: string, peerName: string, video 
       video: false,
       handle: S.get("global_call_handle", "") || "",
       phone: S.get("user_phone", "") || "",
+      mode,
     });
 
     setState({ method: "Ringing… wait for Accept on other phone" });
@@ -573,6 +626,14 @@ export async function startOutgoingCall(peerId: string, peerName: string, video 
   }
 }
 
+export async function startOutgoingCall(peerId: string, peerName: string, video = false) {
+  return startOutgoingSession(peerId, peerName, video, "call");
+}
+
+export async function startOutgoingRadio(peerId: string, peerName: string) {
+  return startOutgoingSession(peerId, peerName, false, "radio");
+}
+
 export async function acceptCall() {
   if (state.phase !== "incoming") return;
   startCallSession();
@@ -586,6 +647,8 @@ export async function acceptCall() {
     ensureRemoteAudioEl();
     localStream = await getMicStream(false);
     if (gen !== callGen) return;
+    localStream.getAudioTracks().forEach((track) => { track.enabled = state.mode !== "radio"; });
+    setState({ localAudioReady: localStream.getAudioTracks().some((track) => track.readyState === "live") });
 
     pc = createCallPeerConnection();
     wirePc(pc, "callee", gen);
@@ -608,6 +671,7 @@ export async function acceptCall() {
       callId: state.callId || msg.data.callId,
       to: state.peerId || msg.from,
       answer: pc.localDescription || answer,
+      mode: state.mode,
     });
     setState({ method: "Answered — connecting audio…" });
   } catch (e: any) {
@@ -666,6 +730,11 @@ export function endCall(reason = "hangup") {
     error: keepErr || (reason === "no-answer" ? "No answer" : ""),
     video: false,
     secs: 0,
+    mode: "call",
+    localAudioReady: false,
+    remoteAudioReady: false,
+    localTransmitting: false,
+    remoteTransmitting: false,
   });
 }
 
@@ -678,12 +747,37 @@ export function onCallUi(fn: Listener) {
   try {
     fn({ ...state });
   } catch {}
-  return () => listeners.delete(fn);
+  return () => {
+    listeners.delete(fn);
+  };
 }
 
 export function toggleMute(muted: boolean) {
   localStream?.getAudioTracks().forEach((t) => {
     t.enabled = !muted;
+  });
+}
+
+export function hasUsableRadioAudioTransport() {
+  return state.mode === "radio" && state.phase === "active" && pc?.connectionState === "connected" &&
+    state.localAudioReady && state.remoteAudioReady;
+}
+
+export function setRadioTransmit(active: boolean) {
+  if (state.mode !== "radio" || state.phase !== "active") {
+    throw new Error("Radio audio session is not connected");
+  }
+  if (!localStream || !state.localAudioReady || pc?.connectionState !== "connected") {
+    throw new Error("Microphone or WebRTC audio transport is not ready");
+  }
+  const tracks = localStream.getAudioTracks().filter((track) => track.readyState === "live");
+  if (!tracks.length) throw new Error("Microphone track is unavailable");
+  tracks.forEach((track) => { track.enabled = active; });
+  setState({ localTransmitting: active });
+  MeshEngine.broadcast("GRIDCALLER_RADIO_PTT", {
+    callId: state.callId,
+    to: state.peerId,
+    active,
   });
 }
 

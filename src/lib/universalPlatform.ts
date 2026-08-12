@@ -144,7 +144,7 @@ export function getUniversalInfo(): UniversalInfo {
       },
       label: `GridAlive Desktop · ${os}`,
       radioHint:
-        "Full stack: Wi‑Fi/LAN mesh + WebRTC + BLE + USB LoRa dongles (Meshtastic). Native session grants radio access.",
+        "Capability-dependent: configured LAN hub and WebRTC where connected. BLE discovery does not provide a mesh packet link.",
     };
   }
 
@@ -164,8 +164,8 @@ export function getUniversalInfo(): UniversalInfo {
         label: `GridAlive Mobile · ${p || os}`,
         radioHint:
           p === "ios"
-            ? "Wi‑Fi/LAN + WebRTC + multi-hop. BLE/LoRa via plugins / companion hardware where OS allows."
-            : "Wi‑Fi/LAN + WebRTC + BLE (Web Bluetooth / plugins) + optional USB-OTG LoRa on supported devices.",
+            ? "Configured LAN/WebRTC may work when connected; no BLE/LoRa mesh packet transport is implemented here."
+            : "Configured LAN/WebRTC may work when connected; BLE support currently covers permissions/discovery, not mesh packets.",
       };
     }
   } catch {}
@@ -181,7 +181,7 @@ export function getUniversalInfo(): UniversalInfo {
       caps,
       label: `GridAlive PWA · ${os}`,
       radioHint:
-        "Installable on any OS. Wi‑Fi/LAN mesh + WebRTC always. BLE/Serial when the host browser engine exposes them.",
+        "Installable shell; networking still requires a reachable LAN hub or established WebRTC path.",
     };
   }
 
@@ -195,7 +195,7 @@ export function getUniversalInfo(): UniversalInfo {
     caps,
     label: `GridAlive Universal · ${os}`,
     radioHint:
-      "Same app core. Wi‑Fi/LAN + WebRTC mesh work now. For system radio (BLE/USB LoRa), open the Desktop or Mobile install — same OmniMesh engine.",
+      "Same app core; actual reach depends on a reachable hub or established peer connection. Browser radio API presence is not a packet link.",
   };
 }
 

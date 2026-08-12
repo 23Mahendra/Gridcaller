@@ -1,19 +1,15 @@
 /**
- * FreeMeshFabric — interconnect every device using FREE / open links only.
+ * FreeMeshFabric — capability facade for configured LAN and manual optical links.
  *
- *  No paid spectrum · no central ISP cloud required for mesh fabric
- *
- *  Links (capability-probed, honest ranges):
+ *  Links:
  *   · wifi-open     — open LAN / Wi‑Fi WebSocket + WebRTC host candidates
- *   · bt-open       — Web Bluetooth (user grant) / native BLE when shell exposes
+ *   · bt-open       — discovery/pairing only; no packet GATT protocol exists here
  *   · ir-optical    — optical bridge (QR / camera flash handoff) — free, air-gap OK
- *   · rf-free       — multi-hop free-band fabric = all open radios bonded;
- *                     range grows with peer density (every phone/PC is a hop)
+ *   · rf-free       — compatibility label only; not a physical transport
  *
  *  Reality check (product honesty):
  *   Browser/PWA cannot open raw 433 MHz / ISM radio without hardware.
- *   We use every FREE software path the OS allows, multi-hop relay so
- *   range is peer-density, not a fake single-hop RF claim.
+ *   No physical range is measured by this module.
  */
 
 import { bus } from "./bus";
@@ -31,7 +27,7 @@ export interface FreeLinkHealth {
   id: FreeLink;
   available: boolean;
   label: string;
-  /** Honest single-edge range hint (meters) before multi-hop */
+  /** Zero until a transport supplies measured physical distance. */
   rangeHintM: number;
   /** After multi-hop density factor */
   effectiveRangeM: number;
@@ -55,8 +51,8 @@ export interface FabricPeer {
 
 export interface FabricStats {
   mode: "free-mesh-fabric";
-  noCentralServer: true;
-  freeSpectrumOnly: true;
+  noCentralServer: boolean;
+  freeSpectrumOnly: boolean;
   links: FreeLinkHealth[];
   bonded: FreeLink[];
   peers: number;
@@ -75,19 +71,19 @@ const LINK_META: Record<
 > = {
   "wifi-open": {
     label: "Open Wi‑Fi / LAN",
-    rangeHintM: 80,
+    rangeHintM: 0,
     powerCost: 4,
     note: "Same Wi‑Fi / LAN mesh node + WebRTC — free local spectrum path",
   },
   "bt-open": {
     label: "Open Bluetooth",
-    rangeHintM: 25,
+    rangeHintM: 0,
     powerCost: 3,
     note: "Web Bluetooth / BLE when device grants session access",
   },
   "ir-optical": {
     label: "QR / Optical handoff",
-    rangeHintM: 3,
+    rangeHintM: 0,
     powerCost: 1,
     note: "Payload encoded as QR; peer scans with camera. Not infrared — manual scan required.",
   },
@@ -95,7 +91,7 @@ const LINK_META: Record<
     label: "Software Mesh Fabric",
     rangeHintM: 0,
     powerCost: 2,
-    note: "Aggregated software paths (Wi-Fi + BLE + QR). No RF radio — range scales with peer density.",
+    note: "Compatibility label only; no RF packet transport is implemented.",
   },
 };
 
@@ -190,7 +186,7 @@ class FreeMeshFabric {
     console.info(
       "[FreeMeshFabric] free links ·",
       this.bonded().join("+") || "probing",
-      "· no central server"
+      "· verified adapter state"
     );
     return this;
   }
@@ -207,9 +203,7 @@ class FreeMeshFabric {
   getStats(): FabricStats {
     const online = this.getPeers().filter((p) => p.online);
     const density = Math.max(1, online.length + 1);
-    // Multi-hop free fabric: each extra peer multiplies practical reach
-    const base = this.bonded().reduce((s, id) => s + (this.health.get(id)?.rangeHintM || 0), 0);
-    const est = Math.round(Math.max(base, 40) * Math.log2(density + 1) * (1 + online.length * 0.35));
+    const est = 0;
     const platforms = Array.from(
       new Set(online.map((p) => p.platform || "device").concat([getUniversalInfo().label]))
     );
@@ -217,17 +211,17 @@ class FreeMeshFabric {
     // Update effective ranges
     for (const h of this.health.values()) {
       if (h.id === "rf-free") {
-        h.effectiveRangeM = est;
-        h.rangeHintM = est;
+        h.effectiveRangeM = 0;
+        h.rangeHintM = 0;
       } else {
-        h.effectiveRangeM = Math.round(h.rangeHintM * Math.log2(density + 1));
+        h.effectiveRangeM = 0;
       }
     }
 
     return {
       mode: "free-mesh-fabric",
-      noCentralServer: true,
-      freeSpectrumOnly: true,
+      noCentralServer: false,
+      freeSpectrumOnly: false,
       links: [...this.health.values()],
       bonded: this.bonded(),
       peers: this.peers.size,
@@ -236,7 +230,7 @@ class FreeMeshFabric {
       estimatedRangeM: est,
       estimatedRangeLabel: this.rangeLabel(est),
       platforms,
-      interconnect: "Wi‑Fi open · Bluetooth · Optical/IR · Free multi-hop RF fabric",
+      interconnect: "Configured LAN hub; manual QR handoff is separate",
       uptime: Math.floor((Date.now() - this.startTs) / 1000),
     };
   }
@@ -266,7 +260,7 @@ class FreeMeshFabric {
         optionalServices: ["battery_service", "generic_access"],
       });
       this.btSupported = true;
-      this.mark("bt-open", true, `BT linked: ${device?.name || "device"}`);
+      this.mark("bt-open", false, `BT paired: ${device?.name || "device"}; packet GATT protocol unavailable`);
       this.bumpTx("bt-open");
       await this.broadcastHello(["bt-open"]);
       bus.emit("fabric:bt", { name: device?.name, id: device?.id });
@@ -274,7 +268,7 @@ class FreeMeshFabric {
     } catch (e: any) {
       // User cancel is OK — keep probing passive support
       if (nav.bluetooth) {
-        this.mark("bt-open", true, "Bluetooth API present · grant session to pair");
+        this.mark("bt-open", false, "Bluetooth API present; no packet GATT protocol implemented");
       } else {
         this.mark("bt-open", false, e?.message || "BT denied");
       }
@@ -355,7 +349,7 @@ class FreeMeshFabric {
     );
   }
 
-  /** Amplify: every node rebroadcasts — range grows with density */
+  /** Request a bounded replay over currently verified OmniMesh transports. */
   async amplify() {
     await this.broadcastHello(this.bonded());
     try {
@@ -381,18 +375,14 @@ class FreeMeshFabric {
         ok = false;
       }
     }
-    // WebRTC = free Wi‑Fi/WAN path when ICE works without TURN cloud
-    const rtc = typeof RTCPeerConnection !== "undefined";
-    if (ok || rtc) {
+    if (ok) {
       this.mark(
         "wifi-open",
         true,
-        ok
-          ? `LAN mesh node · ${Math.round(performance.now() - t0)}ms`
-          : "WebRTC free path (no LAN node yet)"
+        `LAN mesh node · ${Math.round(performance.now() - t0)}ms`
       );
     } else {
-      this.mark("wifi-open", false, "No LAN node / WebRTC yet — still local-capable");
+      this.mark("wifi-open", false, "No reachable configured LAN node");
     }
   }
 
@@ -402,13 +392,9 @@ class FreeMeshFabric {
     const nativeBt = uni.caps.bluetooth;
     if (nav.bluetooth || nativeBt) {
       this.btSupported = true;
-      this.mark(
-        "bt-open",
-        true,
-        nativeBt
-          ? "Bluetooth capability on device — enable session to pair"
-          : "Web Bluetooth API present"
-      );
+      this.mark("bt-open", false, nativeBt
+        ? "Bluetooth capability present; packet GATT protocol unavailable"
+        : "Web Bluetooth API present; packet GATT protocol unavailable");
     } else {
       this.mark("bt-open", false, "No Bluetooth API on this runtime");
     }
@@ -427,19 +413,7 @@ class FreeMeshFabric {
   }
 
   private bondRfFree() {
-    const any =
-      this.health.get("wifi-open")?.available ||
-      this.health.get("bt-open")?.available ||
-      this.health.get("ir-optical")?.available;
-    // Always true when any free link exists OR omni software mesh is up
-    const softwareUp = true;
-    this.mark(
-      "rf-free",
-      !!(any || softwareUp),
-      any
-        ? "Free multi-hop fabric bonded — more peers = more range"
-        : "Software multi-hop fabric (RAM relay + Gun + WebRTC)"
-    );
+    this.mark("rf-free", false, "No RF packet transport is implemented");
     // Sync omni free transports if engine exposes them
     try {
       (omniMesh as any).markFreeLinks?.(this.bonded());
@@ -541,10 +515,8 @@ class FreeMeshFabric {
   }
 
   private rangeLabel(m: number) {
-    if (m < 50) return `~${m}m room / street (grows with peers)`;
-    if (m < 300) return `~${m}m neighborhood multi-hop`;
-    if (m < 2000) return `~${(m / 1000).toFixed(1)}km peer-density mesh`;
-    return `~${(m / 1000).toFixed(1)}km+ free fabric (more nodes ⇒ farther)`;
+    void m;
+    return "Physical range unmeasured";
   }
 }
 
@@ -555,13 +527,7 @@ export default freeMeshFabric;
 export function freeLinksToOmni(links: FreeLink[]): OmniTransport[] {
   const out: OmniTransport[] = ["ram-relay"];
   if (links.includes("wifi-open")) {
-    out.push("wifi-lan-ws", "webrtc-p2p");
-  }
-  if (links.includes("bt-open") || links.includes("rf-free")) {
-    out.push("gun-graph", "trystero-sw", "broadcast-tab");
-  }
-  if (links.includes("ir-optical")) {
-    out.push("broadcast-tab");
+    out.push("wifi-lan-ws");
   }
   return Array.from(new Set(out));
 }

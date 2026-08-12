@@ -870,3 +870,29 @@ canvas {
 }
 
 .wz-install-link:hover { background: #0077ed; }
+/* Grid Radio: live state is driven by the WebRTC radio session controller. */
+.grid-radio-panel { display: grid; gap: 12px; }
+.grid-radio-title { display: flex; align-items: center; gap: 8px; font-size: 18px; font-weight: 800; }
+.grid-radio-tabs, .grid-radio-actions, .grid-radio-controls { display: flex; gap: 8px; }
+.grid-radio-tabs button, .grid-radio-actions button, .grid-radio-controls button, .grid-radio-connect { border: 1px solid rgba(127,127,127,.3); border-radius: 999px; padding: 9px 13px; background: rgba(127,127,127,.12); color: inherit; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.grid-radio-tabs button.active, .grid-radio-connect, .grid-radio-actions button { background: #1473e6; color: white; border-color: transparent; }
+.grid-radio-search { display: flex; align-items: center; gap: 8px; border: 1px solid rgba(127,127,127,.3); border-radius: 12px; padding: 9px 11px; }
+.grid-radio-search input { flex: 1; border: 0; outline: 0; color: inherit; background: transparent; }
+.grid-radio-users { max-height: 290px; overflow: auto; border: 1px solid rgba(127,127,127,.25); border-radius: 14px; }
+.grid-radio-users > button { width: 100%; display: flex; align-items: center; gap: 10px; padding: 11px; border: 0; border-bottom: 1px solid rgba(127,127,127,.18); color: inherit; background: transparent; text-align: left; }
+.grid-radio-users > button.selected { background: rgba(20,115,230,.14); }
+.grid-radio-avatar { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; color: white; background: #1473e6; font-weight: 800; }
+.grid-radio-user-copy { min-width: 0; flex: 1; display: grid; gap: 2px; }
+.grid-radio-user-copy small { overflow: hidden; text-overflow: ellipsis; color: #888; }
+.grid-radio-dot { width: 10px; height: 10px; border-radius: 50%; background: #777; }
+.grid-radio-dot.online { background: #22b573; box-shadow: 0 0 0 4px rgba(34,181,115,.13); }
+.grid-radio-active { display: grid; justify-items: center; gap: 8px; padding: 16px; border: 1px solid rgba(127,127,127,.3); border-radius: 16px; }
+.grid-radio-active h3 { margin: 0; font-size: 20px; }
+.grid-radio-active code { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.grid-radio-state { font-size: 12px; font-weight: 900; letter-spacing: .12em; color: #1473e6; }
+.grid-radio-ptt { width: 190px; height: 190px; border-radius: 50%; border: 8px solid rgba(255,255,255,.18); background: #168b58; color: white; display: grid; place-content: center; justify-items: center; gap: 6px; touch-action: none; user-select: none; }
+.grid-radio-ptt.transmitting { background: #d83838; }
+.grid-radio-ptt:disabled { background: #666; opacity: .7; }
+.grid-radio-error { color: #e34b4b; font-size: 12px; text-align: center; }
+.grid-radio-notice, .grid-radio-empty, .grid-radio-readiness { padding: 11px; border-radius: 12px; color: #888; background: rgba(127,127,127,.1); font-size: 12px; }
+.grid-radio-actions .danger, .grid-radio-controls .danger { color: #e34b4b; background: rgba(227,75,75,.1); }

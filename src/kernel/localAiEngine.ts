@@ -665,8 +665,8 @@ class LocalAiEngine {
       );
       const match = raw.match(/\[.*?\]/s);
       if (match) return JSON.parse(match[0]) as string[];
-    } catch { /* fallback below */ }
-    return ["Got it!", "Sure, sounds good.", "Let me check and get back to you."];
+    } catch { /* no synthetic reply: callers can show local AI as unavailable */ }
+    return [];
   }
 
   /** Generate a composed message draft from a topic/intent */
