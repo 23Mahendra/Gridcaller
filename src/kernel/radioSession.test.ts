@@ -130,6 +130,24 @@ test("offline, permission failure, incoming authorization, disconnect and reconn
   radio.destroy();
 });
 
+test("incoming invite can be accepted, connected, disconnected, and reconnected", async () => {
+  const port = new DeterministicAudioPort();
+  const radio = new RadioSessionController(port);
+  port.emit({ mode: "radio", phase: "incoming", peerId: user.id, peerName: user.name, callId: "invite-1" });
+  assert.equal(radio.snapshot().incoming, true);
+  assert.equal(radio.snapshot().state, "CONNECTING");
+  await radio.acceptIncoming();
+  port.emit({ mode: "radio", phase: "active", localAudioReady: true, remoteAudioReady: true });
+  assert.equal(radio.snapshot().state, "CONNECTED");
+  radio.disconnect();
+  assert.equal(radio.snapshot().state, "AVAILABLE");
+  await radio.connect();
+  port.emit({ mode: "radio", phase: "active", localAudioReady: true, remoteAudioReady: true });
+  assert.equal(radio.snapshot().state, "CONNECTED");
+  assert.equal(port.connectCount, 1);
+  radio.destroy();
+});
+
 test("group floor permits one speaker and releases only for its holder", () => {
   const floor = new RadioFloorLock();
   assert.equal(floor.acquire("A"), true);

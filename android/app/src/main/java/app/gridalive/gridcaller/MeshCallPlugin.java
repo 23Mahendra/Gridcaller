@@ -89,6 +89,29 @@ public class MeshCallPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void getCallState(PluginCall call) {
+        try {
+            JSObject ret = new JSObject(MeshForegroundService.getCallStateJson(getContext()));
+            MeshForegroundService.clearPendingAction(getContext());
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject(e.getMessage());
+        }
+    }
+
+    @PluginMethod
+    public void updateCallState(PluginCall call) {
+        try {
+            MeshForegroundService.updateCallState(getContext(), call.getString("callId", ""), call.getString("state", "ENDED"));
+            JSObject ret = new JSObject();
+            ret.put("ok", true);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject(e.getMessage());
+        }
+    }
+
+    @PluginMethod
     public void reportMeshRuntime(PluginCall call) {
         try {
             String event = call.getString("event", "mesh");

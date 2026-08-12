@@ -12737,6 +12737,7 @@ export default function GridCaller({
                   {radioSideTab === "people" ? (
                     <GridRadioPanel
                       peers={peers}
+                      localName={myName}
                       localIds={[
                         MeshEngine.localId,
                         String(S.get("mesh_id", "") || ""),

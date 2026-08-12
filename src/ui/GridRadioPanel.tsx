@@ -1,117 +1,155 @@
-import { useEffect, useMemo, useState } from "react";
-import { Mic, MicOff, PhoneOff, Radio, Search, Users, Volume2, VolumeX } from "lucide-react";
-import radioSession, {
-  buildRadioUsers,
-  type RadioSessionSnapshot,
-} from "../kernel/radioSession";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Mic, MicOff, PhoneOff, Radio, Volume2, VolumeX } from "lucide-react";
+import radioSession, { buildRadioUsers, type RadioSessionSnapshot } from "../kernel/radioSession";
+import { radioChannelSession, type RadioChannelSnapshot } from "../kernel/radioChannelSession";
 
-type Peer = {
-  id: string;
-  name?: string;
-  online?: boolean;
-  lastSeen?: number;
-  via?: string[];
-  transports?: string[];
-};
+type Peer = { id: string; name?: string; online?: boolean; lastSeen?: number; via?: string[]; transports?: string[] };
 
-export function GridRadioPanel({ peers, localIds }: { peers: Peer[]; localIds: string[] }) {
-  const [snapshot, setSnapshot] = useState<RadioSessionSnapshot>(() => radioSession.snapshot());
-  const [query, setQuery] = useState("");
-  const [tab, setTab] = useState<"people" | "groups" | "recent">("people");
+const CHANNEL_ID = "grid-ch-1";
+
+export function GridRadioPanel({ peers, localIds, localName }: { peers: Peer[]; localIds: string[]; localName: string }) {
+  const [audio, setAudio] = useState<RadioSessionSnapshot>(() => radioSession.snapshot());
+  const [channel, setChannel] = useState<RadioChannelSnapshot>(() => radioChannelSession.snapshot());
+  const [joining, setJoining] = useState(false);
+  const pressed = useRef(false);
+  const localId = localIds.find(Boolean) || "";
   const localIdKey = localIds.join("|");
-  const users = useMemo(() => buildRadioUsers(peers, localIds), [peers, localIdKey]);
+  const discovered = useMemo(() => buildRadioUsers(peers, localIds), [peers, localIdKey]);
+  const members = useMemo(() => {
+    const merged = new Map(discovered.map((peer) => [peer.id, peer]));
+    for (const member of channel.members) {
+      const peer = merged.get(member.id);
+      merged.set(member.id, {
+        id: member.id,
+        name: member.name || peer?.name || member.id,
+        online: member.connection === "online" || peer?.online === true,
+        lastSeen: Math.max(member.lastSeen || 0, peer?.lastSeen || 0) || undefined,
+        transports: peer?.transports || [],
+      });
+    }
+    return [...merged.values()];
+  }, [channel.members, discovered]);
 
-  useEffect(() => radioSession.subscribe(setSnapshot), []);
-  useEffect(() => radioSession.setUsers(users), [users]);
+  useEffect(() => radioSession.subscribe(setAudio), []);
+  useEffect(() => radioChannelSession.subscribe(setChannel), []);
+  useEffect(() => radioSession.setUsers(members.filter((member) => member.id !== localId)), [members, localId]);
+  useEffect(() => () => {
+    pressed.current = false;
+    radioSession.disconnect();
+    void radioChannelSession.leave();
+  }, []);
 
-  const visible = users.filter((user) => {
-    if (tab === "recent" && !user.lastSeen) return false;
-    const text = `${user.name} ${user.id}`.toLowerCase();
-    return text.includes(query.trim().toLowerCase());
-  });
-  const active = snapshot.selected;
-  const live = ["CONNECTED", "TRANSMITTING", "RECEIVING"].includes(snapshot.state);
-
-  const press = () => {
-    try { radioSession.pressToTalk(); } catch {}
+  const join = async () => {
+    if (!localId || joining) return;
+    setJoining(true);
+    try { await radioChannelSession.join(CHANNEL_ID, CHANNEL_ID, localId, localName); }
+    catch { /* Session exposes the real unavailable state and error in its snapshot. */ }
+    finally { setJoining(false); }
   };
-  const release = () => radioSession.releaseToTalk();
+
+  useEffect(() => { if (localId && channel.connection === "offline") void join(); }, [localId]);
+
+  const beginPtt = async () => {
+    if (audio.state !== "CONNECTED") return;
+    pressed.current = true;
+    try {
+      if (channel.connection === "connected") {
+        const granted = await radioChannelSession.acquireFloor(localName);
+        if (!granted || !pressed.current) {
+          if (granted) await radioChannelSession.releaseFloor();
+          return;
+        }
+      }
+      radioSession.pressToTalk();
+    } catch {
+      await radioChannelSession.releaseFloor().catch(() => false);
+    }
+  };
+
+  const endPtt = () => {
+    pressed.current = false;
+    radioSession.releaseToTalk();
+    if (channel.connection === "connected") void radioChannelSession.releaseFloor();
+  };
+
+  const leave = async () => {
+    pressed.current = false;
+    radioSession.disconnect();
+    await radioChannelSession.leave();
+  };
+
+  const active = audio.selected;
+  const live = ["CONNECTED", "TRANSMITTING", "RECEIVING"].includes(audio.state);
+  const currentSpeaker = channel.speaker;
 
   return (
     <div className="grid-radio-panel">
-      <div className="grid-radio-title"><Radio size={20} /> Grid Radio</div>
-      <div className="grid-radio-tabs">
-        {(["people", "groups", "recent"] as const).map((item) => (
-          <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>
-            {item === "groups" ? <Users size={14} /> : null}{item[0].toUpperCase() + item.slice(1)}
-          </button>
-        ))}
-      </div>
+      <header className="grid-radio-channel-head">
+        <div><Radio size={22} /><span><strong>Radio</strong><small>{CHANNEL_ID}</small></span></div>
+        <span className={`grid-radio-state-pill ${channel.connection}`}>{channel.connection.toUpperCase()}</span>
+      </header>
 
-      {tab === "groups" ? (
-        <div className="grid-radio-notice">
-          Group floor control is defined, but production group WebRTC audio is not yet connected. Direct radio remains available.
-        </div>
-      ) : (
-        <>
-          <label className="grid-radio-search"><Search size={15} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search Grid users" /></label>
-          <div className="grid-radio-users">
-            {visible.length ? visible.map((user) => (
-              <button key={user.id} className={active?.id === user.id ? "selected" : ""} onClick={() => radioSession.select(user)}>
-                <span className="grid-radio-avatar">{user.name.slice(0, 1).toUpperCase()}</span>
-                <span className="grid-radio-user-copy">
-                  <strong>{user.name}</strong>
-                  <small>{user.id}</small>
-                  <small>{user.online ? "ONLINE" : user.lastSeen ? `Last seen ${new Date(user.lastSeen).toLocaleString()}` : "OFFLINE"}</small>
-                </span>
-                <span className={`grid-radio-dot ${user.online ? "online" : ""}`} />
-              </button>
-            )) : <div className="grid-radio-empty">No discovered Grid users.</div>}
-          </div>
-        </>
-      )}
-
-      {active ? (
-        <section className={`grid-radio-active state-${snapshot.state.toLowerCase()}`}>
-          <small>{snapshot.incoming ? "INCOMING RADIO" : "ACTIVE RADIO"}</small>
-          <h3>{active.name}</h3>
-          <code>{active.id}</code>
-          <div className="grid-radio-state">{snapshot.state}</div>
-          {snapshot.error ? <div className="grid-radio-error">{snapshot.error}</div> : null}
-
-          {snapshot.incoming ? (
-            <div className="grid-radio-actions">
-              <button onClick={() => void radioSession.acceptIncoming()}>Accept / Listen</button>
-              <button className="danger" onClick={() => radioSession.rejectIncoming()}>Reject</button>
-            </div>
-          ) : !live ? (
-            <button className="grid-radio-connect" disabled={!active.online || snapshot.state === "CONNECTING"} onClick={() => void radioSession.connect()}>
-              {snapshot.state === "CONNECTING" ? "Connecting actual audio…" : active.online ? "Connect radio" : "Peer offline"}
-            </button>
-          ) : (
-            <button
-              className={`grid-radio-ptt ${snapshot.state === "TRANSMITTING" ? "transmitting" : ""}`}
-              disabled={snapshot.state === "RECEIVING" || !snapshot.microphoneReady || !snapshot.remoteAudioReady}
-              onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); press(); }}
-              onPointerUp={release}
-              onPointerCancel={release}
-              onLostPointerCapture={release}
-            >
-              {snapshot.state === "TRANSMITTING" ? <Mic size={30} /> : snapshot.state === "RECEIVING" ? <Volume2 size={30} /> : <MicOff size={30} />}
-              <strong>{snapshot.state === "TRANSMITTING" ? "TRANSMITTING" : snapshot.state === "RECEIVING" ? `RECEIVING ${active.name}` : "HOLD TO TALK"}</strong>
-              <span>{snapshot.state === "TRANSMITTING" ? "Release to stop" : ""}</span>
-            </button>
-          )}
-
-          <div className="grid-radio-controls">
-            <button onClick={() => void radioSession.setSpeaker(!snapshot.speakerOn)}>{snapshot.speakerOn ? <Volume2 size={16} /> : <VolumeX size={16} />} Speaker</button>
-            <button className="danger" onClick={() => radioSession.disconnect()}><PhoneOff size={16} /> Disconnect</button>
-          </div>
-          <div className="grid-radio-readiness">
-            Mic: {snapshot.microphoneReady ? "READY" : "NOT READY"} · Remote audio: {snapshot.remoteAudioReady ? "READY" : "NOT READY"}
-          </div>
-        </section>
+      {channel.connection !== "connected" ? (
+        <button className="grid-radio-connect" disabled={!localId || joining} onClick={() => void join()}>
+          {joining || channel.connection === "connecting" ? "Joining local LAN channel…" : "Join channel"}
+        </button>
       ) : null}
+      {channel.error ? <div className="grid-radio-error">{channel.error}</div> : null}
+
+      <section className="grid-radio-members">
+        <div className="grid-radio-section-title"><span>Available users</span><strong>{members.filter((member) => member.online).length}</strong></div>
+        <div className="grid-radio-users">
+          {members.map((member) => {
+            const self = member.id === localId;
+            const speaking = currentSpeaker?.userId === member.id;
+            return (
+              <button key={member.id} disabled={self} className={active?.id === member.id ? "selected" : ""}
+                onClick={() => !self && radioSession.select(member)}>
+                <span className="grid-radio-avatar">{member.name.slice(0, 1).toUpperCase()}</span>
+                <span className="grid-radio-user-copy"><strong>{member.name}{self ? " (you)" : ""}</strong><small>{member.id}</small>
+                  <small>{speaking ? "Speaking…" : self && channel.connection === "connected" ? "Channel presence active" : active?.id === member.id && live ? "WebRTC audio connected" : member.transports.length ? `Discovered via ${member.transports.join(", ")}` : "Online in channel"}</small>
+                </span>
+                <span className={`grid-radio-dot online ${speaking ? "speaking" : ""}`} />
+              </button>
+            );
+          })}
+          {!members.length ? <div className="grid-radio-empty">No live channel members.</div> : null}
+        </div>
+      </section>
+
+      <section className={`grid-radio-active state-${audio.state.toLowerCase()}`}>
+        <small>Current speaker</small>
+        <div className="grid-radio-current-speaker">
+          <span className="grid-radio-avatar">{currentSpeaker?.userName?.slice(0, 1).toUpperCase() || "–"}</span>
+          <h3>{currentSpeaker?.userName || "Floor available"}</h3>
+          <div>{currentSpeaker ? "Speaking lease active" : active ? `${active.name} · ${audio.state}` : "Select an online user to establish WebRTC audio"}</div>
+        </div>
+        {audio.error ? <div className="grid-radio-error">{audio.error}</div> : null}
+        {audio.incoming ? (
+          <div className="grid-radio-actions"><button onClick={() => void radioSession.acceptIncoming()}>Accept / Listen</button>
+            <button className="danger" onClick={() => radioSession.rejectIncoming()}>Reject</button></div>
+        ) : active && !live ? (
+          <button className="grid-radio-connect" disabled={!active.online || audio.state === "CONNECTING"} onClick={() => void radioSession.connect()}>
+            {audio.state === "CONNECTING" ? "Establishing WebRTC audio…" : "Connect audio to selected user"}
+          </button>
+        ) : null}
+
+        <button className={`grid-radio-ptt ${audio.state === "TRANSMITTING" ? "transmitting" : ""}`}
+          disabled={!live || channel.muted || audio.state === "RECEIVING" || !audio.microphoneReady || !audio.remoteAudioReady || channel.pushToTalk === "blocked"}
+          onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); void beginPtt(); }}
+          onPointerUp={endPtt} onPointerCancel={endPtt} onLostPointerCapture={endPtt}>
+          {audio.state === "TRANSMITTING" ? <Mic size={34} /> : audio.state === "RECEIVING" ? <Volume2 size={34} /> : <MicOff size={34} />}
+          <strong>{audio.state === "TRANSMITTING" ? "TRANSMITTING" : audio.state === "RECEIVING" ? `RECEIVING ${active?.name || ""}` : channel.pushToTalk === "requesting" ? "REQUESTING FLOOR" : "HOLD TO TALK"}</strong>
+          <span>{audio.state === "TRANSMITTING" ? "Release to stop" : channel.connection === "connected" ? "WebRTC audio with shared floor control" : "Direct WebRTC audio"}</span>
+        </button>
+
+        <div className="grid-radio-controls">
+          <button onClick={() => void radioSession.setSpeaker(!audio.speakerOn)}>{audio.speakerOn ? <Volume2 size={16} /> : <VolumeX size={16} />} Speaker</button>
+          <button onClick={() => radioChannelSession.setMuted(!channel.muted)}>{channel.muted ? <MicOff size={16} /> : <Mic size={16} />} Mute</button>
+          <button className="danger" onClick={() => void leave()}><PhoneOff size={16} /> Leave channel</button>
+        </div>
+        <div className="grid-radio-readiness">Mic: {audio.microphoneReady ? "READY" : "NOT READY"} · Remote track: {audio.remoteAudioReady ? "LIVE" : "NOT RECEIVED"}</div>
+      </section>
     </div>
   );
 }

@@ -14,6 +14,8 @@ export interface MeshCallPlugin {
   stopKeepAlive(): Promise<{ ok: boolean }>;
   showIncomingCall(opts: { name: string; callId: string }): Promise<{ ok: boolean }>;
   cancelIncomingCall(): Promise<{ ok: boolean }>;
+  getCallState(): Promise<NativeCallState>;
+  updateCallState(opts: { callId: string; state: string }): Promise<{ ok: boolean }>;
   reportMeshRuntime(opts: { event: string; payload?: Record<string, any> }): Promise<{ ok: boolean; event?: string; payload?: Record<string, any> }>;
   startMeshVpn(opts?: { mode?: string; online?: boolean }): Promise<{ ok: boolean; mode?: string; online?: boolean }>;
   stopMeshVpn(): Promise<{ ok: boolean }>;
@@ -24,6 +26,14 @@ export interface MeshCallPlugin {
   sendMeshPacket(opts: { recipientId: string; payload: string; payloadBase64?: string }): Promise<{ ok: boolean; recipientId?: string }>;
   addListener(eventName: "meshPacket", listener: (event: { data: MeshPacketEvent }) => void): Promise<{ remove: () => Promise<void> }>;
 }
+
+export type NativeCallState = {
+  callId: string;
+  callerName: string;
+  state: "IDLE" | "INCOMING_RINGING" | "CONNECTING" | "DECLINING" | "MISSED" | string;
+  action: "ACCEPT" | "DECLINE" | "TIMEOUT" | "";
+  timestamp: number;
+};
 
 const MeshCall = registerPlugin<MeshCallPlugin>("MeshCall");
 
@@ -77,6 +87,19 @@ export async function nativeCancelIncoming(): Promise<void> {
   try {
     await MeshCall.cancelIncomingCall();
   } catch {}
+}
+
+export async function getNativeCallState(): Promise<NativeCallState | null> {
+  if (!Capacitor.isNativePlatform()) return null;
+  try { return await MeshCall.getCallState(); } catch (e) {
+    console.warn("[MeshCall] getCallState", e);
+    return null;
+  }
+}
+
+export async function updateNativeCallState(callId: string, state: string): Promise<void> {
+  if (!Capacitor.isNativePlatform() || !callId) return;
+  try { await MeshCall.updateCallState({ callId, state }); } catch {}
 }
 
 export async function bridgeMeshRuntimeEvent(event: string, payload: Record<string, any> = {}): Promise<{ ok: boolean; event?: string; payload?: Record<string, any> }> {

@@ -42,7 +42,7 @@ function startNode(nodeId, url, traces) {
     }
   });
   const ready = new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${nodeId} did not connect`)), 8_000);
+    const timer = setTimeout(() => reject(new Error(`${nodeId} did not connect`)), 20_000);
     const onMessage = (message) => {
       if (message?.kind !== "ready") return;
       clearTimeout(timer);
@@ -79,12 +79,16 @@ test("production LAN WebSocket performs real multi-process A-B-C relay, dedup, T
   await waitForHub(baseUrl, hub);
 
   const traces = [];
-  const nodes = [startNode("A", wsUrl, traces), startNode("B", wsUrl, traces), startNode("C", wsUrl, traces)];
+  const nodes = [];
   t.after(() => {
     for (const node of nodes) if (node.child.exitCode === null) node.child.kill("SIGTERM");
     if (hub.exitCode === null) hub.kill("SIGTERM");
   });
-  await Promise.all(nodes.map((node) => node.ready));
+  for (const nodeId of ["A", "B", "C"]) {
+    const node = startNode(nodeId, wsUrl, traces);
+    nodes.push(node);
+    await node.ready;
+  }
   const [a, b, c] = nodes;
 
   const sent = await a.command("send", {

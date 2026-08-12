@@ -13,7 +13,7 @@ import http from "http";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { fileURLToPath } from "url";
 import { Readable } from "stream";
 import { WebSocketServer } from "ws";
@@ -41,6 +41,12 @@ const PORT = Number(process.env.PORT || 8765);
 const PEER_PORT = Number(process.env.PEER_PORT || 9000);
 const OLLAMA_BASE_URL = String(process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
 const OFFGRID_BASE_URL = String(process.env.OFFGRID_BASE_URL || "http://127.0.0.1:7878/v1").replace(/\/$/, "");
+const RADIO_MEMBER_TTL_MS = Math.max(100, Number(process.env.RADIO_MEMBER_TTL_MS || 20_000));
+const RADIO_FLOOR_TTL_MS = Math.max(100, Number(process.env.RADIO_FLOOR_TTL_MS || 8_000));
+const radioChannels = new Map();
+const pendingCallOffers = new Map();
+const PUSH_WEBHOOK_URL = String(process.env.GRIDCALLER_PUSH_WEBHOOK_URL || "").trim();
+const PUSH_WEBHOOK_TOKEN = String(process.env.GRIDCALLER_PUSH_WEBHOOK_TOKEN || "").trim();
 
 for (const d of [SHARE, TRANSFER, DATA, defaultWorkDir()]) {
   fs.mkdirSync(d, { recursive: true });
@@ -76,6 +82,47 @@ const ragStore = readJsonFile(RAG_STORE_FILE, {
 
 function hashReceiptPayload(payload) {
   return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
+function validRadioChannelId(value) {
+  return /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(String(value || ""));
+}
+
+function radioChannel(channelId, channelName = channelId) {
+  let channel = radioChannels.get(channelId);
+  if (!channel) {
+    channel = { channelId, channelName: String(channelName || channelId).slice(0, 80), members: new Map(), speaker: null };
+    radioChannels.set(channelId, channel);
+  }
+  return channel;
+}
+
+function cleanRadioChannel(channel, now = Date.now()) {
+  for (const [id, member] of channel.members) {
+    if (now - member.lastSeen > RADIO_MEMBER_TTL_MS) channel.members.delete(id);
+  }
+  if (channel.speaker && (channel.speaker.expiresAt <= now || !channel.members.has(channel.speaker.userId))) {
+    channel.speaker = null;
+  }
+}
+
+function radioSnapshot(channel, localUserId = "", sessionToken = "") {
+  cleanRadioChannel(channel);
+  return {
+    channelId: channel.channelId,
+    channelName: channel.channelName,
+    localUserId,
+    members: [...channel.members.values()].slice(-256).map((member) => ({
+      id: member.id, name: member.name, joinedAt: member.joinedAt,
+      lastSeen: member.lastSeen, connection: "online",
+    })),
+    speaker: channel.speaker ? { ...channel.speaker } : null,
+    connection: "connected",
+    pushToTalk: "idle",
+    muted: false,
+    error: "",
+    sessionToken,
+  };
 }
 
 function appendUsageEntry(entry) {
@@ -560,6 +607,126 @@ const server = http.createServer(async (req, res) => {
     if (pathname === "/api/offgrid" || pathname.startsWith("/api/offgrid/")) {
       await proxyLocalApi(req, res, pathname, url.search, "/api/offgrid", OFFGRID_BASE_URL);
       return;
+    }
+
+    if (pathname === "/api/call/push/status" && req.method === "GET") {
+      return send(res, 200, JSON.stringify({ available: !!PUSH_WEBHOOK_URL, provider: PUSH_WEBHOOK_URL ? "configured-webhook" : "none" }), "application/json");
+    }
+
+    if (pathname === "/api/call/push/invite" && req.method === "POST") {
+      const body = await readJson(req);
+      if (!body.callId || !body.callerId || !body.calleeId) return send(res, 400, JSON.stringify({ accepted: false, error: "invalid call invite" }), "application/json");
+      if (!PUSH_WEBHOOK_URL) return send(res, 503, JSON.stringify({ accepted: false, provider: "none", reason: "push provider unavailable" }), "application/json");
+      const upstream = await fetch(PUSH_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(PUSH_WEBHOOK_TOKEN ? { authorization: `Bearer ${PUSH_WEBHOOK_TOKEN}` } : {}) },
+        body: JSON.stringify({ type: "GRIDCALLER_CALL_INVITE", ...body }),
+        signal: AbortSignal.timeout(8_000),
+      });
+      return send(res, upstream.ok ? 202 : 502, JSON.stringify({ accepted: upstream.ok, provider: "configured-webhook", reason: upstream.ok ? undefined : `provider HTTP ${upstream.status}` }), "application/json");
+    }
+
+    if ((pathname === "/api/call/push/register" || pathname === "/api/call/push/unregister") && req.method === "POST") {
+      const body = await readJson(req);
+      if (!body.deviceId || !body.registrationSecret || (pathname.endsWith("/register") && !body.token)) {
+        return send(res, 400, JSON.stringify({ accepted: false, error: "invalid push registration" }), "application/json");
+      }
+      if (!PUSH_WEBHOOK_URL) return send(res, 503, JSON.stringify({ accepted: false, provider: "none", reason: "push provider unavailable" }), "application/json");
+      const upstream = await fetch(PUSH_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(PUSH_WEBHOOK_TOKEN ? { authorization: `Bearer ${PUSH_WEBHOOK_TOKEN}` } : {}) },
+        body: JSON.stringify({ type: pathname.endsWith("/register") ? "GRIDCALLER_PUSH_REGISTER" : "GRIDCALLER_PUSH_UNREGISTER", ...body }),
+        signal: AbortSignal.timeout(8_000),
+      });
+      return send(res, upstream.ok ? 202 : 502, JSON.stringify({ accepted: upstream.ok, provider: "configured-webhook", reason: upstream.ok ? undefined : `provider HTTP ${upstream.status}` }), "application/json");
+    }
+
+    if (pathname === "/api/call/pending" && req.method === "GET") {
+      const calleeId = String(url.searchParams.get("calleeId") || "");
+      const now = Date.now();
+      for (const [id, row] of pendingCallOffers) if (row.expiresAt <= now) pendingCallOffers.delete(id);
+      const offers = [...pendingCallOffers.values()].filter((row) => row.calleeId === calleeId && row.expiresAt > now).map((row) => row.message);
+      return send(res, 200, JSON.stringify({ offers }), "application/json");
+    }
+    if (pathname === "/api/call/pending" && req.method === "POST") {
+      const body = await readJson(req);
+      const message = body.message;
+      if (!message?.data?.callId || !message?.data?.to || !message?.data?.offer || message.type !== "GRIDCALLER_OFFER") {
+        return send(res, 400, JSON.stringify({ stored: false, error: "invalid pending offer" }), "application/json");
+      }
+      pendingCallOffers.set(String(message.data.callId), { calleeId: String(message.data.to), expiresAt: Date.now() + 120_000, message });
+      return send(res, 201, JSON.stringify({ stored: true, callId: message.data.callId }), "application/json");
+    }
+
+    if (pathname === "/api/radio/channel" && req.method === "GET") {
+      const channelId = url.searchParams.get("channelId") || "";
+      if (!validRadioChannelId(channelId)) return send(res, 400, JSON.stringify({ error: "invalid channelId" }), "application/json");
+      return send(res, 200, JSON.stringify(radioSnapshot(radioChannel(channelId))), "application/json");
+    }
+
+    if (pathname.startsWith("/api/radio/") && req.method === "POST") {
+      const body = await readJson(req);
+      const channelId = String(body.channelId || "");
+      const userId = String(body.userId || "").trim().slice(0, 128);
+      if (!validRadioChannelId(channelId)) return send(res, 400, JSON.stringify({ error: "invalid channelId" }), "application/json");
+      if (!userId) return send(res, 400, JSON.stringify({ error: "userId required" }), "application/json");
+      const channel = radioChannel(channelId, body.channelName);
+      const now = Date.now();
+      cleanRadioChannel(channel, now);
+
+      if (pathname === "/api/radio/join") {
+        const prior = channel.members.get(userId);
+        if (prior?.sessionToken && prior.sessionToken !== String(body.sessionToken || "")) {
+          return send(res, 409, JSON.stringify({ error: "radio identity already has a live session" }), "application/json");
+        }
+        const sessionToken = prior?.sessionToken || randomUUID();
+        channel.members.set(userId, {
+          id: userId,
+          name: String(body.userName || prior?.name || userId).slice(0, 80),
+          joinedAt: prior?.joinedAt || now,
+          lastSeen: now,
+          sessionToken,
+        });
+        return send(res, 200, JSON.stringify(radioSnapshot(channel, userId, sessionToken)), "application/json");
+      }
+
+      const member = channel.members.get(userId);
+      if (!member?.sessionToken || member.sessionToken !== String(body.sessionToken || "")) {
+        return send(res, 403, JSON.stringify({ error: "radio session ownership required" }), "application/json");
+      }
+
+      if (pathname === "/api/radio/heartbeat") {
+        member.name = String(body.userName || member.name || userId).slice(0, 80);
+        member.lastSeen = now;
+        return send(res, 200, JSON.stringify(radioSnapshot(channel, userId, member.sessionToken)), "application/json");
+      }
+
+      if (pathname === "/api/radio/leave") {
+        channel.members.delete(userId);
+        if (channel.speaker?.userId === userId && body.leaseId === channel.speaker.leaseId) channel.speaker = null;
+        if (!channel.members.size && !channel.speaker) radioChannels.delete(channelId);
+        return send(res, 200, JSON.stringify({ ok: true }), "application/json");
+      }
+
+      if (pathname === "/api/radio/floor/acquire") {
+        if (!channel.speaker || channel.speaker.userId === userId) {
+          channel.speaker = {
+            userId,
+            userName: member.name,
+            leaseId: channel.speaker?.leaseId || randomUUID(),
+            acquiredAt: channel.speaker?.acquiredAt || now,
+            expiresAt: now + RADIO_FLOOR_TTL_MS,
+          };
+          return send(res, 200, JSON.stringify({ granted: true, speaker: channel.speaker }), "application/json");
+        }
+        return send(res, 200, JSON.stringify({ granted: false, speaker: channel.speaker }), "application/json");
+      }
+
+      if (pathname === "/api/radio/floor/release") {
+        const authorized = channel.speaker?.userId === userId && channel.speaker?.leaseId === String(body.leaseId || "");
+        if (authorized) channel.speaker = null;
+        return send(res, 200, JSON.stringify({ released: authorized }), "application/json");
+      }
     }
 
     if (pathname === "/api/rag/docs" && req.method === "GET") {

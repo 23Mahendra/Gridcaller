@@ -14,12 +14,12 @@ import { startAutoMesh, unifyLocalIdentity } from "./kernel/autoMesh";
 import { startOtaWatcher, onOta, applyUpdate, type UpdateInfo } from "./kernel/otaUpdate";
 import { startResilientMesh, onPathHealth, type PathHealth } from "./kernel/resilientMesh";
 import { APP_VERSION_NAME, APP_VERSION_CODE } from "./kernel/appVersion";
-import { getCallState, startCallSession } from "./kernel/callSession";
+import { acceptCall, endCall, getCallState, recoverPendingCallInvites, rejectCall, startCallSession } from "./kernel/callSession";
 import { MeshEngine } from "./kernel/mesh";
 import { startFullAutoJoin, onAutoJoinStatus } from "./kernel/autoJoin";
 import { deriveLifecycleState } from "./kernel/appLifecycle";
 import { startWifiMemory } from "./kernel/wifiMemory";
-import { bridgeMeshRuntimeEvent, startMeshKeepAlive, startMeshVpn, stopMeshVpn } from "./plugins/meshCallNative";
+import { bridgeMeshRuntimeEvent, getNativeCallState, startMeshKeepAlive, startMeshVpn, stopMeshVpn } from "./plugins/meshCallNative";
 import { startMeshDirectory } from "./kernel/meshDirectory";
 import { startNetworkHandoff } from "./kernel/networkHandoff";
 import { ensureMeshIdentity, setDisplayName, setHubHttp, setSignalUrl, syncLocalDeviceIdentity } from "./mesh/identity";
@@ -110,7 +110,7 @@ export default function App() {
       }
     };
 
-    const onVisibility = () => refreshLifecycle();
+    const onVisibility = () => { refreshLifecycle(); if (document.visibilityState === "visible") void recoverPendingCallInvites(); };
     const onCallUi = () => refreshLifecycle();
     document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener("focus", onVisibility);
@@ -130,6 +130,7 @@ export default function App() {
       (MeshEngine as any).start?.();
     } catch {}
     startCallSession();
+    void recoverPendingCallInvites();
     startWifiMemory(); // remember Wi‑Fi forever + preferred auto-connect
     startMeshDirectory(); // persistent peers + mesh memory
     startNetworkHandoff(); // smooth Wi‑Fi/path switch without killing voice
@@ -142,12 +143,21 @@ export default function App() {
     void startResilientMesh();
     startOtaWatcher({ autoInstall: true });
     // Native full-screen incoming → ensure call UI / vibration
-    const onNativeIn = () => {
-      try {
-        navigator.vibrate?.([500, 100, 500, 100, 500, 100, 500]);
-      } catch {}
+    const applyNativeCallAction = async (action?: string, callId?: string) => {
+      const native = action ? null : await getNativeCallState();
+      const resolvedAction = action || native?.action || "";
+      const resolvedCallId = callId || native?.callId || "";
+      const active = getCallState();
+      if (resolvedCallId && active.callId && resolvedCallId !== active.callId) return;
+      if (resolvedAction === "ACCEPT") await acceptCall();
+      else if (resolvedAction === "DECLINE") rejectCall();
+      else if (resolvedAction === "TIMEOUT") endCall("missed");
+    };
+    const onNativeIn = (event: CustomEvent<{ action?: string; callId?: string }>) => {
+      void applyNativeCallAction(event.detail?.action, event.detail?.callId);
     };
     window.addEventListener("gc-native-incoming", onNativeIn as any);
+    void applyNativeCallAction();
     const offOta = onOta((info, status) => {
       setOtaInfo(info);
       if (status === "downloading" || status === "installing") {

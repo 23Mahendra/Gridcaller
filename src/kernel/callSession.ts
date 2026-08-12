@@ -27,10 +27,13 @@ import {
   startRingtone,
   stopCallSounds,
 } from "./callAudio";
-import { nativeCancelIncoming, nativeIncomingCall } from "../plugins/meshCallNative";
+import { nativeCancelIncoming, nativeIncomingCall, updateNativeCallState } from "../plugins/meshCallNative";
 import { registerIceRestart, registerInCallProbe } from "./networkHandoff";
 import { logMeshEvent, rememberPeer } from "./meshDirectory";
 import { deriveLifecycleState } from "./appLifecycle";
+import { CallStateMachine, createCallId, type AuthoritativeCall, type CallLifecycleState } from "./callStateMachine";
+import { resolveHubHttp } from "./meshHubConfig";
+import { HubPushProvider } from "./pushProvider";
 
 export type CallPhase = "idle" | "outgoing" | "incoming" | "active";
 
@@ -48,6 +51,8 @@ export type CallUiState = {
   remoteAudioReady: boolean;
   localTransmitting: boolean;
   remoteTransmitting: boolean;
+  lifecycle?: CallLifecycleState;
+  call?: AuthoritativeCall;
 };
 
 type Listener = (s: CallUiState) => void;
@@ -67,6 +72,7 @@ let hasRemoteDesc = false;
 let callGen = 0; // ignore stale async from previous call
 let lifecycleListenerRegistered = false;
 let lastIncomingAlertCallId = "";
+const callMachine = new CallStateMachine();
 
 let state: CallUiState = {
   phase: "idle",
@@ -82,7 +88,15 @@ let state: CallUiState = {
   remoteAudioReady: false,
   localTransmitting: false,
   remoteTransmitting: false,
+  lifecycle: "IDLE",
+  call: callMachine.snapshot(),
 };
+
+function advanceCall(event: Parameters<CallStateMachine["dispatch"]>[0]) {
+  const call = callMachine.dispatch(event);
+  state = { ...state, lifecycle: call.state, call };
+  return call;
+}
 
 function emit() {
   for (const fn of listeners) {
@@ -259,6 +273,8 @@ function wirePc(peer: RTCPeerConnection, role: "caller" | "callee", gen: number)
     if (gen !== callGen) return; // stale PC
     const st = peer.connectionState;
     if (st === "connected") {
+      advanceCall({ type: "MEDIA_CONNECTED" });
+      void updateNativeCallState(state.callId, "CONNECTED");
       stopCallSounds();
       try {
         playConnectTone();
@@ -324,6 +340,8 @@ function wirePc(peer: RTCPeerConnection, role: "caller" | "callee", gen: number)
     const ice = peer.iceConnectionState;
     if (ice === "connected" || ice === "completed") {
       if (state.phase !== "active" && hasRemoteDesc) {
+        advanceCall({ type: "MEDIA_CONNECTED" });
+        void updateNativeCallState(state.callId, "CONNECTED");
         setState({
           phase: "active",
           method: state.mode === "radio" ? "Radio connected — hold to talk" : "Connected — speak now",
@@ -379,7 +397,8 @@ async function handleSignal(msg: any) {
   const t = msg.type;
 
   if (t === "GRIDCALLER_ICE" && msg.data?.candidate) {
-    if (msg.data.callId && state.callId && msg.data.callId !== state.callId) return;
+    if (!state.callId || msg.data.callId !== state.callId) return;
+    if (msg.from !== state.peerId || !isForMe(String(msg.data.to || ""))) return;
     if (pc) await addIceSafe(pc, msg.data.candidate, pendingIce);
     else pendingIce.push(msg.data.candidate);
     return;
@@ -388,8 +407,12 @@ async function handleSignal(msg: any) {
   // Only hang up if callId matches current call (prevents random cut)
   if (t === "GRIDCALLER_HANGUP") {
     if (!state.callId || state.phase === "idle") return;
-    if (msg.data?.callId && msg.data.callId !== state.callId) return;
-    endCall("remote-hangup");
+    if (msg.data?.callId !== state.callId || msg.from !== state.peerId) return;
+    if (!isForMe(String(msg.data?.to || ""))) return;
+    const reason = String(msg.data?.reason || "remote-hangup");
+    if (reason === "reject") setState({ error: "Call declined" });
+    else if (reason === "missed" || reason === "no-answer") setState({ error: "Call was not answered" });
+    endCall(reason === "reject" ? "remote-declined" : reason === "missed" ? "remote-missed" : "remote-hangup");
     return;
   }
 
@@ -436,6 +459,7 @@ async function handleSignal(msg: any) {
   }
 
   if (t === "GRIDCALLER_ANSWER" && msg.data?.callId === state.callId && msg.data?.answer) {
+    if (msg.from !== state.peerId || !isForMe(String(msg.data.to || ""))) return;
     if (!pc) return;
     try {
       await pc.setRemoteDescription(new RTCSessionDescription(msg.data.answer));
@@ -450,6 +474,20 @@ async function handleSignal(msg: any) {
   }
 }
 
+/** Recover a durable offer after background suspension; duplicates are rejected by the call machine. */
+export async function recoverPendingCallInvites() {
+  const localId = MeshEngine.localId;
+  if (!localId) return 0;
+  try {
+    const response = await fetch(`${resolveHubHttp()}/api/call/pending?calleeId=${encodeURIComponent(localId)}`, { signal: AbortSignal.timeout(5_000) });
+    if (!response.ok) return 0;
+    const body = await response.json();
+    const offers = Array.isArray(body.offers) ? body.offers : [];
+    for (const offer of offers) await handleSignal(offer);
+    return offers.length;
+  } catch { return 0; }
+}
+
 function showIncoming(
   peerId: string,
   peerName: string,
@@ -461,6 +499,11 @@ function showIncoming(
   resumeAudioContext();
   const cid = callId || state.callId || `in_${Date.now()}`;
   const who = peerName || peerId || "GridCaller";
+  const incoming = advanceCall({
+    type: "INCOMING", callId: cid, callerId: peerId, calleeId: MeshEngine.localId,
+    timestamp: Date.now(), callType: mode === "radio" ? "radio" : "voice",
+  });
+  if (incoming.callId !== cid || incoming.state !== "INCOMING_RINGING") return;
   if (lastIncomingAlertCallId !== cid) {
     lastIncomingAlertCallId = cid;
     try {
@@ -500,7 +543,15 @@ function showIncoming(
     remoteAudioReady: false,
     localTransmitting: false,
     remoteTransmitting: false,
+    lifecycle: incoming.state,
+    call: incoming,
   });
+  if (ringTimeout) clearTimeout(ringTimeout);
+  ringTimeout = setTimeout(() => {
+    if (state.phase !== "incoming" || state.callId !== cid) return;
+    advanceCall({ type: "TIMEOUT" });
+    endCall("missed");
+  }, 55_000);
 }
 
 /** Place outbound mesh call — stays on Calling UI until answer */
@@ -525,7 +576,11 @@ async function startOutgoingSession(
   cleanupMedia();
   resumeAudioContext();
 
-  const callId = `gc_${MeshEngine.localId || "me"}_${peerId}_${Date.now()}`;
+  const callId = createCallId(MeshEngine.localId || "me", peerId);
+  const outgoing = advanceCall({
+    type: "OUTGOING", callId, callerId: MeshEngine.localId || "me", calleeId: peerId,
+    timestamp: Date.now(), callType: mode === "radio" ? "radio" : "voice",
+  });
   setState({
     phase: "outgoing",
     peerId,
@@ -540,6 +595,8 @@ async function startOutgoingSession(
     remoteAudioReady: false,
     localTransmitting: false,
     remoteTransmitting: false,
+    lifecycle: outgoing.state,
+    call: outgoing,
   });
 
   try {
@@ -587,7 +644,7 @@ async function startOutgoingSession(
       video: false,
       mode,
     });
-    MeshEngine.broadcast("GRIDCALLER_OFFER", {
+    const offerMessage = {
       callId,
       to: peerId,
       offer: pc.localDescription || offer,
@@ -596,7 +653,19 @@ async function startOutgoingSession(
       handle: S.get("global_call_handle", "") || "",
       phone: S.get("user_phone", "") || "",
       mode,
-    });
+    };
+    MeshEngine.broadcast("GRIDCALLER_OFFER", offerMessage);
+    void fetch(`${resolveHubHttp()}/api/call/pending`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: { type: "GRIDCALLER_OFFER", data: offerMessage, from: MeshEngine.localId, fromName: me, ts: Date.now() } }),
+    }).catch(() => {});
+    const push = new HubPushProvider(resolveHubHttp());
+    if (await push.isAvailable()) {
+      void push.sendCallInvite({
+        callId, callerId: MeshEngine.localId || "me", calleeId: peerId,
+        callerName: String(me), timestamp: Date.now(), callType: mode === "radio" ? "radio" : "voice",
+      });
+    }
 
     setState({ method: "Ringing… wait for Accept on other phone" });
 
@@ -606,6 +675,7 @@ async function startOutgoingSession(
         try {
           playFailTone();
         } catch {}
+        advanceCall({ type: "TIMEOUT" });
         setState({ error: "No answer — other phone: open GridCaller + Accept" });
         endCall("no-answer");
       }
@@ -641,6 +711,8 @@ export async function acceptCall() {
   const gen = callGen;
   stopCallSounds();
   resumeAudioContext();
+  advanceCall({ type: "ACCEPT" });
+  void updateNativeCallState(state.callId, "CONNECTING");
   setState({ method: "Answering…", phase: "outgoing" });
 
   try {
@@ -691,6 +763,8 @@ export async function acceptCall() {
 }
 
 export function rejectCall() {
+  advanceCall({ type: "DECLINE" });
+  void updateNativeCallState(state.callId, "DECLINING");
   if (state.peerId && state.callId) {
     try {
       MeshEngine.broadcast("GRIDCALLER_HANGUP", {
@@ -704,8 +778,11 @@ export function rejectCall() {
 }
 
 export function endCall(reason = "hangup") {
+  if (reason === "failed") advanceCall({ type: "FAIL", reason: state.error || "call failed" });
+  else if (reason === "missed" || reason === "no-answer" || reason === "remote-missed") advanceCall({ type: "TIMEOUT" });
+  else advanceCall({ type: "HANGUP", reason });
   callGen += 1; // invalidate in-flight
-  if (state.peerId && state.callId && reason !== "remote-hangup" && reason !== "failed") {
+  if (state.peerId && state.callId && reason !== "reject" && reason !== "failed" && !reason.startsWith("remote-")) {
     try {
       MeshEngine.broadcast("GRIDCALLER_HANGUP", {
         callId: state.callId,
@@ -715,8 +792,9 @@ export function endCall(reason = "hangup") {
     } catch {}
   }
   void nativeCancelIncoming();
-  const keepErr =
-    reason === "no-answer" || reason === "failed" ? state.error : reason === "reject" ? "" : "";
+  void updateNativeCallState(state.callId, reason === "missed" || reason === "no-answer" ? "MISSED" : reason === "failed" ? "FAILED" : "ENDED");
+  const keepErr = reason === "no-answer" || reason === "failed" || reason === "remote-declined" || reason === "remote-missed"
+    ? state.error : "";
   cleanupMedia();
   try {
     document.title = "GridCaller";
@@ -735,6 +813,8 @@ export function endCall(reason = "hangup") {
     remoteAudioReady: false,
     localTransmitting: false,
     remoteTransmitting: false,
+    lifecycle: callMachine.snapshot().state,
+    call: callMachine.snapshot(),
   });
 }
 

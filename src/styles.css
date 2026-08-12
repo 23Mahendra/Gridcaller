@@ -896,3 +896,15 @@ canvas {
 .grid-radio-error { color: #e34b4b; font-size: 12px; text-align: center; }
 .grid-radio-notice, .grid-radio-empty, .grid-radio-readiness { padding: 11px; border-radius: 12px; color: #888; background: rgba(127,127,127,.1); font-size: 12px; }
 .grid-radio-actions .danger, .grid-radio-controls .danger { color: #e34b4b; background: rgba(227,75,75,.1); }
+.grid-radio-channel-head { display:flex; align-items:center; justify-content:space-between; border:1px solid rgba(127,127,127,.3); background:rgba(10,18,30,.9); border-radius:14px; padding:12px; }
+.grid-radio-channel-head > div { display:flex; align-items:center; gap:9px; }
+.grid-radio-channel-head span { display:grid; gap:2px; }
+.grid-radio-channel-head small { color:#8fa3b8; }
+.grid-radio-state-pill { display:block!important; border-radius:999px; padding:6px 9px; background:#3a2530; color:#ffadba; font-size:10px; font-weight:900; }
+.grid-radio-state-pill.connected { background:#123c29; color:#66e89d; }
+.grid-radio-section-title { display:flex; justify-content:space-between; align-items:center; padding:2px 3px; text-transform:uppercase; font-size:11px; color:#94a2b6; }
+.grid-radio-section-title strong { color:#61df96; }
+.grid-radio-current-speaker { display:grid; justify-items:center; gap:5px; }
+.grid-radio-current-speaker .grid-radio-avatar { width:54px; height:54px; font-size:20px; }
+.grid-radio-dot.speaking { box-shadow:0 0 0 5px rgba(48,212,119,.18); animation:grid-radio-pulse 1s infinite; }
+@keyframes grid-radio-pulse { 50% { transform:scale(1.35); } }

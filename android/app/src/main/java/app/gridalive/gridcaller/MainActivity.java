@@ -64,7 +64,6 @@ public class MainActivity extends BridgeActivity {
                 WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
                     | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
                     | WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
-                    | WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
             );
         } catch (Exception ignored) {
         }
@@ -72,12 +71,14 @@ public class MainActivity extends BridgeActivity {
         try {
             final String from = intent.getStringExtra("call_from");
             final String callId = intent.getStringExtra("call_id");
+            final String action = intent.getStringExtra("call_action");
             getBridge().getWebView().postDelayed(() -> {
                 try {
                     String js =
                         "window.dispatchEvent(new CustomEvent('gc-native-incoming',{detail:{"
                             + "from:" + jsonStr(from) + ","
-                            + "callId:" + jsonStr(callId)
+                            + "callId:" + jsonStr(callId) + ","
+                            + "action:" + jsonStr(action)
                             + "}}));";
                     getBridge().getWebView().evaluateJavascript(js, null);
                 } catch (Exception ignored) {
