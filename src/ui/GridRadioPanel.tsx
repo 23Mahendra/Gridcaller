@@ -168,8 +168,18 @@ export function GridRadioPanel({ peers, localIds, localName }: { peers: Peer[]; 
         </div>
 
         <div className="grid-radio-bottom-actions">
-          <button disabled><Wifi size={18}/> Mesh broadcast</button>
-          <button className="sos" disabled title="SOS broadcast is not implemented in the radio session"><ShieldAlert size={19}/> SOS</button>
+          <button
+            type="button"
+            onClick={() => {
+              if (!active?.online) return;
+              void radioSession.connect();
+            }}
+            disabled={!active?.online || audio.state === "CONNECTING" || live}
+            title={live ? "Radio audio already connected" : active?.online ? "Connect radio audio" : "Select an online peer"}
+          >
+            <Wifi size={18}/> {live ? "Audio linked" : "Link audio"}
+          </button>
+          <button className="sos" disabled title="Use Emergency / Mesh for SOS broadcast"><ShieldAlert size={19}/> SOS</button>
         </div>
 
         <div className="grid-radio-readiness">Mic: {audio.microphoneReady ? "READY" : "NOT READY"} · Remote audio: {audio.remoteAudioReady ? "LIVE" : "WAITING"}</div>
