@@ -1,199 +1,66 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Mic, MicOff, PhoneOff, Radio, Volume2, VolumeX, Wifi, Users, Signal, ShieldAlert, ScanLine } from "lucide-react";
-import radioSession, { buildRadioUsers, type RadioSessionSnapshot } from "../kernel/radioSession";
-import { radioChannelSession, type RadioChannelSnapshot } from "../kernel/radioChannelSession";
+import { useEffect, useMemo, useState } from "react";
+import { Mic, MicOff, Radio, Volume2, VolumeX, WifiOff, Users, Signal } from "lucide-react";
+import freeRadio, { type RadioPeer } from "../kernel/radioMesh";
 
 type Peer = { id: string; name?: string; online?: boolean; lastSeen?: number; via?: string[]; transports?: string[] };
-
 const CHANNEL_ID = "grid-ch-1";
 
-export function GridRadioPanel({ peers, localIds, localName }: { peers: Peer[]; localIds: string[]; localName: string }) {
-  const [audio, setAudio] = useState<RadioSessionSnapshot>(() => radioSession.snapshot());
-  const [channel, setChannel] = useState<RadioChannelSnapshot>(() => radioChannelSession.snapshot());
-  const [joining, setJoining] = useState(false);
-  const pressed = useRef(false);
-  const localId = localIds.find(Boolean) || "";
-  const localIdKey = localIds.join("|");
-  const discovered = useMemo(() => buildRadioUsers(peers, localIds), [peers, localIdKey]);
-  const members = useMemo(() => {
-    const merged = new Map(discovered.map((peer) => [peer.id, peer]));
-    for (const member of channel.members) {
-      const peer = merged.get(member.id);
-      merged.set(member.id, {
-        id: member.id,
-        name: member.name || peer?.name || member.id,
-        online: member.connection === "online" || peer?.online === true,
-        lastSeen: Math.max(member.lastSeen || 0, peer?.lastSeen || 0) || undefined,
-        transports: peer?.transports || [],
-      });
-    }
-    return [...merged.values()];
-  }, [channel.members, discovered]);
+function mergePeers(discovered: Peer[], radioPeers: RadioPeer[]) {
+  const map = new Map<string, { id: string; name: string; online: boolean; lastSeen?: number }>();
+  for (const p of radioPeers) map.set(p.id, { id: p.id, name: p.name, online: p.live === true, lastSeen: p.ts });
+  for (const p of discovered) {
+    const e = map.get(p.id);
+    map.set(p.id, { id: p.id, name: p.name || e?.name || p.id.slice(0, 12), online: p.online === true || e?.online === true, lastSeen: Math.max(p.lastSeen || 0, e?.lastSeen || 0) || undefined });
+  }
+  return [...map.values()].sort((a,b) => Number(b.online)-Number(a.online) || (b.lastSeen||0)-(a.lastSeen||0));
+}
 
-  useEffect(() => radioSession.subscribe(setAudio), []);
-  useEffect(() => radioChannelSession.subscribe(setChannel), []);
-  useEffect(() => radioSession.setUsers(members.filter((member) => member.id !== localId)), [members, localId]);
-  useEffect(() => () => {
-    pressed.current = false;
-    radioSession.disconnect();
-    void radioChannelSession.leave();
-  }, []);
-
-  const join = async () => {
-    if (!localId || joining) return;
-    setJoining(true);
-    try { await radioChannelSession.join(CHANNEL_ID, CHANNEL_ID, localId, localName); }
-    catch { /* Session exposes the real unavailable state and error in its snapshot. */ }
-    finally { setJoining(false); }
-  };
-
-  useEffect(() => { if (localId && channel.connection === "offline") void join(); }, [localId]);
-
-  const beginPtt = async () => {
-    if (audio.state !== "CONNECTED") return;
-    pressed.current = true;
-    try {
-      if (channel.connection === "connected") {
-        const granted = await radioChannelSession.acquireFloor(localName);
-        if (!granted || !pressed.current) {
-          if (granted) await radioChannelSession.releaseFloor();
-          return;
-        }
-      }
-      radioSession.pressToTalk();
-    } catch {
-      await radioChannelSession.releaseFloor().catch(() => false);
-    }
-  };
-
-  const endPtt = () => {
-    pressed.current = false;
-    radioSession.releaseToTalk();
-    if (channel.connection === "connected") void radioChannelSession.releaseFloor();
-  };
-
-  const leave = async () => {
-    pressed.current = false;
-    radioSession.disconnect();
-    await radioChannelSession.leave();
-  };
-
-  const active = audio.selected;
-  const live = ["CONNECTED", "TRANSMITTING", "RECEIVING"].includes(audio.state);
-  const currentSpeaker = channel.speaker;
-
+export function GridRadioPanel({ peers, localName }: { peers: Peer[]; localIds: string[]; localName: string }) {
+  const [, render] = useState(0);
+  const [muted, setMuted] = useState(false);
+  const [tx, setTx] = useState(false);
+  useEffect(() => {
+    void freeRadio.enable(true).catch(() => {});
+    freeRadio.setOperatorName(localName);
+    const unsub = freeRadio.subscribe(() => render(v => v + 1));
+    const timer = window.setInterval(() => render(v => v + 1), 1000);
+    return () => { unsub(); window.clearInterval(timer); void freeRadio.pttStop().catch(() => {}); };
+  }, [localName]);
+  const status = freeRadio.status();
+  const members = useMemo(() => mergePeers(peers, freeRadio.peerList), [peers, status.peers, freeRadio.peerList.length]);
+  const beginPtt = async () => { if (tx || muted || !status.on) return; try { await freeRadio.pttStart(); setTx(true); } catch (e) { console.warn("[GridRadio] mic", e); } };
+  const endPtt = async () => { if (!tx) return; setTx(false); await freeRadio.pttStop().catch(() => {}); };
   return (
     <div className="grid-radio-panel">
       <header className="grid-radio-channel-head">
-        <div className="grid-radio-brand">
-          <Radio size={24} />
-          <span><strong>GridCaller</strong><small>Mesh Radio</small></span>
-        </div>
-        <div className="grid-radio-mesh-status">
-          <span><i className="live-dot" /> LIVE</span>
-          <small><Users size={12} /> {members.filter((member) => member.online).length} peers</small>
-        </div>
+        <div className="grid-radio-brand"><Radio size={24}/><span><strong>GridCaller</strong><small>Free Mesh Radio</small></span></div>
+        <div className="grid-radio-mesh-status"><span><i className="live-dot" /> {status.on ? "READY" : "OFF"}</span><small><Users size={12}/> {status.peers} nodes</small></div>
       </header>
-
       <section className="grid-radio-channel-card">
-        <div className="grid-radio-channel-icon"><Radio size={28} /></div>
-        <div className="grid-radio-channel-copy">
-          <strong>{channel.channelId || CHANNEL_ID}</strong>
-          <span>{channel.channelName || "Mesh voice channel"}</span>
-        </div>
-        <div className="grid-radio-connected">
-          <span><i className="live-dot" /> {channel.connection === "connected" ? "Connected" : channel.connection.toUpperCase()}</span>
-          <small>{members.filter((member) => member.online).length + 1} nodes</small>
-        </div>
+        <div className="grid-radio-channel-icon"><Radio size={28}/></div>
+        <div className="grid-radio-channel-copy"><strong>{status.channel || CHANNEL_ID}</strong><span>Encrypted device-to-device voice burst</span></div>
+        <div className="grid-radio-connected"><span><i className="live-dot" /> {tx ? "TRANSMIT" : "LISTEN"}</span><small>AES-GCM</small></div>
       </section>
-
-      {channel.connection !== "connected" ? (
-        <button className="grid-radio-connect" disabled={!localId || joining} onClick={() => void join()}>
-          {joining || channel.connection === "connecting" ? "Joining mesh…" : "Join channel"}
-        </button>
-      ) : null}
-      {channel.error ? <div className="grid-radio-error">{channel.error}</div> : null}
-
-      <section className={`grid-radio-active state-${audio.state.toLowerCase()}`}>
-        <div className="grid-radio-mode-strip">
-          <span className="active"><Radio size={16}/> Walkie Talkie</span>
-          <span><Volume2 size={16}/> Monitor</span>
-        </div>
+      <section className="grid-radio-active">
+        <div className="grid-radio-mode-strip"><span className="active"><Radio size={16}/> Walkie Talkie</span><span><WifiOff size={16}/> Local Mesh</span></div>
         <div className="grid-radio-meters">
-          <div className="grid-radio-meter">
-            <strong>TX</strong>
-            <div className="meter-bars">{Array.from({length:8},(_,i)=><i key={i} className={audio.state==="TRANSMITTING" && i<7 ? "on":""}/>)}</div>
-            <Mic size={16}/><span>{audio.state==="TRANSMITTING" ? "LIVE" : "READY"}</span>
-          </div>
-          <button
-            className={`grid-radio-ptt ${audio.state === "TRANSMITTING" ? "transmitting" : ""}`}
-            disabled={!live || channel.muted || audio.state === "RECEIVING" || !audio.microphoneReady || !audio.remoteAudioReady || channel.pushToTalk === "blocked"}
-            aria-label="Hold to talk"
-            onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); void beginPtt(); }}
-            onPointerUp={endPtt} onPointerCancel={endPtt} onLostPointerCapture={endPtt}
-          >
-            {audio.state === "RECEIVING" ? <Volume2 size={42}/> : <Mic size={42}/>}
-            <strong>{audio.state==="TRANSMITTING" ? "TRANSMITTING" : audio.state==="RECEIVING" ? "RECEIVING" : channel.pushToTalk==="requesting" ? "REQUESTING FLOOR" : "HOLD TO TALK"}</strong>
-            <span>{audio.state==="TRANSMITTING" ? "Release to stop" : "Press and hold"}</span>
-          </button>
-          <div className="grid-radio-meter rx">
-            <strong>RX</strong>
-            <div className="meter-bars">{Array.from({length:8},(_,i)=><i key={i} className={audio.state==="RECEIVING" && i<7 ? "on rx":""}/>)}</div>
-            <Volume2 size={16}/><span>{audio.state==="RECEIVING" ? "LIVE" : "LISTEN"}</span>
-          </div>
+          <div className="grid-radio-meter"><strong>TX</strong><div className="meter-bars">{Array.from({length:8},(_,i)=><i key={i} className={tx && i<7 ? "on" : ""}/>)}</div><Mic size={16}/><span>{tx ? "LIVE" : "READY"}</span></div>
+          <button className={"grid-radio-ptt " + (tx ? "transmitting" : "")} disabled={!status.on || muted} aria-label="Hold to talk" onPointerDown={(e)=>{e.currentTarget.setPointerCapture(e.pointerId); void beginPtt();}} onPointerUp={()=>{void endPtt();}} onPointerCancel={()=>{void endPtt();}} onLostPointerCapture={()=>{void endPtt();}}><Mic size={42}/><strong>{tx ? "TRANSMITTING" : "HOLD TO TALK"}</strong><span>{tx ? "Release to send" : "Encrypted mesh burst"}</span></button>
+          <div className="grid-radio-meter rx"><strong>RX</strong><div className="meter-bars">{Array.from({length:8},(_,i)=><i key={i} className={!tx && i<Math.min(6,status.peers+1) ? "on rx" : ""}/>)}</div><Volume2 size={16}/><span>{tx ? "TX" : "LISTEN"}</span></div>
         </div>
-
-        <div className="grid-radio-live-strip">
-          <span>Channel <strong>{channel.channelId || CHANNEL_ID}</strong></span>
-          <span className="channel-live"><i className="live-dot" /> {currentSpeaker ? currentSpeaker.userName + " speaking" : "Listening"} <Signal size={14}/></span>
+        <div className="grid-radio-live-strip"><span>Node <strong>{status.radioId}</strong></span><span className="channel-live"><i className="live-dot" /> {tx ? "Sending over mesh" : "Listening"} <Signal size={14}/></span></div>
+        <div className="grid-radio-traffic"><div className="grid-radio-traffic-head"><strong>Nearby mesh radio nodes</strong><span>{members.length}</span></div>
+          {members.slice(0,8).map(m=><div key={m.id} className="grid-radio-traffic-row"><div className="traffic-avatar user"><Users size={16}/></div><div><strong>{m.name}</strong><span>{m.online ? "Reachable · mesh" : "Seen recently"} · {m.id}</span></div><span className={"grid-radio-dot " + (m.online ? "online" : "")}/></div>)}
+          {!members.length ? <div className="grid-radio-empty">No radio peers discovered yet. Keep both devices on the same local mesh / hotspot and leave Radio open.</div> : null}
         </div>
-
-        <div className="grid-radio-traffic">
-          <div className="grid-radio-traffic-head"><strong>Nearby radio nodes</strong><span>{members.length}</span></div>
-          {currentSpeaker ? <div className="grid-radio-traffic-row live"><div className="traffic-avatar"><Radio size={17}/></div><div><strong>{currentSpeaker.userName}</strong><span>Speaking on {channel.channelId || CHANNEL_ID}</span></div><Signal size={17}/></div> : null}
-          {members.slice(0,5).map(member => (
-            <button key={member.id} className={`grid-radio-traffic-row ${active?.id===member.id ? "selected":""}`} onClick={() => ! (member.id===localId) && radioSession.select(member)}>
-              <div className="traffic-avatar user"><Users size={16}/></div>
-              <div><strong>{member.name}</strong><span>{member.id}</span></div>
-              <span className={`grid-radio-dot ${member.online ? "online":""} ${currentSpeaker?.userId===member.id ? "speaking":""}`} />
-            </button>
-          ))}
-          {!members.length ? <div className="grid-radio-empty">Listening for nearby mesh traffic…</div> : null}
-        </div>
-
         <div className="grid-radio-toolbar">
-          <button onClick={() => void radioSession.setSpeaker(!audio.speakerOn)}>{audio.speakerOn ? <Volume2 size={18}/> : <VolumeX size={18}/>} Speaker</button>
-          <button onClick={() => radioChannelSession.setMuted(!channel.muted)}>{channel.muted ? <MicOff size={18}/> : <Mic size={18}/>} Mute</button>
-          <button onClick={() => void radioChannelSession.read(channel.channelId || CHANNEL_ID)}><ScanLine size={18}/> Scan</button>
+          <button onClick={()=>setMuted(v=>!v)}>{muted ? <MicOff size={18}/> : <Mic size={18}/>} {muted ? "Unmute" : "Mute"}</button>
+          <button onClick={()=>void freeRadio.enable(!freeRadio.enabled)}><Radio size={18}/> {freeRadio.enabled ? "Radio on" : "Radio off"}</button>
+          <button onClick={()=>{freeRadio.setOperatorName(localName); render(v=>v+1);}}><Users size={18}/> Refresh</button>
         </div>
-
-        <div className="grid-radio-bottom-actions">
-          <button
-            type="button"
-            onClick={() => {
-              if (!active?.online) return;
-              void radioSession.connect();
-            }}
-            disabled={!active?.online || audio.state === "CONNECTING" || live}
-            title={live ? "Radio audio already connected" : active?.online ? "Connect radio audio" : "Select an online peer"}
-          >
-            <Wifi size={18}/> {live ? "Audio linked" : "Link audio"}
-          </button>
-          <button className="sos" disabled title="Use Emergency / Mesh for SOS broadcast"><ShieldAlert size={19}/> SOS</button>
-        </div>
-
-        <div className="grid-radio-readiness">Mic: {audio.microphoneReady ? "READY" : "NOT READY"} · Remote audio: {audio.remoteAudioReady ? "LIVE" : "WAITING"}</div>
-
-        {audio.incoming ? (
-          <div className="grid-radio-actions"><button onClick={() => void radioSession.acceptIncoming()}>Accept / Listen</button><button className="danger" onClick={() => radioSession.rejectIncoming()}>Reject</button></div>
-        ) : active && !live ? (
-          <button className="grid-radio-connect" disabled={!active.online || audio.state === "CONNECTING"} onClick={() => void radioSession.connect()}>
-            {audio.state === "CONNECTING" ? "Establishing WebRTC audio…" : `Connect audio to ${active.name}`}
-          </button>
-        ) : null}
+        <div className="grid-radio-readiness">Transport: local mesh · encrypted: yes · SIM: no · carrier: no · cloud: no</div>
       </section>
     </div>
   );
-
 }
 export default GridRadioPanel;
