@@ -119,15 +119,12 @@ export function GridRadioPanel({ peers, localIds, localName }: { peers: Peer[]; 
           <span className="active"><Radio size={16}/> Walkie Talkie</span>
           <span><Volume2 size={16}/> Monitor</span>
         </div>
-
         <div className="grid-radio-meters">
           <div className="grid-radio-meter">
             <strong>TX</strong>
             <div className="meter-bars">{Array.from({length:8},(_,i)=><i key={i} className={audio.state==="TRANSMITTING" && i<7 ? "on":""}/>)}</div>
-            <Mic size={16}/>
-            <span>{audio.state==="TRANSMITTING" ? "LIVE" : "READY"}</span>
+            <Mic size={16}/><span>{audio.state==="TRANSMITTING" ? "LIVE" : "READY"}</span>
           </div>
-
           <button
             className={`grid-radio-ptt ${audio.state === "TRANSMITTING" ? "transmitting" : ""}`}
             disabled={!live || channel.muted || audio.state === "RECEIVING" || !audio.microphoneReady || !audio.remoteAudioReady || channel.pushToTalk === "blocked"}
@@ -135,33 +132,25 @@ export function GridRadioPanel({ peers, localIds, localName }: { peers: Peer[]; 
             onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); void beginPtt(); }}
             onPointerUp={endPtt} onPointerCancel={endPtt} onLostPointerCapture={endPtt}
           >
-            {audio.state === "TRANSMITTING" ? <Mic size={40}/> : audio.state === "RECEIVING" ? <Volume2 size={40}/> : <Mic size={40}/>}
-            <strong>{audio.state==="TRANSMITTING" ? "TRANSMITTING" : audio.state==="RECEIVING" ? `RECEIVING` : channel.pushToTalk==="requesting" ? "REQUESTING FLOOR" : "HOLD TO TALK"}</strong>
+            {audio.state === "RECEIVING" ? <Volume2 size={42}/> : <Mic size={42}/>}
+            <strong>{audio.state==="TRANSMITTING" ? "TRANSMITTING" : audio.state==="RECEIVING" ? "RECEIVING" : channel.pushToTalk==="requesting" ? "REQUESTING FLOOR" : "HOLD TO TALK"}</strong>
             <span>{audio.state==="TRANSMITTING" ? "Release to stop" : "Press and hold"}</span>
           </button>
-
           <div className="grid-radio-meter rx">
             <strong>RX</strong>
             <div className="meter-bars">{Array.from({length:8},(_,i)=><i key={i} className={audio.state==="RECEIVING" && i<7 ? "on rx":""}/>)}</div>
-            <Volume2 size={16}/>
-            <span>{audio.state==="RECEIVING" ? "LIVE" : "LISTEN"}</span>
+            <Volume2 size={16}/><span>{audio.state==="RECEIVING" ? "LIVE" : "LISTEN"}</span>
           </div>
         </div>
 
         <div className="grid-radio-live-strip">
           <span>Channel <strong>{channel.channelId || CHANNEL_ID}</strong></span>
-          <span className="channel-live"><i className="live-dot" /> {currentSpeaker ? `${currentSpeaker.userName} speaking` : "Listening"} <Signal size={14}/></span>
+          <span className="channel-live"><i className="live-dot" /> {currentSpeaker ? currentSpeaker.userName + " speaking" : "Listening"} <Signal size={14}/></span>
         </div>
 
         <div className="grid-radio-traffic">
           <div className="grid-radio-traffic-head"><strong>Nearby radio nodes</strong><span>{members.length}</span></div>
-          {currentSpeaker ? (
-            <div className="grid-radio-traffic-row live">
-              <div className="traffic-avatar"><Radio size={17}/></div>
-              <div><strong>{currentSpeaker.userName}</strong><span>Speaking on {channel.channelId || CHANNEL_ID}</span></div>
-              <Signal size={17}/>
-            </div>
-          ) : null}
+          {currentSpeaker ? <div className="grid-radio-traffic-row live"><div className="traffic-avatar"><Radio size={17}/></div><div><strong>{currentSpeaker.userName}</strong><span>Speaking on {channel.channelId || CHANNEL_ID}</span></div><Signal size={17}/></div> : null}
           {members.slice(0,5).map(member => (
             <button key={member.id} className={`grid-radio-traffic-row ${active?.id===member.id ? "selected":""}`} onClick={() => ! (member.id===localId) && radioSession.select(member)}>
               <div className="traffic-avatar user"><Users size={16}/></div>
@@ -175,12 +164,12 @@ export function GridRadioPanel({ peers, localIds, localName }: { peers: Peer[]; 
         <div className="grid-radio-toolbar">
           <button onClick={() => void radioSession.setSpeaker(!audio.speakerOn)}>{audio.speakerOn ? <Volume2 size={18}/> : <VolumeX size={18}/>} Speaker</button>
           <button onClick={() => radioChannelSession.setMuted(!channel.muted)}>{channel.muted ? <MicOff size={18}/> : <Mic size={18}/>} Mute</button>
-          <button onClick={() => radioChannelSession.read(channel.channelId || CHANNEL_ID)}><ScanLine size={18}/> Scan</button>
+          <button onClick={() => void radioChannelSession.read(channel.channelId || CHANNEL_ID)}><ScanLine size={18}/> Scan</button>
         </div>
 
         <div className="grid-radio-bottom-actions">
-          <button><Wifi size={18}/> Mesh broadcast</button>
-          <button className="sos"><ShieldAlert size={19}/> SOS</button>
+          <button disabled><Wifi size={18}/> Mesh broadcast</button>
+          <button className="sos" disabled title="SOS broadcast is not implemented in the radio session"><ShieldAlert size={19}/> SOS</button>
         </div>
 
         <div className="grid-radio-readiness">Mic: {audio.microphoneReady ? "READY" : "NOT READY"} · Remote audio: {audio.remoteAudioReady ? "LIVE" : "WAITING"}</div>
@@ -195,6 +184,5 @@ export function GridRadioPanel({ peers, localIds, localName }: { peers: Peer[]; 
       </section>
     </div>
   );
-
 
 export default GridRadioPanel;
