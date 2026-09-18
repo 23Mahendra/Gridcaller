@@ -1,9 +1,10 @@
-## License
-
+## GridCaller
 Copyright © 2026 Ar. Mahendrasingh Katroliya
 
 Licensed under the Apache License, Version 2.0.
-See the LICENSE file for details.
+
+Original project by Ar. Mahendrasingh Katroliya.
+Contributors must preserve this notice where required by the license.
 
 # GridCaller
 
