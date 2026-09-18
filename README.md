@@ -1,3 +1,10 @@
+## License
+
+Copyright © 2026 Ar. Mahendrasingh Katroliya
+
+Licensed under the Apache License, Version 2.0.
+See the LICENSE file for details.
+
 # GridCaller
 
 A sober, local-first mesh communications platform for education, research, and controlled demonstrations.
