@@ -4,6 +4,7 @@ apply plugin: 'org.jetbrains.kotlin.android'
 android {
     namespace "app.gridalive.gridcaller"
     compileSdk rootProject.ext.compileSdkVersion
+    buildToolsVersion "35.0.0"
     defaultConfig {
         applicationId "app.gridalive.gridcaller"
         minSdkVersion rootProject.ext.minSdkVersion
