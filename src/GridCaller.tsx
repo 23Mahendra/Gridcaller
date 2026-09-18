@@ -2991,7 +2991,7 @@ export default function GridCaller({
       } catch {}
       mapObjRef.current = null;
     };
-  }, [menuOpen, menuView, radarPeers, myGps, myName, myGridDisplay, blocked, peers, meshMapPeers]);
+  }, [menuOpen, menuView, myGps, myName, myGridDisplay, blocked, peers, meshMapPeers]);
 
   // Gridchat map tab: destroy Leaflet instance when leaving tab (prevents blank re-mount)
   useEffect(() => {
