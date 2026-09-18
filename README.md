@@ -92,3 +92,13 @@ npx cap open android
 - For the best demo experience, keep the devices on the same local network and use the included hub service.
 - The project is best understood as a research and prototyping platform rather than a production carrier replacement.
 - AI chat now supports hub-backed local RAG: add your own notes/SOPs in the AI panel and retrieval is indexed by the local hub for reuse across clients on the same self-hosted setup.
+
+## Support GridCaller
+
+GridCaller is an open-source, local-first mesh communications platform.
+
+If you'd like to support development, testing, and field deployments, you can contribute here:
+
+**Support:** https://rzp.io/rzp/CZkogkJU
+
+Every contribution helps improve offline-first communications.
