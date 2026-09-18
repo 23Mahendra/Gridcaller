@@ -92,6 +92,7 @@ class FreeRadioMesh {
   private beaconTimer: ReturnType<typeof setInterval> | null = null;
   private pttRecorder: MediaRecorder | null = null;
   private pttChunks: Blob[] = [];
+  private rxQueue: Promise<void> = Promise.resolve();
 
   get enabled() {
     return this.on;
@@ -370,12 +371,9 @@ class FreeRadioMesh {
     if (!rec) return;
     const stream = rec.stream;
     await new Promise<void>((resolve) => {
-      rec.onstop = () => resolve();
-      try {
-        rec.stop();
-      } catch {
-        resolve();
-      }
+      const finish = () => resolve();
+      rec.onstop = finish;
+      try { rec.stop(); } catch { finish(); }
     });
     this.pttRecorder = null;
     stream.getTracks().forEach((t) => t.stop());
