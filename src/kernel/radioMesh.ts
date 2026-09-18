@@ -93,6 +93,7 @@ class FreeRadioMesh {
   private pttRecorder: MediaRecorder | null = null;
   private pttChunks: Blob[] = [];
   private rxQueue: Promise<void> = Promise.resolve();
+  private listening = true;
 
   get enabled() {
     return this.on;
@@ -281,15 +282,23 @@ class FreeRadioMesh {
         audioB64: body.audioB64,
         ts: body.ts || Date.now(),
       });
-      // auto-play short PTT burst
-      try {
-        const bin = unb64(body.audioB64);
-        const blob = new Blob([bin], { type: body.mime || "audio/webm" });
-        const url = URL.createObjectURL(blob);
-        const a = new Audio(url);
-        a.play().catch(() => {});
-        a.onended = () => URL.revokeObjectURL(url);
-      } catch {}
+      // Queue bursts so received speech never overlaps/reorders itself.
+      this.rxQueue = this.rxQueue.then(async () => {
+        try {
+          const bin = unb64(body.audioB64);
+          const blob = new Blob([bin], { type: body.mime || "audio/webm" });
+          const url = URL.createObjectURL(blob);
+          const a = new Audio(url);
+          a.preload = "auto";
+          await a.play().catch(() => {});
+          await new Promise<void>((resolve) => {
+            a.onended = () => resolve();
+            a.onerror = () => resolve();
+            setTimeout(resolve, Math.max(1500, Number(body.duration || 0) + 1000));
+          });
+          URL.revokeObjectURL(url);
+        } catch {}
+      }).catch(() => {});
       this.peers.set(body.radioId, {
         id: body.radioId,
         name: body.name || body.radioId.slice(0, 8),
@@ -350,6 +359,7 @@ class FreeRadioMesh {
   /** Push-to-talk start */
   async pttStart() {
     if (!this.on) throw new Error("Radio mode off");
+    if (this.pttRecorder) return;
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true },
     });
