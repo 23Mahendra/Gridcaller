@@ -185,4 +185,5 @@ export function GridRadioPanel({ peers, localIds, localName }: { peers: Peer[]; 
     </div>
   );
 
+}
 export default GridRadioPanel;
