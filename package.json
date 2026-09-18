@@ -44,7 +44,7 @@
     "html2canvas": "^1.4.1",
     "leaflet": "^1.9.4",
     "libp2p": "^2.7.0",
-    "lucide-react": "^0.546.0",
+    "lucide-react": "^1.46.0",
     "peer": "^1.0.2",
     "peerjs": "^1.5.5",
     "qrcode": "^1.5.4",
