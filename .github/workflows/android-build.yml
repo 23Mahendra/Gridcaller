@@ -28,6 +28,14 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
+      - name: Validate Android build toolchain
+        run: |
+          java -version
+          ./android/gradlew --version
+          test -f android/gradlew
+          test -f android/gradle/wrapper/gradle-wrapper.properties
+          grep -E "distributionUrl=.*gradle-[0-9.]+-(all|bin)\.zip" android/gradle/wrapper/gradle-wrapper.properties
+
       - run: npm ci --legacy-peer-deps
       - run: npm run build
       - run: npm run cap:sync
