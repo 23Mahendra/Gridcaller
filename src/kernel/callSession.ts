@@ -351,7 +351,15 @@ function wirePc(peer: RTCPeerConnection, role: "caller" | "callee", gen: number)
         void setSpeakerphone(true);
       }
     }
-    if (ice === "disconnected" || ice === "checking") {
+    if (ice === "disconnected") {
+      // Give a roaming/mobile path a recovery window; "checking" is normal while
+      // ICE candidates are being evaluated and should not trigger repeated restarts.
+      setState({
+        method:
+          state.phase === "active"
+            ? "Reconnecting audio… hold on"
+            : state.method,
+      });
       try {
         peer.restartIce?.();
       } catch {}
