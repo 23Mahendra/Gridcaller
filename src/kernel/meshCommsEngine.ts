@@ -130,11 +130,7 @@ function heuristicAnalysis(text: string): AIEmergencyResult {
 }
 
 // ─── Gun.js public relay peers (fallback chain) ─────────────────
-const DEFAULT_GUN_PEERS = [
-  "https://gun-us.herokuapp.com/gun",
-  "https://gun-eu.herokuapp.com/gun",
-  "wss://gun-manhattan.onrender.com/gun",
-];
+const DEFAULT_GUN_PEERS: string[] = [];
 
 // ─── Main Engine ─────────────────────────────────────────────────
 class MeshCommsEngine {
@@ -183,19 +179,10 @@ class MeshCommsEngine {
   }
 
   private parseRelayCandidates(): string[] {
-    // Flight mode / no SIM: never depend on public Gun relays
-    if (useLocalMeshOnly()) return [];
-    const fromEnv = env.gunPeers
-      ? env.gunPeers.split(",").map(s => s.trim()).filter(Boolean)
-      : [];
-    // Default: local-first empty — cloud only if env.gunPeers set (testing app prefers LAN)
-    const preferCloud = S.get("gc_allow_cloud_gun", false) === true;
-    const merged = preferCloud
-      ? [...fromEnv, ...DEFAULT_GUN_PEERS].filter(Boolean)
-      : gunPeersForMesh(fromEnv);
-    return [...new Set(merged)];
+    // External Gun relays are never part of the default/free runtime.
+    // Self-hosted/local peers may still be supplied explicitly by a future adapter.
+    return [];
   }
-
   private initGunWithRelays(peers: string[]) {
     const safe = gunPeersForMesh(peers);
     this.activeRelays = safe;
@@ -688,35 +675,8 @@ class MeshCommsEngine {
     return smsUri;
   }
 
-  // Twilio REST SMS (when API key is available)
-  async sendTwilioSMS(to: string, message: string): Promise<boolean> {
-    const sid = (env as any).twilioAccountSid || localStorage.getItem("VITE_TWILIO_ACCOUNT_SID");
-    const token = (env as any).twilioAuthToken || localStorage.getItem("VITE_TWILIO_AUTH_TOKEN");
-    const from = (env as any).twilioPhone || localStorage.getItem("VITE_TWILIO_PHONE");
-
-    if (!sid || !token || !from) {
-      // Fall back to native SMS
-      this.sendSMSInvite(to, message);
-      return false;
-    }
-
-    try {
-      const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
-        method: "POST",
-        headers: {
-          Authorization: `Basic ${btoa(`${sid}:${token}`)}`,
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: new URLSearchParams({ To: to, From: from, Body: message }).toString(),
-      });
-      const data = await response.json();
-      return response.ok && data.sid;
-    } catch (err) {
-      console.error("[MeshComms] Twilio SMS failed:", err);
-      this.sendSMSInvite(to, message);
-      return false;
-    }
-  }
+  // Carrier SMS is intentionally outside the core mesh product.
+  // The app uses native device sharing / mesh messaging for the free path.
 
   // ─── Walkie-Talkie via Trystero ────────────────────────────────
   joinWalkieChannel(channelId: string, onMessage: (msg: WalkieMessage) => void): () => void {
@@ -1836,65 +1796,8 @@ class MeshCommsEngine {
 
   // ─── AI Emergency Analysis ─────────────────────────────────────
   async analyzeEmergency(message: string): Promise<AIEmergencyResult> {
-    // 1. Try Ollama (local LLM — zero latency, works offline)
-    const ollamaUrl = env.ollamaBaseUrl || "http://localhost:11434";
-    try {
-      const resp = await fetch(`${ollamaUrl}/api/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: AbortSignal.timeout(4000),
-        body: JSON.stringify({
-          model: "tinyllama",
-          prompt: `Classify this message for emergency severity (0-10) and respond only in JSON:
-{"isEmergency":bool,"severity":0-10,"keywords":[],"recommendedActions":[],"responseTime":"immediate|urgent|normal","summary":"one line"}
-Message: "${message}"`,
-          stream: false,
-          options: { temperature: 0.1, num_predict: 150 },
-        }),
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        const raw = data.response || "";
-        const jsonMatch = raw.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[0]);
-          return { ...parsed, source: "ollama" };
-        }
-      }
-    } catch {}
-
-    // 2. Try cloud AI (Groq — free tier, fast)
-    const groqKey = env.groqKey || localStorage.getItem("VITE_GROQ_API_KEY") || "";
-    if (groqKey) {
-      try {
-        const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${groqKey}` },
-          signal: AbortSignal.timeout(5000),
-          body: JSON.stringify({
-            model: "llama3-8b-8192",
-            messages: [{
-              role: "user",
-              content: `Classify emergency severity of this message and respond ONLY in JSON:
-{"isEmergency":bool,"severity":0-10,"keywords":[],"recommendedActions":[],"responseTime":"immediate|urgent|normal","summary":"one line"}
-Message: "${message}"`,
-            }],
-            temperature: 0.1, max_tokens: 200,
-          }),
-        });
-        if (resp.ok) {
-          const data = await resp.json();
-          const raw = data.choices?.[0]?.message?.content || "";
-          const jsonMatch = raw.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            const parsed = JSON.parse(jsonMatch[0]);
-            return { ...parsed, source: "cloud" };
-          }
-        }
-      } catch {}
-    }
-
-    // 3. Enhanced heuristic fallback (always works offline)
+    // Core emergency classification stays fully local and deterministic.
+    // A local Ollama backend remains an optional enhancement outside the core path.
     return heuristicAnalysis(message);
   }
 
