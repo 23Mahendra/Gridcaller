@@ -6,6 +6,7 @@
  */
 
 import { MeshEngine, type MeshMsg } from "./meshEngine";
+import { iceServersForMesh } from "../kernel/offlineMode";
 import S from "./storage";
 import { v4 as uuidv4 } from "uuid";
 import { createPendingDmEntry, shouldRetryPendingDm, type PendingDmEntry } from "./meshCommsReliability";
@@ -69,9 +70,9 @@ const PENDING_DMS_KEY = "mesh_pending_dms_v1";
 const PENDING_CALLS_KEY = "mesh_pending_calls_v1";
 const PENDING_RETRY_MS = 2500;
 
-const ICE_SERVERS: RTCIceServer[] = [
-  { urls: "stun:stun.l.google.com:19302" },
-];
+function meshIceServers(): RTCIceServer[] {
+  return iceServersForMesh();
+}
 
 export type MeshContact = {
   id: string;
@@ -758,7 +759,7 @@ class MeshCommsImpl {
 
   private async _createPc(peerId: string, callId: string, _isOfferer: boolean) {
     this._closePc();
-    this.pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    this.pc = new RTCPeerConnection({ iceServers: meshIceServers() });
     this.remoteStream = new MediaStream();
 
     if (this.localStream) {
