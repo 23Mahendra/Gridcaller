@@ -35,11 +35,6 @@ import {
   setRelayMode,
   setSyncNode,
 } from "./nodeServices";
-import { BroadcastTransport } from "./transports/broadcastTransport";
-import { PeerJsTransport } from "./transports/peerjsTransport";
-import { TransportRegistry } from "./transport";
-import { iceServersForMesh, useLocalMeshOnly } from "../kernel/offlineMode";
-
 export type PeerInfo = {
   id: string;
   name: string;
