@@ -1225,7 +1225,7 @@ class MeshCommsEngine {
     this.hangUpCall(targetPeerId);
     this.enforcePcBudget();
     // Local-first path: host candidates only. Internet STUN/TURN is opt-in.
-    const pc = this.createPeerConnection(useLocalMeshOnly() ? [] : getWebRtcIceServers());
+    const pc = this.createPeerConnection(iceServersForMesh());
     if (!pc) return null;
     let stream: MediaStream;
     try {
@@ -1607,7 +1607,7 @@ class MeshCommsEngine {
     this.enforcePcBudget();
 
     // Self-hosted TURN from hub config; falls back to STUN only if unavailable.
-    const iceServers = await getWebRtcIceServers();
+    const iceServers = iceServersForMesh();
 
     const pc = this.createPeerConnection(iceServers, { iceCandidatePoolSize: 4 });
     if (!pc) {
