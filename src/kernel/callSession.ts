@@ -32,8 +32,6 @@ import { registerIceRestart, registerInCallProbe } from "./networkHandoff";
 import { logMeshEvent, rememberPeer } from "./meshDirectory";
 import { deriveLifecycleState } from "./appLifecycle";
 import { CallStateMachine, createCallId, type AuthoritativeCall, type CallLifecycleState } from "./callStateMachine";
-import { resolveHubHttp } from "./meshHubConfig";
-import { HubPushProvider } from "./pushProvider";
 
 export type CallPhase = "idle" | "outgoing" | "incoming" | "active";
 
@@ -475,85 +473,6 @@ async function handleSignal(msg: any) {
 }
 
 /** Recover a durable offer after background suspension; duplicates are rejected by the call machine. */
-export async function recoverPendingCallInvites() {
-  const localId = MeshEngine.localId;
-  if (!localId) return 0;
-  try {
-    const response = await fetch(`${resolveHubHttp()}/api/call/pending?calleeId=${encodeURIComponent(localId)}`, { signal: AbortSignal.timeout(5_000) });
-    if (!response.ok) return 0;
-    const body = await response.json();
-    const offers = Array.isArray(body.offers) ? body.offers : [];
-    for (const offer of offers) await handleSignal(offer);
-    return offers.length;
-  } catch { return 0; }
-}
-
-function showIncoming(
-  peerId: string,
-  peerName: string,
-  callId: string,
-  video: boolean,
-  mode: "call" | "radio" = "call"
-) {
-  registerLifecycleHooks();
-  resumeAudioContext();
-  const cid = callId || state.callId || `in_${Date.now()}`;
-  const who = peerName || peerId || "GridCaller";
-  const incoming = advanceCall({
-    type: "INCOMING", callId: cid, callerId: peerId, calleeId: MeshEngine.localId,
-    timestamp: Date.now(), callType: mode === "radio" ? "radio" : "voice",
-  });
-  if (incoming.callId !== cid || incoming.state !== "INCOMING_RINGING") return;
-  if (lastIncomingAlertCallId !== cid) {
-    lastIncomingAlertCallId = cid;
-    try {
-      startRingtone();
-    } catch {}
-    try {
-      navigator.vibrate?.([500, 120, 500, 120, 500, 120, 500]);
-    } catch {}
-    // Full-screen + notification + vibrate even when app background / screen off
-    void nativeIncomingCall(who, cid);
-    try {
-      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
-        new Notification("Incoming GridCaller", {
-          body: who,
-          tag: "gc-call",
-          requireInteraction: true,
-        });
-      } else if (typeof Notification !== "undefined" && Notification.permission === "default") {
-        void Notification.requestPermission();
-      }
-    } catch {}
-    try {
-      document.title = "📞 Incoming — " + who;
-    } catch {}
-  }
-  setState({
-    phase: "incoming",
-    peerId,
-    peerName: who,
-    callId: cid,
-    method: mode === "radio" ? "Incoming radio — tap Accept / Listen" : "Incoming call — tap Accept",
-    error: "",
-    video,
-    secs: 0,
-    mode,
-    localAudioReady: false,
-    remoteAudioReady: false,
-    localTransmitting: false,
-    remoteTransmitting: false,
-    lifecycle: incoming.state,
-    call: incoming,
-  });
-  if (ringTimeout) clearTimeout(ringTimeout);
-  ringTimeout = setTimeout(() => {
-    if (state.phase !== "incoming" || state.callId !== cid) return;
-    advanceCall({ type: "TIMEOUT" });
-    endCall("missed");
-  }, 55_000);
-}
-
 /** Place outbound mesh call — stays on Calling UI until answer */
 async function startOutgoingSession(
   peerId: string,
@@ -655,18 +574,6 @@ async function startOutgoingSession(
       mode,
     };
     MeshEngine.broadcast("GRIDCALLER_OFFER", offerMessage);
-    void fetch(`${resolveHubHttp()}/api/call/pending`, {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ message: { type: "GRIDCALLER_OFFER", data: offerMessage, from: MeshEngine.localId, fromName: me, ts: Date.now() } }),
-    }).catch(() => {});
-    const push = new HubPushProvider(resolveHubHttp());
-    if (await push.isAvailable()) {
-      void push.sendCallInvite({
-        callId, callerId: MeshEngine.localId || "me", calleeId: peerId,
-        callerName: String(me), timestamp: Date.now(), callType: mode === "radio" ? "radio" : "voice",
-      });
-    }
-
     setState({ method: "Ringing… wait for Accept on other phone" });
 
     ringTimeout = setTimeout(() => {
