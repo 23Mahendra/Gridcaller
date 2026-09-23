@@ -39,7 +39,7 @@ jobs:
           bash android/gradlew --version
 
       - name: Install dependencies
-        run: npm ci --legacy-peer-deps
+        run: npm install --legacy-peer-deps --ignore-scripts
 
       - name: Build web app
         run: npm run build
