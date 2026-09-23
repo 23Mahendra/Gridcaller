@@ -127,8 +127,6 @@ class MeshEngine {
 
   constructor() {
     this.routing.setLocalId(this.peerId);
-    this.transportRegistry.register(new BroadcastTransport(this.peerId, "gc_transport_bc"));
-    this.transportRegistry.register(new PeerJsTransport(() => this.dataConns as any));
   }
 
   subscribe(fn: Listener) {
