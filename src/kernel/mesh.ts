@@ -15,7 +15,7 @@ import {
   type PendingOutboundMessage,
 } from "../lib/meshReliability";
 import { createLocalMeshEnvelope, readLocalMeshEnvelope } from "./serverlessMesh";
-import { iceServersForMesh } from "./offlineMode";
+import { iceServersForMesh, useLocalMeshOnly } from "./offlineMode";
 
 let meshBC: BroadcastChannel | null = null;
 let meshBCListenerAttached = false;
@@ -160,6 +160,7 @@ function flushPendingOutbound(engine: any, now = Date.now()) {
 }
 
 function startHttpBus(engine: any) {
+  if (useLocalMeshOnly() && S.get("gc_allow_local_hub", false) !== true) return;
   if (pollTimer) return;
   pendingOutbound = (S.get("mesh_pending_outbound", []) || []) as PendingOutboundMessage[];
   if (!pendingOutboundTimer) {
@@ -313,7 +314,7 @@ export const MeshEngine: MeshEngineAPI = {
         } catch {}
       });
     }
-    if (!meshWs || meshWs.readyState > 1) {
+    if ((!useLocalMeshOnly() || S.get("gc_allow_local_hub", false) === true) && (!meshWs || meshWs.readyState > 1)) {
       connectMeshWs(this as any);
     }
     startHttpBus(this as any);
@@ -354,7 +355,7 @@ export const MeshEngine: MeshEngineAPI = {
         (this as any).localId = mid;
       }
     } catch {}
-    connectMeshWs(this as any);
+    if (!useLocalMeshOnly() || S.get("gc_allow_local_hub", false) === true) connectMeshWs(this as any);
     startHttpBus(this as any);
   },
 
@@ -377,7 +378,7 @@ export const MeshEngine: MeshEngineAPI = {
     ensureHubDefaults();
     if (meshWsTimer) clearTimeout(meshWsTimer);
     wsReconnectAttempt = 0;
-    connectMeshWs(this as any);
+    if (!useLocalMeshOnly() || S.get("gc_allow_local_hub", false) === true) connectMeshWs(this as any);
     startHttpBus(this as any);
   },
 } as any;
