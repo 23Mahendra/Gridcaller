@@ -28,13 +28,24 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: Validate Android build toolchain
+      - name: Prepare Android wrapper
         run: |
+          test -f android/gradlew
+          chmod +x android/gradlew
+          test -f android/gradle/wrapper/gradle-wrapper.jar
+          test -f android/gradle/wrapper/gradle-wrapper.properties
+          grep -E "distributionUrl=.*gradle-[0-9.]+-(all|bin)\\.zip" android/gradle/wrapper/gradle-wrapper.properties
           java -version
           bash android/gradlew --version
-          test -f android/gradlew
-          test -f android/gradle/wrapper/gradle-wrapper.properties
-          grep -E "distributionUrl=.*gradle-[0-9.]+-(all|bin)\.zip" android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Build web app
+        run: npm run build
+
+      - name: Sync Capacitor Android project
+        run: npm run cap:sync
 
       - name: Verify generated Android project
         run: |
@@ -42,7 +53,8 @@ jobs:
           test -f android/capacitor.settings.gradle
           test -f android/app/src/main/AndroidManifest.xml
 
-      - run: npm ci --legacy-peer-deps
+      - name: Build debug APK
+        run: cd android && bash ./gradlew assembleDebug --stacktrace
       - run: npm run build
       - run: npm run cap:sync
       - run: cd android && bash ./gradlew assembleDebug --stacktrace
