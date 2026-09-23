@@ -1583,10 +1583,9 @@ class MeshCommsEngine {
     }
   }
 
-  // ─── Lone Ranger Call — TURN relay with no mesh peers required ──
-  // When a user is isolated (no mesh peers nearby), this method establishes
-  // a WebRTC call routed entirely through TURN relay servers using the device's
-  // cellular radio. No Trystero peers needed — Gun.js handles signaling.
+  // ─── Optional internet-assisted call ───────────────────────────
+  // Used only when cloud traversal is explicitly enabled. The core/free
+  // local-first mode never requires TURN or a carrier data path.
   //
   //   Caller side:  callLoneRanger(targetPeerId) → offer → Gun.js
   //   Callee side:  Gun.js → watchIncomingCalls() receives it (already active)
@@ -1718,42 +1717,54 @@ class MeshCommsEngine {
     this.hangUpCall();
 
     const withTimeout = <T>(p: Promise<T>): Promise<T> =>
-      Promise.race([p, new Promise<never>((_, r) => setTimeout(() => r(new Error("timeout")), TIMEOUT))]);
+      Promise.race([
+        p,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("timeout")), TIMEOUT)
+        ),
+      ]);
 
-    // ── Strategy 1: mesh WebRTC (STUN/TURN + dual-path signaling) ──
-    try {
-      const pc = await withTimeout(this.callMeshPeer(targetPeerId));
-      if (pc && pc.connectionState !== "failed" && pc.connectionState !== "closed") {
-        return { method: "mesh", pc };
-      }
-      this.hangUpCall(targetPeerId);
-    } catch { this.hangUpCall(targetPeerId); }
-
-    // ── Strategy 2: LAN-only WebRTC (same WiFi, zero internet) ──
+    // Local-first: use the direct mesh/LAN WebRTC path first.
     try {
       const pc = await withTimeout(this.callLocalLan(targetPeerId));
       if (pc && pc.connectionState !== "failed" && pc.connectionState !== "closed") {
         return { method: "lan", pc };
       }
       this.hangUpCall(targetPeerId);
-    } catch { this.hangUpCall(targetPeerId); }
-
-    // ── Strategy 3: TURN relay (cross-network) ──
-    if (hasInternet) {
-      try {
-        const pc = await withTimeout(this.callLoneRanger(targetPeerId));
-        if (pc) return { method: "turn", pc };
-        this.hangUpCall(targetPeerId);
-      } catch { this.hangUpCall(targetPeerId); }
+    } catch {
+      this.hangUpCall(targetPeerId);
     }
 
-    // ── Strategy 4: Audio-stream (200ms chunks via broadcast — no WebRTC needed) ──
+    // Optional internet-assisted WebRTC only when the operator explicitly
+    // enables cloud traversal through offlineMode.
+    if (hasInternet && !useLocalMeshOnly()) {
+      try {
+        const pc = await withTimeout(this.callMeshPeer(targetPeerId));
+        if (pc && pc.connectionState !== "failed" && pc.connectionState !== "closed") {
+          return { method: "mesh", pc };
+        }
+        this.hangUpCall(targetPeerId);
+      } catch {
+        this.hangUpCall(targetPeerId);
+      }
+
+      try {
+        const pc = await withTimeout(this.callLoneRanger(targetPeerId));
+        if (pc && pc.connectionState !== "failed" && pc.connectionState !== "closed") {
+          return { method: "turn", pc };
+        }
+        this.hangUpCall(targetPeerId);
+      } catch {
+        this.hangUpCall(targetPeerId);
+      }
+    }
+
+    // Mesh audio-stream fallback remains local transport only.
     try {
       const session = await this.startAudioStreamCall(targetPeerId);
       if (session) return { method: "stream", stop: session.stop };
     } catch {}
 
-    // ── Strategy 5: native tel: only when explicit phone provided ──
     if (opts.phone) {
       const ok = this.callByPhone(opts.phone, opts.name || targetPeerId);
       return { method: ok ? "tel" : "failed" };
