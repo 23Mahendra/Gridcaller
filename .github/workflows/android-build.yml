@@ -27,7 +27,7 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - run: npm install
+      - run: npm ci --legacy-peer-deps
       - run: npm run build
       - run: npx cap sync android
       - run: cd android && ./gradlew assembleDebug --stacktrace
