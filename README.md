@@ -1,15 +1,34 @@
-# Contributing to GridCaller
-
-Thank you for contributing.
-
-- Fork the repository.
-- Create a feature branch.
-- Keep commits focused.
-- Submit a Pull Request.
-
-By contributing, you agree that your contribution is licensed under Apache License 2.0.
-
 # GridCaller
+
+[![Open Source](https://img.shields.io/badge/Open%20Source-Apache--2.0-blue.svg)](LICENSE)
+[![Community Build](https://img.shields.io/badge/Community-Build-success.svg)](#community-development)
+[![Live Preview](https://img.shields.io/badge/Live-Preview-black.svg)](https://23mahendra.github.io/Gridcaller/)
+
+**Offline-first mesh communication project — open for community development.**
+
+> GridCaller is an actively developed open-source project. Some subsystems are functional, while other parts still require implementation, testing, hardening, and real-device validation. The goal is to build a local-first communication platform that can remain useful without paid carrier services or mandatory paid APIs.
+
+![GridCaller preview](docs/images/app-preview.png)
+
+## Community Development
+
+The foundation is public. The next stage is community-driven: developers, researchers, Android engineers, WebRTC/networking contributors, security reviewers, designers, and testers are invited to complete and improve the remaining work.
+
+### Current development areas
+
+- Push-to-Talk Radio
+- Bluetooth / Nearby transport
+- Wi-Fi Direct
+- Multi-hop routing
+- WebRTC reliability
+- Android integration
+- Security hardening
+- Performance and battery optimization
+- Test coverage and real-device validation
+
+Contributions can be submitted through Issues and Pull Requests. Please verify changes on real devices whenever a feature depends on device networking, microphone, Bluetooth, or Android behavior.
+
+
 
 A sober, local-first mesh communications platform for education, research, and controlled demonstrations.
 
