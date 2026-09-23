@@ -169,8 +169,8 @@ class MeshEngine {
     this.status = "connecting";
     this.relaySeen.clear();
     this.emit();
-    void this.transportRegistry.connectAll();
-
+    // The transport registry is part of the legacy abstraction. Connect only
+    // transports that are valid for the current local/cloud policy below.
     void this.primeCachedPeers();
     this.startLanDiscovery();
     this.startRouteBroadcast();
