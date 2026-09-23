@@ -17,7 +17,7 @@
     "start": "node server/hub.mjs",
     "mesh": "node server/hub.mjs",
     "cap:add": "npx cap add android",
-    "cap:sync": "npm run build && npx cap sync android && node scripts/patch-android-permissions.mjs",
+    "cap:sync": "npm run build && npx cap sync android && node scripts/patch-android-permissions.mjs && node scripts/verify-android-project.mjs",
     "cap:open": "npx cap open android",
     "cap:perms": "node scripts/patch-android-permissions.mjs",
     "apk:copy": "node server/copy-apk.mjs",
