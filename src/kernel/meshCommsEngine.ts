@@ -1,15 +1,9 @@
 // ═══════════════════════════════════════════════════════════════════
-// GRIDALIVE — Production Mesh Communications Engine
+// GRIDALIVE — Mesh Communications Engine
 // ═══════════════════════════════════════════════════════════════════
-// Architecture (all real, no mocks):
-//   GPS         → navigator.geolocation.watchPosition (real coordinates)
-//   Presence    → Gun.js P2P graph (offline-first, cross-device sync)
-//   Signaling   → Trystero/torrent (BitTorrent trackers, no server needed)
-//   Voice/Data  → WebRTC via Trystero + PeerJS audio streams
-//   SOS         → GPS + Gun.js broadcast + native tel: call
-//   SMS Invite  → native sms: URI + Twilio API fallback
-//   AI Analysis → Ollama local LLM → cloud API fallback → enhanced heuristic
-//   Offline     → Gun.js localStorage + IndexedDB queue
+// Real device APIs are used where the platform exposes them. The core
+// transport is local-first; self-hosted/optional services stay outside
+// the mandatory path.
 // ═══════════════════════════════════════════════════════════════════
 
 import Gun from "gun/gun";
@@ -1220,8 +1214,8 @@ class MeshCommsEngine {
     if (!("RTCPeerConnection" in window)) return null;
     this.hangUpCall(targetPeerId);
     this.enforcePcBudget();
-    // Use minimal STUN (local) so Chrome generates host+srflx candidates without relay
-    const pc = this.createPeerConnection([{ urls: ["stun:stun.l.google.com:19302"] }]);
+    // Local-first path: host candidates only. Internet STUN/TURN is opt-in.
+    const pc = this.createPeerConnection(useLocalMeshOnly() ? [] : getWebRtcIceServers());
     if (!pc) return null;
     let stream: MediaStream;
     try {
@@ -1801,12 +1795,9 @@ class MeshCommsEngine {
     return heuristicAnalysis(message);
   }
 
-  // ─── Mesh Network Optimization (real routing via Gun.js) ────────
+  // ─── Mesh Network Diagnostics ──────────────────────────────────
   async optimizeNetwork(): Promise<{ routes: number; improved: boolean; bandwidthSaved: number }> {
-    const peers = this.getPeerList();
-    const onlinePeers = peers.filter(p => p.online);
-
-    // Announce our stats to the mesh
+    const onlinePeers = this.getPeerList().filter(p => p.online);
     if (this.gun && this.myLocation) {
       this.gun.get("gridalive.mesh.routing").get(this.myPeerId).put({
         peerId: this.myPeerId,
@@ -1817,10 +1808,8 @@ class MeshCommsEngine {
         timestamp: Date.now(),
       });
     }
-
-    // Estimate routes (each online peer = potential relay)
-    const routes = Math.max(1, onlinePeers.length);
-    return { routes, improved: onlinePeers.length > 0, bandwidthSaved: onlinePeers.length * 15 };
+    // Report observed topology only; do not fabricate bandwidth savings.
+    return { routes: onlinePeers.length, improved: onlinePeers.length > 0, bandwidthSaved: 0 };
   }
 
   // ─── Node navigation ────────────────────────────────────────────
