@@ -23,7 +23,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21
           cache: gradle
 
       - uses: android-actions/setup-android@v3
@@ -31,7 +31,7 @@ jobs:
       - name: Validate Android build toolchain
         run: |
           java -version
-          ./android/gradlew --version
+          bash android/gradlew --version
           test -f android/gradlew
           test -f android/gradle/wrapper/gradle-wrapper.properties
           grep -E "distributionUrl=.*gradle-[0-9.]+-(all|bin)\.zip" android/gradle/wrapper/gradle-wrapper.properties
@@ -45,7 +45,7 @@ jobs:
       - run: npm ci --legacy-peer-deps
       - run: npm run build
       - run: npm run cap:sync
-      - run: cd android && ./gradlew assembleDebug --stacktrace
+      - run: cd android && bash ./gradlew assembleDebug --stacktrace
 
       - uses: actions/upload-artifact@v4
         if: success()
