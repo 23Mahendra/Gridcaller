@@ -116,7 +116,15 @@ function radioSnapshot(channel, localUserId = "", sessionToken = "") {
       id: member.id, name: member.name, joinedAt: member.joinedAt,
       lastSeen: member.lastSeen, connection: "online",
     })),
-    speaker: channel.speaker ? { ...channel.speaker } : null,
+    speaker: channel.speaker
+      ? {
+          userId: channel.speaker.userId,
+          userName: channel.speaker.userName,
+          leaseId: channel.speaker.leaseId,
+          acquiredAt: channel.speaker.acquiredAt,
+          expiresAt: channel.speaker.expiresAt,
+        }
+      : null,
     connection: "connected",
     pushToTalk: "idle",
     muted: false,
