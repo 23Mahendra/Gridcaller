@@ -388,7 +388,9 @@ try {
   if (typeof window !== "undefined") {
     ensureHubDefaults();
     setTimeout(() => {
-      connectMeshWs(MeshEngine as any);
+      if (!useLocalMeshOnly() || S.get("gc_allow_local_hub", false) === true) {
+        connectMeshWs(MeshEngine as any);
+      }
       startHttpBus(MeshEngine as any);
     }, 300);
   }
