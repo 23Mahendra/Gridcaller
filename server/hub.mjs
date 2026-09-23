@@ -1358,56 +1358,60 @@ const server = http.createServer(async (req, res) => {
     }
 
     // GitHub
-    if (pathname === "/api/gh/status") {
-      const avail = await ghAvailable();
-      const auth = avail.ok ? await ghAuthStatus() : { ok: false, out: "gh missing" };
-      return send(res, 200, JSON.stringify({ ok: true, avail, auth, workDir: defaultWorkDir() }), "application/json");
-    }
-
-    if (pathname === "/api/gh/run" && req.method === "POST") {
-      const body = await readJson(req);
-      const args = body.args;
-      if (!Array.isArray(args)) return send(res, 400, JSON.stringify({ ok: false, error: "args[] required" }), "application/json");
-      // whitelist first token
-      const allowed = new Set([
-        "auth", "repo", "pr", "issue", "release", "api", "browse", "status", "gist", "run", "workflow", "label", "search",
-      ]);
-      if (!allowed.has(String(args[0]))) {
-        return send(res, 400, JSON.stringify({ ok: false, error: "gh subcommand not allowed" }), "application/json");
-      }
-      try {
-        const r = await runGh(args, { cwd: body.cwd, timeout: body.timeout });
-        return send(res, 200, JSON.stringify(r), "application/json");
-      } catch (e) {
-        return send(
-          res,
-          500,
-          JSON.stringify({ ok: false, error: e?.message, stderr: String(e?.stderr || "") }),
-          "application/json"
-        );
-      }
-    }
-
-    if (pathname === "/api/gh/clone" && req.method === "POST") {
-      const body = await readJson(req);
-      if (!body.repo) return send(res, 400, JSON.stringify({ ok: false, error: "repo required" }), "application/json");
-      try {
-        const r = await cloneOrPull(body.repo, body.name);
-        return send(res, 200, JSON.stringify(r), "application/json");
-      } catch (e) {
-        return send(res, 500, JSON.stringify({ ok: false, error: e?.message }), "application/json");
-      }
-    }
-
-    if (pathname === "/api/gh/push" && req.method === "POST") {
-      const body = await readJson(req);
-      const r = await pushRepo(body.cwd || defaultWorkDir(), body.message);
-      return send(res, r.ok ? 200 : 500, JSON.stringify(r), "application/json");
-    }
-
-    if (pathname === "/api/gh/repos") {
-      const list = await listHubRepos();
-      return send(res, 200, JSON.stringify({ ok: true, workDir: defaultWorkDir(), repos: list }), "application/json");
+    if (process.env.ENABLE_GH_BRIDGE === "1") {
+          if (pathname === "/api/gh/status") {
+            const avail = await ghAvailable();
+            const auth = avail.ok ? await ghAuthStatus() : { ok: false, out: "gh missing" };
+            return send(res, 200, JSON.stringify({ ok: true, avail, auth, workDir: defaultWorkDir() }), "application/json");
+          }
+      
+          if (pathname === "/api/gh/run" && req.method === "POST") {
+            const body = await readJson(req);
+            const args = body.args;
+            if (!Array.isArray(args)) return send(res, 400, JSON.stringify({ ok: false, error: "args[] required" }), "application/json");
+            // whitelist first token
+            const allowed = new Set([
+              "auth", "repo", "pr", "issue", "release", "api", "browse", "status", "gist", "run", "workflow", "label", "search",
+            ]);
+            if (!allowed.has(String(args[0]))) {
+              return send(res, 400, JSON.stringify({ ok: false, error: "gh subcommand not allowed" }), "application/json");
+            }
+            try {
+              const r = await runGh(args, { cwd: body.cwd, timeout: body.timeout });
+              return send(res, 200, JSON.stringify(r), "application/json");
+            } catch (e) {
+              return send(
+                res,
+                500,
+                JSON.stringify({ ok: false, error: e?.message, stderr: String(e?.stderr || "") }),
+                "application/json"
+              );
+            }
+          }
+      
+          if (pathname === "/api/gh/clone" && req.method === "POST") {
+            const body = await readJson(req);
+            if (!body.repo) return send(res, 400, JSON.stringify({ ok: false, error: "repo required" }), "application/json");
+            try {
+              const r = await cloneOrPull(body.repo, body.name);
+              return send(res, 200, JSON.stringify(r), "application/json");
+            } catch (e) {
+              return send(res, 500, JSON.stringify({ ok: false, error: e?.message }), "application/json");
+            }
+          }
+      
+          if (pathname === "/api/gh/push" && req.method === "POST") {
+            const body = await readJson(req);
+            const r = await pushRepo(body.cwd || defaultWorkDir(), body.message);
+            return send(res, r.ok ? 200 : 500, JSON.stringify(r), "application/json");
+          }
+      
+          if (pathname === "/api/gh/repos") {
+            const list = await listHubRepos();
+            return send(res, 200, JSON.stringify({ ok: true, workDir: defaultWorkDir(), repos: list }), "application/json");
+          }
+      
+      
     }
 
     // GridAlive bridge — register package / list transfers
