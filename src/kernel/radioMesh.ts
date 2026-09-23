@@ -94,6 +94,14 @@ class FreeRadioMesh {
   private pttChunks: Blob[] = [];
   private rxQueue: Promise<void> = Promise.resolve();
   private listening = true;
+  private txBytes = 0;
+  private rxBytes = 0;
+  private txPackets = 0;
+  private rxPackets = 0;
+  private rxVoicePackets = 0;
+  private lastTxAt = 0;
+  private lastRxAt = 0;
+  private lastRxVoiceAt = 0;
 
   get enabled() {
     return this.on;
@@ -244,6 +252,9 @@ class FreeRadioMesh {
   private async onFrame(msg: any) {
     const sealed = msg.data?.sealed || msg.data?.cipher;
     if (!sealed) return;
+    this.rxPackets += 1;
+    this.rxBytes += String(sealed).length;
+    this.lastRxAt = Date.now();
     const body = await this.open(String(sealed));
     if (!body || body.channel !== this.channel) return;
 
@@ -275,6 +286,9 @@ class FreeRadioMesh {
     }
 
     if (body.kind === "voice" && body.audioB64) {
+      this.rxVoicePackets += 1;
+      this.rxBytes += String(body.audioB64).length;
+      this.lastRxVoiceAt = Date.now();
       bus.emit("radioMesh:voice", {
         from: body.radioId,
         name: body.name,
@@ -317,11 +331,15 @@ class FreeRadioMesh {
       name: this.name,
       ts: Date.now(),
     });
+    this.txPackets += 1;
+    this.txBytes += sealed.length;
+    this.lastTxAt = Date.now();
     MeshEngine.broadcast("FREE_RADIO_FRAME", {
       channel: this.channel,
       sealed,
       // no plaintext identity fields outside seal
     });
+    this.emit();
     return true;
   }
 
@@ -410,6 +428,14 @@ class FreeRadioMesh {
       sim: false,
       carrier: false,
       trackableByTelco: false,
+      txPackets: this.txPackets,
+      rxPackets: this.rxPackets,
+      rxVoicePackets: this.rxVoicePackets,
+      txBytes: this.txBytes,
+      rxBytes: this.rxBytes,
+      lastTxAt: this.lastTxAt,
+      lastRxAt: this.lastRxAt,
+      lastRxVoiceAt: this.lastRxVoiceAt,
       note: "Local free-mesh radio · AES channel · Wi‑Fi/hotspot path (no licensed RF hardware yet)",
     };
   }
