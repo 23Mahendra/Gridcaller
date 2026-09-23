@@ -12,8 +12,7 @@ import { S } from "./storage";
 import { MeshEngine } from "./mesh";
 import { useLocalMeshOnly } from "./offlineMode";
 import { endPeerConnection, tryBeginPeerConnection } from "./networkGuard";
-import { fetchHubMeshPeers, resolveHubHttp, resolveMeshTarget } from "./meshHubConfig";
-import { getWebRtcIceServers } from "./webrtcConfig";
+import { iceServersForMesh } from "./offlineMode";
 
 export type GlobalPresence = {
   id: string;
@@ -115,7 +114,7 @@ class GlobalCallEngine {
       handle: this.handle,
       peers: 0,
       localOnly: useLocalMeshOnly(),
-      signaling: "hub-mesh",
+      signaling: useLocalMeshOnly() ? "peer-mesh" : "mesh-bus",
     });
     return true;
   }
@@ -171,14 +170,7 @@ class GlobalCallEngine {
     const raw = String(dial || "").trim();
     if (!raw) return null;
     const q = slug(raw) || phoneDigits(raw) || raw;
-    const cached = this.resolveCachedPeer(raw);
-    if (cached) return cached;
-    for (const record of this.presenceCache.values()) {
-      if (presenceMatches(record, raw, q, phoneDigits(raw))) {
-        return { id: record.id, name: record.name, handle: record.handle };
-      }
-    }
-    return null;
+    return this.resolveCachedPeer(q) || this.resolveCachedPeer(raw);
   }
 
   listenPresence(cb: (p: GlobalPresence) => void): () => void {
@@ -338,7 +330,7 @@ class GlobalCallEngine {
     if (!tryBeginPeerConnection()) {
       throw new Error("WebRTC budget exhausted; using offline-safe mode");
     }
-    const iceServers = await getWebRtcIceServers();
+    const iceServers = iceServersForMesh();
     const pc = new RTCPeerConnection({ iceServers, iceCandidatePoolSize: 8 });
     this.pc = pc;
     const originalClose = pc.close.bind(pc);
