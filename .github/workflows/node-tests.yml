@@ -25,4 +25,4 @@ jobs:
         run: npm ci --legacy-peer-deps
 
       - name: Run node test suite
-        run: npm test -- --test-reporter=spec
+        run: npm test
