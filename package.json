@@ -23,7 +23,6 @@
     "apk:copy": "node server/copy-apk.mjs",
     "push": "node scripts/push-to-devices.mjs",
     "push:ota": "node -e \"fetch('http://127.0.0.1:8765/api/update/push',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:true})}).then(r=>r.json()).then(console.log).catch(e=>console.error(e))\"",
-    "postinstall": "node -e \"console.log('[gridcaller] Real mesh stack ready: peerjs + trystero + gun + capacitor share')\"",
     "install:safe": "npm install --legacy-peer-deps"
   },
   "dependencies": {
