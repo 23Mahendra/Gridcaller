@@ -18,7 +18,7 @@ import { attachAdaptiveBitrate } from "./adaptiveBitrate";
 import { gunPeersForMesh, useLocalMeshOnly } from "./offlineMode";
 import { MeshEngine } from "./mesh";
 import { endPeerConnection, tryBeginPeerConnection } from "./networkGuard";
-import { getWebRtcIceServers } from "./webrtcConfig";
+import { iceServersForMesh } from "./offlineMode";
 import { triggerHapticFeedback } from "./feedback";
 
 const SEA = (Gun as any).SEA;
@@ -917,7 +917,7 @@ class MeshCommsEngine {
     this.hangUpCall(targetPeerId);
     this.enforcePcBudget();
 
-    const iceServers = await getWebRtcIceServers();
+    const iceServers = iceServersForMesh();
 
     const pc = this.createPeerConnection(iceServers);
     if (!pc) {
@@ -1089,7 +1089,7 @@ class MeshCommsEngine {
       const acceptCall = async () => {
           this.hangUpCall(data.from);
           this.enforcePcBudget();
-          const iceServers = await getWebRtcIceServers();
+          const iceServers = iceServersForMesh();
           const pc = this.createPeerConnection(iceServers);
           if (!pc) return;
           let stream: MediaStream;
