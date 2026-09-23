@@ -393,7 +393,9 @@ class GlobalCallEngine {
     if (!tryBeginPeerConnection()) {
       throw new Error("WebRTC budget exhausted; using offline-safe mode");
     }
-    const iceServers = await getWebRtcIceServers();
+    // Keep the answer path identical to the caller's mesh ICE policy.
+    // Cloud traversal only appears when explicitly enabled in offlineMode.
+    const iceServers = iceServersForMesh();
     const pc = new RTCPeerConnection({ iceServers, iceCandidatePoolSize: 8 });
     this.pc = pc;
     const originalClose = pc.close.bind(pc);
