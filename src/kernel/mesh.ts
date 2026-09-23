@@ -428,20 +428,27 @@ export const MeshEngine: MeshEngineAPI = {
       try {
         meshBC?.postMessage(envelope);
       } catch {}
-      // 2) WebSocket hub
+      // 2) Optional local/self-hosted WebSocket hub (never required)
       try {
         if (meshWs && meshWs.readyState === WebSocket.OPEN) {
           meshWs.send(JSON.stringify(envelope));
         }
       } catch {}
-      // 3) HTTP publish → hub bus (critical for APK when WS is dead)
+      // 3) Optional local/self-hosted HTTP bus (never required)
+      // Radio and other sovereign paths continue without this transport.
       try {
         const hub = meshHubHttp();
-        fetch(`${hub}/api/mesh/publish`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(envelope),
-        }).catch(() => {});
+        if (hub && !/^https?:\/\/(localhost|127\.0\.0\.1)/i.test(hub)) {
+          // Explicitly opted-in remote hub only.
+          if (S.get("gc_allow_remote_hub", false) === true) {
+            fetch(`${hub}/api/mesh/publish`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(envelope),
+              keepalive: true,
+            }).catch(() => {});
+          }
+        }
       } catch {}
       // 4) Trystero swarm — serverless relay when hub is unavailable
       //    Every device is a node; no central server required.
