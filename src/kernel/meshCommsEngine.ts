@@ -193,17 +193,23 @@ class MeshCommsEngine {
   }
 
   private async probeRelay(relay: string): Promise<{ ok: boolean; latencyMs: number }> {
-    // Convert ws:// to http:// for health probing.
-    const probeUrl = relay.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
+    if (useLocalMeshOnly()) return { ok: false, latencyMs: 0 };
+    const raw = String(relay || "").trim();
+    if (!raw) return { ok: false, latencyMs: 0 };
+    // Relay probing is only meaningful after cloud mesh is explicitly enabled.
+    const probeUrl = raw.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
     const started = performance.now();
     try {
-      const resp = await fetch(probeUrl, { method: "GET", cache: "no-store", signal: AbortSignal.timeout(3500) });
+      const resp = await fetch(probeUrl, {
+        method: "GET",
+        cache: "no-store",
+        signal: AbortSignal.timeout(3500),
+      });
       return { ok: resp.ok || resp.status < 500, latencyMs: Math.round(performance.now() - started) };
     } catch {
       return { ok: false, latencyMs: 3500 };
     }
   }
-
   private scoreRelay(relay: string, ok: boolean, latencyMs: number) {
     const prev = this.relayHealth.get(relay) || { score: 50, ok: false, lastCheck: 0, latencyMs: 9999 };
     const delta = ok ? Math.max(5, 30 - Math.floor(latencyMs / 100)) : -25;
