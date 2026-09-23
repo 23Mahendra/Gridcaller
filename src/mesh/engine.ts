@@ -38,6 +38,7 @@ import {
 import { BroadcastTransport } from "./transports/broadcastTransport";
 import { PeerJsTransport } from "./transports/peerjsTransport";
 import { TransportRegistry } from "./transport";
+import { iceServersForMesh, useLocalMeshOnly } from "../kernel/offlineMode";
 
 export type PeerInfo = {
   id: string;
@@ -75,10 +76,9 @@ type RelayEnvelope = {
   storeForward?: boolean;
 };
 
-const ICE: RTCIceServer[] = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-];
+function meshIceServers(): RTCIceServer[] {
+  return iceServersForMesh();
+}
 
 class MeshEngine {
   peerId = getPeerId();
@@ -175,16 +175,17 @@ class MeshEngine {
     this.startLanDiscovery();
     this.startRouteBroadcast();
 
-    // Pull hub config (PeerJS host/port) if possible
-    try {
-      const r = await fetch(`${this.hubHttp}/api/config`);
-      if (r.ok) this.hubInfo = await r.json();
-    } catch {
-      /* LAN may still work with defaults */
+    // The self-hosted hub/PeerServer is optional; local-only mode avoids it.
+    if (!useLocalMeshOnly()) {
+      try {
+        const r = await fetch(`${this.hubHttp}/api/config`);
+        if (r.ok) this.hubInfo = await r.json();
+      } catch {
+        /* Optional hub unavailable; local/swarm transports may still work. */
+      }
+      this.connectWs();
+      void this.connectPeerJs();
     }
-
-    this.connectWs();
-    void this.connectPeerJs();
     void this.connectTrystero();
     this.connectGun();
   }
@@ -361,7 +362,7 @@ class MeshEngine {
       path,
       secure: false,
       debug: 1,
-      config: { iceServers: ICE },
+      config: { iceServers: meshIceServers() },
     });
     this.peer = peer;
 
