@@ -531,7 +531,9 @@ async function startOutgoingSession(
     // Audio only for first hop — camera optional mid-call (prevents mic+cam deny crash)
     localStream = await getMicStream(false);
     if (gen !== callGen) return;
-    localStream.getAudioTracks().forEach((track) => { track.enabled = mode !== "radio"; });
+    // Radio mode keeps the mic capture path ready, but transmission is controlled
+    // explicitly by the radio/session layer instead of muting the MediaStream here.
+    localStream.getAudioTracks().forEach((track) => { track.enabled = true; });
     setState({ localAudioReady: localStream.getAudioTracks().some((track) => track.readyState === "live") });
 
     pc = createCallPeerConnection();
