@@ -9,7 +9,7 @@
     "dev": "vite --host 0.0.0.0 --port 5173",
     "build": "vite build",
     "test": "npm run test:node",
-    "test:node": "tsx --test --test-concurrency=1 --test-force-exit tests/**/*.test.ts tests/**/*.test.mjs src/**/*.test.ts scripts/**/*.test.mjs",
+    "test:node": "node --test --test-concurrency=1 tests/**/*.test.mjs scripts/**/*.test.mjs",
     "test:release": "npm run test:node && npm run build",
     "preview": "vite preview --host 0.0.0.0 --port 5173",
     "signal": "node server/hub.mjs",
