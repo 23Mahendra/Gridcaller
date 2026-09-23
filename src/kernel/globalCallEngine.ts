@@ -165,60 +165,18 @@ class GlobalCallEngine {
     try {
       MeshEngine.broadcast("GLOBAL_CALL_PRESENCE", payload);
     } catch {}
-    try {
-      const hub = resolveHubHttp().replace(/\/$/, "");
-      await fetch(`${hub}/api/mesh/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(4000),
-      });
-    } catch {}
   }
 
   async resolvePeer(dial: string): Promise<{ id: string; name: string; handle?: string } | null> {
     const raw = String(dial || "").trim();
     if (!raw) return null;
     const q = slug(raw) || phoneDigits(raw) || raw;
-    if (!q) return null;
-    if (q.startsWith("ga_") || q.startsWith("omni_") || q.startsWith("user_") || q.startsWith("node_")) {
-      return { id: raw, name: raw };
-    }
     const cached = this.resolveCachedPeer(raw);
     if (cached) return cached;
-    const hit = await resolveMeshTarget(raw);
-    if (hit?.id) {
-      const resolved = { id: hit.id, name: hit.name || hit.id, handle: hit.handle };
-      this.rememberPresence({
-        id: resolved.id,
-        name: resolved.name,
-        handle: resolved.handle || "",
-        online: true,
-        ts: Date.now(),
-        global: true,
-      }, true);
-      return resolved;
-    }
-    if (!useLocalMeshOnly()) {
-      try {
-        const peers = await fetchHubMeshPeers();
-        for (const peer of peers) {
-          const rec: CachedPresence = {
-            id: peer.id,
-            name: peer.name || peer.id,
-            handle: peer.handle || "",
-            phone: peer.phone || "",
-            displayNumber: peer.displayNumber || "",
-            online: true,
-            ts: peer.lastSeen || Date.now(),
-            global: true,
-          };
-          this.rememberPresence(rec, false);
-          if (presenceMatches(rec, raw, q, phoneDigits(raw))) {
-            return { id: rec.id, name: rec.name, handle: rec.handle };
-          }
-        }
-      } catch {}
+    for (const record of this.presenceCache.values()) {
+      if (presenceMatches(record, raw, q, phoneDigits(raw))) {
+        return { id: record.id, name: record.name, handle: record.handle };
+      }
     }
     return null;
   }
@@ -237,45 +195,6 @@ class GlobalCallEngine {
       void this.emitPresenceNow();
     }, 5000);
     void this.emitPresenceNow();
-  }
-
-  private async emitPresenceNow() {
-    if (!this.started) return;
-    const seen = new Set<string>();
-    for (const record of this.presenceCache.values()) {
-      if (!record?.id || record.id === this.myId) continue;
-      seen.add(record.id);
-      for (const fn of this.presenceListeners) {
-        try {
-          fn(record);
-        } catch {}
-      }
-    }
-    if (useLocalMeshOnly()) return;
-    try {
-      const peers = await fetchHubMeshPeers();
-      const now = Date.now();
-      for (const p of peers) {
-        if (!p?.id || p.id === this.myId || p.id === "hub-pc") continue;
-        if (seen.has(p.id)) continue;
-        const gp: CachedPresence = {
-          id: p.id,
-          name: p.name || p.id,
-          handle: p.handle || "",
-          phone: p.phone || "",
-          displayNumber: p.displayNumber || "",
-          online: true,
-          ts: p.lastSeen || now,
-          global: true,
-        };
-        this.rememberPresence(gp, false);
-        for (const fn of this.presenceListeners) {
-          try {
-            fn(gp);
-          } catch {}
-        }
-      }
-    } catch {}
   }
 
   onIncoming(
