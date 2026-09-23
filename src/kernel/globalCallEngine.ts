@@ -1,18 +1,17 @@
 /**
- * Global Call Engine — hub-signaled sovereign voice (GridAlive ↔ GridAlive)
+ * Global Call Engine — local-first GridAlive ↔ GridAlive voice
  *
  * Signaling path:
- *  - Presence/lookup via hub /api/mesh/*
- *  - Offer/answer/ice via MeshEngine (hub-backed ws/http bus)
- *  - Optional Gun can still be used by other modules, but this call path is hub-first
+ *  - Presence and call signaling use MeshEngine.
+ *  - An explicitly enabled self-hosted LAN hub may bridge MeshEngine.
+ *  - WebRTC uses local ICE only until cloud traversal is explicitly enabled.
  */
 
 import { bus } from "./bus";
 import { S } from "./storage";
 import { MeshEngine } from "./mesh";
-import { useLocalMeshOnly } from "./offlineMode";
+import { iceServersForMesh, useLocalMeshOnly } from "./offlineMode";
 import { endPeerConnection, tryBeginPeerConnection } from "./networkGuard";
-import { iceServersForMesh } from "./offlineMode";
 
 export type GlobalPresence = {
   id: string;
@@ -86,7 +85,7 @@ class GlobalCallEngine {
   }
 
   setSignalPeers(_peersCsv: string) {
-    // kept for compatibility; signaling is now hub-backed
+    // kept for compatibility; MeshEngine is the signaling bus
   }
 
   start(nodeId: string, name: string, handleHint?: string) {
@@ -476,7 +475,7 @@ class GlobalCallEngine {
       noSimRequired: true,
       noSatelliteRequired: true,
       note:
-        "Primary path is GridAlive↔GridAlive software voice via self-hosted hub signaling + WebRTC.",
+        "Primary path is GridAlive↔GridAlive software voice via MeshEngine signaling + WebRTC; self-hosted LAN hub is optional.",
       futureProviders: ["Twilio", "Telnyx", "Plivo", "Carrier SIP interconnect"],
       productPosition:
         "Public free calling + public earn (RAM/GPU/storage). Carrier voice interop stays optional.",
