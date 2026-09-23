@@ -230,6 +230,10 @@ class MeshCommsEngine {
 
   private startRelayMonitor() {
     if (this.relayMonitor) clearInterval(this.relayMonitor);
+    if (useLocalMeshOnly() || this.gunPeerCandidates.length === 0) {
+      this.relayMonitor = null;
+      return;
+    }
     const tick = async () => {
       await Promise.all(this.gunPeerCandidates.map(async relay => {
         const probe = await this.probeRelay(relay);
