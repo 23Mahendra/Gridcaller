@@ -55,9 +55,6 @@ jobs:
 
       - name: Build debug APK
         run: cd android && bash ./gradlew assembleDebug --stacktrace
-      - run: npm run build
-      - run: npm run cap:sync
-      - run: cd android && bash ./gradlew assembleDebug --stacktrace
 
       - uses: actions/upload-artifact@v4
         if: success()
