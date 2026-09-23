@@ -6,37 +6,16 @@
 
 export interface EnvConfig {
   // Intentionally empty cloud keys — never load secrets from .env for cloud LLMs
-  openrouterKey: string;
-  anthropicKey: string;
-  geminiKey: string;
-  openaiKey: string;
-  groqKey: string;
-  grokKey: string;
-  cohereKey: string;
-  mistralKey: string;
-  togetherKey: string;
-  huggingfaceKey: string;
   appName: string;
   appPort: number;
   defaultLang: string;
   defaultDarkMode: boolean;
-  apiBridgeBaseUrl: string;
   ollamaBaseUrl: string;
   meshAppId: string;
   meshRoomId: string;
   gunPeers: string;
-  peerHost: string;
-  peerPort: number;
-  peerPath: string;
-  peerSecure: boolean;
-  peerKey: string;
   iceServersJson: string;
-  twilioAccountSid: string;
-  twilioAuthToken: string;
-  twilioPhone: string;
   emergencyNumber: string;
-  sentryDsn: string;
-  sentryEnvironment: string;
   appVersion: string;
 }
 
@@ -44,37 +23,17 @@ export interface EnvConfig {
 const viteEnv = ((import.meta as any)?.env || {}) as Record<string, any>;
 
 export const env: EnvConfig = {
-  openrouterKey: "",
-  anthropicKey: "",
-  geminiKey: "",
-  openaiKey: "",
-  groqKey: "",
-  grokKey: "",
-  cohereKey: "",
-  mistralKey: "",
-  togetherKey: "",
-  huggingfaceKey: "",
   appName: viteEnv.VITE_APP_NAME || "GridAlive Universal",
   appPort: Number(viteEnv.VITE_APP_PORT) || 3001,
   defaultLang: viteEnv.VITE_DEFAULT_LANG || "en",
   defaultDarkMode: viteEnv.VITE_DEFAULT_DARK_MODE !== "false",
-  apiBridgeBaseUrl: "",
   ollamaBaseUrl: viteEnv.VITE_OLLAMA_BASE_URL || "http://127.0.0.1:11434",
   meshAppId: "gridalive-mesh",
   meshRoomId: "gridalive-mesh",
   gunPeers: "", // no central gun relay required
-  peerHost: "",
-  peerPort: 0,
   peerPath: "/peerjs",
-  peerSecure: false,
-  peerKey: "peerjs",
   iceServersJson: "",
-  twilioAccountSid: "",
-  twilioAuthToken: "",
-  twilioPhone: "",
   emergencyNumber: "112",
-  sentryDsn: "",
-  sentryEnvironment: "local",
   appVersion: "3.0.0-local",
 };
 
