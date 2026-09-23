@@ -1,7 +1,8 @@
 // ═══════════════════════════════════════════════════════
 // GRIDALIVE KERNEL — MeshEngine
-// Real multi-device bus: WebSocket /mesh-ws + HTTP publish/poll
-// (APK cannot rely on BroadcastChannel alone)
+// Local-first multi-device mesh bus.
+// Browser tabs use BroadcastChannel; device-to-device swarm uses Trystero;
+// an explicitly enabled self-hosted LAN hub may be used as an optional bridge.
 // ═══════════════════════════════════════════════════════
 
 import type { MeshEngineAPI } from "./types";
@@ -22,14 +23,10 @@ let meshBCListenerAttached = false;
 let meshWs: WebSocket | null = null;
 let meshWsTimer: ReturnType<typeof setTimeout> | null = null;
 let meshConnected = false;
-let pollTimer: ReturnType<typeof setTimeout> | null = null;
-let pollAfter = 0;
-let lastRegister = 0;
 let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let wsReconnectAttempt = 0;
 let pendingOutbound: PendingOutboundMessage[] = [];
 let pendingOutboundTimer: ReturnType<typeof setInterval> | null = null;
-let httpFailureStreak = 0;
 let lastWsFailureLogAt = 0;
 
 try {
@@ -42,6 +39,14 @@ function meshHubHttp(): string {
 
 function meshWsUrl(): string {
   return resolveMeshWsUrl();
+}
+
+function localHubExplicitlyAllowed() {
+  return S.get("gc_allow_local_hub", false) === true;
+}
+
+function shouldUseLocalHub() {
+  return localHubExplicitlyAllowed();
 }
 
 function getMeshSecret(engine: any) {
@@ -94,9 +99,6 @@ function myIdentity() {
   return { name, handle, phone, displayNumber };
 }
 
-async function httpRegister(_engine: any) { return false; }
-async function httpPoll(_engine: any) { return false; }
-
 function logMeshWsFailure(error: unknown, url: string) {
   const now = Date.now();
   if (now - lastWsFailureLogAt < 30000) return;
@@ -137,37 +139,28 @@ function flushPendingOutbound(engine: any, now = Date.now()) {
     pendingOutbound = pruned;
     savePendingOutbound();
   }
+
   for (const entry of [...pendingOutbound]) {
-    if (entry.status === "sent") continue;
-    if (!shouldRetryPendingOutboundMessage(entry, now)) continue;
+    if (entry.status === "sent" || !shouldRetryPendingOutboundMessage(entry, now)) continue;
     entry.lastAttemptAt = now;
     entry.attempts += 1;
-    savePendingOutbound();
     try {
       if (meshWs && meshWs.readyState === WebSocket.OPEN) {
         meshWs.send(JSON.stringify(entry.payload));
+        entry.status = "sent";
       }
     } catch {}
-    try {
-      const hub = meshHubHttp();
-      fetch(`${hub}/api/mesh/publish`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(entry.payload),
-      }).catch(() => {});
-    } catch {}
   }
+  savePendingOutbound();
 }
-
 function startHttpBus(engine: any) {
-  if (useLocalMeshOnly() && S.get("gc_allow_local_hub", false) !== true) return;
-  if (pollTimer) return;
+  // No HTTP publish/poll path in the core. Pending messages are flushed only
+  // through an explicitly enabled self-hosted WebSocket hub.
+  if (!shouldUseLocalHub()) return;
   pendingOutbound = (S.get("mesh_pending_outbound", []) || []) as PendingOutboundMessage[];
   if (!pendingOutboundTimer) {
     pendingOutboundTimer = setInterval(() => flushPendingOutbound(engine, Date.now()), 2500);
   }
-  httpFailureStreak = 0;
-  void runHttpBusTick(engine);
 }
 
 function connectMeshWs(engine: any) {
@@ -190,9 +183,9 @@ function connectMeshWs(engine: any) {
       try {
         const name = S.get("mesh_name") || S.get("user_name") || engine.localId;
         ws.send(JSON.stringify({ type: "HELLO", id: engine.localId, name }));
-        void httpRegister(engine);
+        // Presence is carried by the normal MeshEngine broadcast path.
       } catch {}
-      console.info("[MeshEngine] REAL hub WS connected", url);
+      console.info("[MeshEngine] optional local hub WS connected", url);
       try {
         window.dispatchEvent(new CustomEvent("gc-mesh-status", { detail: { connected: true, url } }));
       } catch {}
@@ -314,7 +307,7 @@ export const MeshEngine: MeshEngineAPI = {
         } catch {}
       });
     }
-    if ((!useLocalMeshOnly() || S.get("gc_allow_local_hub", false) === true) && (!meshWs || meshWs.readyState > 1)) {
+    if (shouldUseLocalHub() && (!meshWs || meshWs.readyState > 1)) {
       connectMeshWs(this as any);
     }
     startHttpBus(this as any);
@@ -355,14 +348,13 @@ export const MeshEngine: MeshEngineAPI = {
         (this as any).localId = mid;
       }
     } catch {}
-    if (!useLocalMeshOnly() || S.get("gc_allow_local_hub", false) === true) connectMeshWs(this as any);
+    if (shouldUseLocalHub()) connectMeshWs(this as any);
     startHttpBus(this as any);
   },
 
   isConnected() {
     return (
-      (meshConnected && !!meshWs && meshWs.readyState === WebSocket.OPEN) ||
-      pollAfter > 0
+(meshConnected && !!meshWs && meshWs.readyState === WebSocket.OPEN)
     );
   },
 
@@ -388,7 +380,7 @@ try {
   if (typeof window !== "undefined") {
     ensureHubDefaults();
     setTimeout(() => {
-      if (!useLocalMeshOnly() || S.get("gc_allow_local_hub", false) === true) {
+      if (shouldUseLocalHub()) {
         connectMeshWs(MeshEngine as any);
       }
       startHttpBus(MeshEngine as any);
