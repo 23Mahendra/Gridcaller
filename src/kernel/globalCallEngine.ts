@@ -12,6 +12,8 @@ import { S } from "./storage";
 import { MeshEngine } from "./mesh";
 import { iceServersForMesh, useLocalMeshOnly } from "./offlineMode";
 import { endPeerConnection, tryBeginPeerConnection } from "./networkGuard";
+import { fetchHubMeshPeers, resolveHubHttp, resolveMeshTarget } from "./meshHubConfig";
+import { getWebRtcIceServers } from "./webrtcConfig";
 
 export type GlobalPresence = {
   id: string;
@@ -163,13 +165,43 @@ class GlobalCallEngine {
     try {
       MeshEngine.broadcast("GLOBAL_CALL_PRESENCE", payload);
     } catch {}
+    // Self-hosted hub bridge stays fully opt-in: only reached when the
+    // operator explicitly allows cloud/hub mesh (see offlineMode.allowCloudMesh).
+    if (useLocalMeshOnly()) return;
+    try {
+      const hub = resolveHubHttp().replace(/\/$/, "");
+      await fetch(`${hub}/api/mesh/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(4000),
+      });
+    } catch {}
   }
 
   async resolvePeer(dial: string): Promise<{ id: string; name: string; handle?: string } | null> {
     const raw = String(dial || "").trim();
     if (!raw) return null;
     const q = slug(raw) || phoneDigits(raw) || raw;
-    return this.resolveCachedPeer(q) || this.resolveCachedPeer(raw);
+    const cached = this.resolveCachedPeer(q) || this.resolveCachedPeer(raw);
+    if (cached) return cached;
+    if (useLocalMeshOnly()) return null;
+    try {
+      const hit = await resolveMeshTarget(raw);
+      if (hit?.id) {
+        const resolved = { id: hit.id, name: hit.name || hit.id, handle: hit.handle };
+        this.rememberPresence({
+          id: resolved.id,
+          name: resolved.name,
+          handle: resolved.handle || "",
+          online: true,
+          ts: Date.now(),
+          global: true,
+        }, true);
+        return resolved;
+      }
+    } catch {}
+    return null;
   }
 
   listenPresence(cb: (p: GlobalPresence) => void): () => void {
@@ -267,6 +299,47 @@ class GlobalCallEngine {
       }
     }
     return null;
+  }
+
+  private async emitPresenceNow() {
+    if (!this.started) return;
+    const seen = new Set<string>();
+    for (const record of this.presenceCache.values()) {
+      if (!record?.id || record.id === this.myId) continue;
+      seen.add(record.id);
+      for (const fn of this.presenceListeners) {
+        try {
+          fn(record);
+        } catch {}
+      }
+    }
+    // Hub peer merge is explicit-opt-in only (allowCloudMesh); default
+    // local-first mode never leaves the mesh broadcast path above.
+    if (useLocalMeshOnly()) return;
+    try {
+      const peers = await fetchHubMeshPeers();
+      const now = Date.now();
+      for (const p of peers) {
+        if (!p?.id || p.id === this.myId || p.id === "hub-pc") continue;
+        if (seen.has(p.id)) continue;
+        const gp: CachedPresence = {
+          id: p.id,
+          name: p.name || p.id,
+          handle: p.handle || "",
+          phone: p.phone || "",
+          displayNumber: p.displayNumber || "",
+          online: true,
+          ts: p.lastSeen || now,
+          global: true,
+        };
+        this.rememberPresence(gp, false);
+        for (const fn of this.presenceListeners) {
+          try {
+            fn(gp);
+          } catch {}
+        }
+      }
+    } catch {}
   }
 
   private rememberPresence(record: CachedPresence, notify: boolean) {

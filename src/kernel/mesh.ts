@@ -178,7 +178,6 @@ function connectMeshWs(engine: any) {
     ws.onopen = () => {
       meshConnected = true;
       wsReconnectAttempt = 0;
-    
       flushPendingOutbound(engine, Date.now());
       try {
         const name = S.get("mesh_name") || S.get("user_name") || engine.localId;

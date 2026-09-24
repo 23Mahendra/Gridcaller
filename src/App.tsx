@@ -14,7 +14,7 @@ import { startAutoMesh, unifyLocalIdentity } from "./kernel/autoMesh";
 import { startOtaWatcher, onOta, applyUpdate, type UpdateInfo } from "./kernel/otaUpdate";
 import { startResilientMesh, onPathHealth, type PathHealth } from "./kernel/resilientMesh";
 import { APP_VERSION_NAME, APP_VERSION_CODE } from "./kernel/appVersion";
-import { acceptCall, endCall, getCallState, recoverPendingCallInvites, rejectCall, startCallSession } from "./kernel/callSession";
+import { acceptCall, endCall, getCallState, rejectCall, startCallSession } from "./kernel/callSession";
 import { MeshEngine } from "./kernel/mesh";
 import { startFullAutoJoin, onAutoJoinStatus } from "./kernel/autoJoin";
 import { deriveLifecycleState } from "./kernel/appLifecycle";
@@ -110,7 +110,7 @@ export default function App() {
       }
     };
 
-    const onVisibility = () => { refreshLifecycle(); if (document.visibilityState === "visible") void recoverPendingCallInvites(); };
+    const onVisibility = () => { refreshLifecycle(); };
     const onCallUi = () => refreshLifecycle();
     document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener("focus", onVisibility);
@@ -130,7 +130,6 @@ export default function App() {
       (MeshEngine as any).start?.();
     } catch {}
     startCallSession();
-    void recoverPendingCallInvites();
     startWifiMemory(); // remember Wi‑Fi forever + preferred auto-connect
     startMeshDirectory(); // persistent peers + mesh memory
     startNetworkHandoff(); // smooth Wi‑Fi/path switch without killing voice

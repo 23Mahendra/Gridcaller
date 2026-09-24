@@ -480,7 +480,73 @@ async function handleSignal(msg: any) {
   }
 }
 
-/** Recover a durable offer after background suspension; duplicates are rejected by the call machine. */
+/** Show incoming call UI: ring, vibrate, notify, and arm the auto-timeout. */
+function showIncoming(
+  peerId: string,
+  peerName: string,
+  callId: string,
+  video: boolean,
+  mode: "call" | "radio" = "call"
+) {
+  registerLifecycleHooks();
+  resumeAudioContext();
+  const cid = callId || state.callId || `in_${Date.now()}`;
+  const who = peerName || peerId || "GridCaller";
+  const incoming = advanceCall({
+    type: "INCOMING", callId: cid, callerId: peerId, calleeId: MeshEngine.localId,
+    timestamp: Date.now(), callType: mode === "radio" ? "radio" : "voice",
+  });
+  if (incoming.callId !== cid || incoming.state !== "INCOMING_RINGING") return;
+  if (lastIncomingAlertCallId !== cid) {
+    lastIncomingAlertCallId = cid;
+    try {
+      startRingtone();
+    } catch {}
+    try {
+      navigator.vibrate?.([500, 120, 500, 120, 500, 120, 500]);
+    } catch {}
+    // Full-screen + notification + vibrate even when app background / screen off
+    void nativeIncomingCall(who, cid);
+    try {
+      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+        new Notification("Incoming GridCaller", {
+          body: who,
+          tag: "gc-call",
+          requireInteraction: true,
+        });
+      } else if (typeof Notification !== "undefined" && Notification.permission === "default") {
+        void Notification.requestPermission();
+      }
+    } catch {}
+    try {
+      document.title = "📞 Incoming — " + who;
+    } catch {}
+  }
+  setState({
+    phase: "incoming",
+    peerId,
+    peerName: who,
+    callId: cid,
+    method: mode === "radio" ? "Incoming radio — tap Accept / Listen" : "Incoming call — tap Accept",
+    error: "",
+    video,
+    secs: 0,
+    mode,
+    localAudioReady: false,
+    remoteAudioReady: false,
+    localTransmitting: false,
+    remoteTransmitting: false,
+    lifecycle: incoming.state,
+    call: incoming,
+  });
+  if (ringTimeout) clearTimeout(ringTimeout);
+  ringTimeout = setTimeout(() => {
+    if (state.phase !== "incoming" || state.callId !== cid) return;
+    advanceCall({ type: "TIMEOUT" });
+    endCall("missed");
+  }, 55_000);
+}
+
 /** Place outbound mesh call — stays on Calling UI until answer */
 async function startOutgoingSession(
   peerId: string,
