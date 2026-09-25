@@ -34,7 +34,7 @@
     "@capacitor/device": "^7.0.5",
     "@capacitor/filesystem": "^7.1.1",
     "@capacitor/geolocation": "7.1.5",
-    "@capacitor/network": "7.0.2",
+    "@capacitor/network": "8.0.1",
     "@capacitor/share": "^7.0.1",
     "@capacitor/status-bar": "^7.0.1",
     "@sentry/react": "^10.67.0",
