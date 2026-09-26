@@ -320,7 +320,7 @@ type ActionComposerState = {
 
 type Tab = "mesh" | "contacts" | "keypad" | "sms" | "groups" | "logs";
 
-type GridchatFilter = "all" | "unread" | "favourites";
+type GridchatFilter = "all" | "unread" | "favourites" | "archived";
 
 type MeshVisibleUser = {
   id: string;
@@ -830,6 +830,7 @@ export default function GridCaller({
   const [gridchatFilter, setGridchatFilter] = useState<GridchatFilter>("all");
   const [gridchatFavourites, setGridchatFavourites] = useState<string[]>(() => S.get("gridcaller_gridchat_favourites", []));
   const [gridchatMuted, setGridchatMuted] = useState<string[]>(() => S.get("gridcaller_gridchat_muted", []));
+  const [gridchatArchived, setGridchatArchived] = useState<string[]>(() => S.get("gridcaller_gridchat_archived", []));
   const [gridchatLastSeen, setGridchatLastSeen] = useState<Record<string, number>>(() => S.get("gridcaller_gridchat_last_seen", {}));
   const [gridchatMyStatusText, setGridchatMyStatusText] = useState<string>(() => String(S.get("gridcaller_my_status_text", "") || ""));
   const [gridchatMyStatusAt, setGridchatMyStatusAt] = useState<number>(() => Number(S.get("gridcaller_my_status_at", 0) || 0));
@@ -1159,6 +1160,8 @@ export default function GridCaller({
   const [idSaveMsg, setIdSaveMsg] = useState("");
   const mapBoxRef = useRef<HTMLDivElement>(null);
   const mapObjRef = useRef<any>(null);
+  const markersLayerRef = useRef<any>(null);
+  const mapDidInitialFitRef = useRef(false);
 
   const rememberRadioChannel = (name: string) => {
     const cleaned = sanitizeRadioChannel(name);
@@ -1738,6 +1741,7 @@ export default function GridCaller({
   useEffect(() => S.set("gridcaller_active_tab", tab), [tab]);
   useEffect(() => S.set("gridcaller_gridchat_favourites", gridchatFavourites.slice(0, 300)), [gridchatFavourites]);
   useEffect(() => S.set("gridcaller_gridchat_muted", gridchatMuted.slice(0, 300)), [gridchatMuted]);
+  useEffect(() => S.set("gridcaller_gridchat_archived", gridchatArchived.slice(0, 300)), [gridchatArchived]);
   useEffect(() => S.set("gridcaller_gridchat_last_seen", gridchatLastSeen), [gridchatLastSeen]);
   useEffect(() => S.set("gridcaller_my_status_text", gridchatMyStatusText.trim()), [gridchatMyStatusText]);
   useEffect(() => S.set("gridcaller_my_status_at", gridchatMyStatusAt), [gridchatMyStatusAt]);
@@ -2798,10 +2802,13 @@ export default function GridCaller({
     [meshVisibleUsers]
   );
 
-  // Leaflet map when menu map view open
+  // Leaflet map when menu map view open — created ONCE per open (not on every
+  // presence/GPS update) to avoid tearing down and recreating the map, which
+  // caused a visible blink/flash each time peer data refreshed.
   useEffect(() => {
     if (!menuOpen || menuView !== "map" || !mapBoxRef.current) return;
     let cancelled = false;
+    mapDidInitialFitRef.current = false;
     (async () => {
       try {
         const L = (await import("leaflet")).default;
@@ -2814,7 +2821,56 @@ export default function GridCaller({
             mapObjRef.current.remove();
           } catch {}
           mapObjRef.current = null;
+          markersLayerRef.current = null;
         }
+        const initialCenter: [number, number] = myGps ? [myGps.lat, myGps.lng] : [20.5937, 78.9629];
+        const map = L.map(mapBoxRef.current, { zoomControl: true }).setView(initialCenter, myGps ? 12 : 5);
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          attribution: "© OpenStreetMap",
+          maxZoom: 19,
+        }).addTo(map);
+        markersLayerRef.current = L.layerGroup().addTo(map);
+        mapObjRef.current = map;
+        setTimeout(() => map.invalidateSize(), 200);
+
+        // Listen for focus-peer requests from Gridchat search
+        const offFocus = bus.on("map:focus_peer", (msg: any) => {
+          const { lat, lng } = msg.payload || msg;
+          if (lat != null && lng != null && mapObjRef.current) {
+            mapObjRef.current.flyTo([lat, lng], 15, { duration: 1 });
+          }
+        });
+        return () => { offFocus(); };
+      } catch (e) {
+        console.warn("[GridCaller] map init", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      try {
+        mapObjRef.current?.remove();
+      } catch {}
+      mapObjRef.current = null;
+      markersLayerRef.current = null;
+    };
+    // Intentionally only re-runs when the map panel opens/closes — NOT on
+    // every peer/GPS update (see the marker-refresh effect below).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [menuOpen, menuView]);
+
+  // Refresh markers on the existing map instance when peer/GPS data changes.
+  // Never recreates the map or resets the view (except the one-time initial
+  // fitBounds right after the map first has data) — this is what stops the
+  // repeated blink/flash on every presence update.
+  useEffect(() => {
+    if (!menuOpen || menuView !== "map") return;
+    const map = mapObjRef.current;
+    const layer = markersLayerRef.current;
+    if (!map || !layer) return;
+    try {
+      layer.clearLayers();
+      void (async () => {
+        const Lmod = (await import("leaflet")).default;
         const mergedPeers = new Map<string, MeshVisibleUser>();
         const addPeer = (raw: Partial<MeshVisibleUser> & { id?: string }) => {
           const id = String(raw.id || "").trim();
@@ -2843,17 +2899,12 @@ export default function GridCaller({
             Number.isFinite(peer.lat) &&
             Number.isFinite(peer.lng)
         );
-
         const center: [number, number] = myGps
           ? [myGps.lat, myGps.lng]
           : liveGpsPeers[0]
             ? [liveGpsPeers[0].lat, liveGpsPeers[0].lng]
-            : [20.5937, 78.9629]; // India default
-        const map = L.map(mapBoxRef.current, { zoomControl: true }).setView(center, myGps || allPeers.length ? 12 : 5);
-        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-          attribution: "© OpenStreetMap",
-          maxZoom: 19,
-        }).addTo(map);
+            : [20.5937, 78.9629];
+
         const popupNode = (
           title: string,
           lines: string[],
@@ -2896,15 +2947,19 @@ export default function GridCaller({
           return root;
         };
         const icon = (color: string) =>
-          L.divIcon({
+          Lmod.divIcon({
             className: "",
             html: `<div style="width:14px;height:14px;border-radius:50%;background:${color};border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4)"></div>`,
             iconSize: [14, 14],
             iconAnchor: [7, 7],
           });
+
+        if (mapObjRef.current !== map || markersLayerRef.current !== layer) return; // panel closed mid-await
+        const bounds: [number, number][] = [];
         if (myGps) {
-          L.marker([myGps.lat, myGps.lng], { icon: icon("#0a84ff") })
-            .addTo(map)
+          bounds.push([myGps.lat, myGps.lng]);
+          Lmod.marker([myGps.lat, myGps.lng], { icon: icon("#0a84ff") })
+            .addTo(layer)
             .bindPopup(
               popupNode(`You · ${myName}`, [
                 `ID: ${String(MeshEngine.localId || S.get("mesh_id", "") || "").trim() || "local-device"}`,
@@ -2912,8 +2967,6 @@ export default function GridCaller({
               ])
             );
         }
-        const bounds: [number, number][] = [];
-        if (myGps) bounds.push([myGps.lat, myGps.lng]);
         const peersWithoutGps = allPeers.filter((peer) => !liveGpsPeers.some((live) => live.id === peer.id));
         const fallbackLatDivisor = 111320;
         const fallbackLngDivisor = Math.max(24000, Math.cos((center[0] * Math.PI) / 180) * 111320);
@@ -2932,8 +2985,8 @@ export default function GridCaller({
         ];
         const liveGpsIds = new Set(liveGpsPeers.map((p) => p.id));
         for (const p of mapPeers) {
-          L.marker([p.lat, p.lng], { icon: icon(!p.hasLiveGps ? "#ff9f0a" : p.online ? "#30d158" : "#98989f") })
-            .addTo(map)
+          Lmod.marker([p.lat, p.lng], { icon: icon(!p.hasLiveGps ? "#ff9f0a" : p.online ? "#30d158" : "#98989f") })
+            .addTo(layer)
             .bindPopup(
               popupNode(p.name, [
                 `ID: ${p.id}`,
@@ -2964,33 +3017,20 @@ export default function GridCaller({
             );
           bounds.push([p.lat, p.lng]);
         }
-        if (bounds.length > 1) {
+        // Only auto-fit the view the first time this open session gets real
+        // data — subsequent refreshes update markers in place without
+        // moving/zooming the view the user may already be panning around.
+        if (!mapDidInitialFitRef.current && bounds.length) {
+          mapDidInitialFitRef.current = true;
           try {
-            map.fitBounds(bounds as any, { padding: [28, 28], maxZoom: 14 });
+            if (bounds.length > 1) map.fitBounds(bounds as any, { padding: [28, 28], maxZoom: 14 });
+            else map.setView(bounds[0], 13);
           } catch {}
         }
-        mapObjRef.current = map;
-        setTimeout(() => map.invalidateSize(), 200);
-
-        // Listen for focus-peer requests from Gridchat search
-        const offFocus = bus.on("map:focus_peer", (msg: any) => {
-          const { lat, lng } = msg.payload || msg;
-          if (lat != null && lng != null && mapObjRef.current) {
-            mapObjRef.current.flyTo([lat, lng], 15, { duration: 1 });
-          }
-        });
-        return () => { offFocus(); };
-      } catch (e) {
-        console.warn("[GridCaller] map", e);
-      }
-    })();
-    return () => {
-      cancelled = true;
-      try {
-        mapObjRef.current?.remove();
-      } catch {}
-      mapObjRef.current = null;
-    };
+      })();
+    } catch (e) {
+      console.warn("[GridCaller] map markers", e);
+    }
   }, [menuOpen, menuView, myGps, myName, myGridDisplay, blocked, peers, meshMapPeers]);
 
   // Gridchat map tab: destroy Leaflet instance when leaving tab (prevents blank re-mount)
@@ -4547,6 +4587,7 @@ export default function GridCaller({
       unread: number;
       favourite: boolean;
       muted: boolean;
+      archived: boolean;
       online: boolean;
       peerId?: string;
       groupId?: string;
@@ -4587,6 +4628,7 @@ export default function GridCaller({
         unread,
         favourite: gridchatFavourites.includes(rowId),
         muted: gridchatMuted.includes(rowId),
+        archived: gridchatArchived.includes(rowId),
         online: g.members.some((m) => peerNameById.get(m)?.online),
         groupId: g.id,
         memberInfo: `${g.members.length} members`,
@@ -4611,6 +4653,7 @@ export default function GridCaller({
         unread: directUnread.get(pid) || 0,
         favourite: gridchatFavourites.includes(rowId),
         muted: gridchatMuted.includes(rowId),
+        archived: gridchatArchived.includes(rowId),
         online: !!fallback?.online,
         peerId: pid,
         memberInfo: fallback?.online ? "online on mesh" : "offline",
@@ -4621,6 +4664,8 @@ export default function GridCaller({
     const qx = gridchatSearch.trim().toLowerCase();
     return out
       .filter((row) => {
+        if (gridchatFilter === "archived") return row.archived;
+        if (row.archived) return false;
         if (gridchatFilter === "unread" && row.unread === 0) return false;
         if (gridchatFilter === "favourites" && !row.favourite) return false;
         if (!qx) return true;
@@ -4633,7 +4678,7 @@ export default function GridCaller({
         if (b.ts !== a.ts) return b.ts - a.ts;
         return a.alias.localeCompare(b.alias);
       });
-  }, [groupChats, groupMessages, globalPeers, gridchatFavourites, gridchatFilter, gridchatLastSeen, gridchatMuted, gridchatSearch, peers, sms]);
+  }, [groupChats, groupMessages, globalPeers, gridchatArchived, gridchatFavourites, gridchatFilter, gridchatLastSeen, gridchatMuted, gridchatSearch, peers, sms]);
 
   const gridchatUnreadTotal = useMemo(() => gridchatItems.reduce((acc, row) => acc + row.unread, 0), [gridchatItems]);
   const visibleSmsThreadIds = useMemo(() => smsThreads.map((row) => row.peerId), [smsThreads]);
@@ -4694,6 +4739,10 @@ export default function GridCaller({
 
   const toggleGridchatMuted = (rowId: string) => {
     setGridchatMuted((prev) => (prev.includes(rowId) ? prev.filter((id) => id !== rowId) : [rowId, ...prev].slice(0, 300)));
+  };
+
+  const toggleGridchatArchived = (rowId: string) => {
+    setGridchatArchived((prev) => (prev.includes(rowId) ? prev.filter((id) => id !== rowId) : [rowId, ...prev].slice(0, 300)));
   };
 
   const setMyGridchatStatus = () => {
@@ -9278,7 +9327,13 @@ export default function GridCaller({
                     );
                   })}
                   <button type="button" style={{ border: `1px solid ${tokens.sep}`, background: gridchatShowCreateForm ? tokens.green : tokens.card, color: gridchatShowCreateForm ? "#fff" : tokens.text, borderRadius: 999, padding: "5px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", gap: 5 }} onClick={() => setGridchatShowCreateForm(v => !v)}>Groups {gridchatItems.filter(r => r.kind === "group").length}</button>
-                  <button type="button" style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.label, borderRadius: 999, padding: "5px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", gap: 5 }} onClick={() => {}}><Download size={12} /> Archived</button>
+                  <button
+                    type="button"
+                    onClick={() => setGridchatFilter((v) => (v === "archived" ? "all" : "archived"))}
+                    style={{ border: gridchatFilter === "archived" ? "none" : `1px solid ${tokens.sep}`, background: gridchatFilter === "archived" ? tokens.blue : tokens.card, color: gridchatFilter === "archived" ? "#fff" : tokens.label, borderRadius: 999, padding: "5px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", gap: 5 }}
+                  >
+                    <Download size={12} /> Archived{gridchatArchived.length ? ` (${gridchatArchived.length})` : ""}
+                  </button>
                   <button type="button" onClick={() => { setGcNewDirectOpen((v) => !v); setGridchatShowCreateForm(false); }} style={{ border: `1px solid ${tokens.sep}`, background: gcNewDirectOpen ? tokens.blue : tokens.card, color: gcNewDirectOpen ? "#fff" : tokens.text, borderRadius: 999, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", gap: 5 }}><MessageCircle size={12} /> Direct</button>
                   <button type="button" onClick={openGridchatCreatePanel} style={{ border: `1px solid ${tokens.sep}`, background: tokens.card, color: tokens.text, borderRadius: 999, width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}><Plus size={14} /></button>
                 </div>}
@@ -9704,6 +9759,13 @@ export default function GridCaller({
                           style={{ ...compactActionBtn(tokens), borderRadius: 999, padding: "6px 10px" }}
                         >
                           <BellOff size={13} /> {row.muted ? "Unmute" : "Mute"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => toggleGridchatArchived(row.id)}
+                          style={{ ...compactActionBtn(tokens), borderRadius: 999, padding: "6px 10px" }}
+                        >
+                          <Download size={13} /> {row.archived ? "Unarchive" : "Archive"}
                         </button>
                       </div>
                     </div>
