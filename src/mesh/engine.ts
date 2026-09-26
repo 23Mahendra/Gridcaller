@@ -28,6 +28,8 @@ import { enqueueOfflineMessage, markPendingDelivered, markPendingRetry, readPend
 import { decodeAnyPairingCode } from "./qrPairing";
 import { startLanDiscovery, type LanDiscoveryController } from "./lanDiscovery";
 import MeshRoutingTable from "../kernel/meshRoutingTable";
+import { TransportRegistry } from "./transport";
+import { iceServersForMesh, useLocalMeshOnly } from "../kernel/offlineMode";
 import {
   getNodeCapabilities,
   RelayService,
@@ -887,7 +889,7 @@ class MeshEngine {
   private createPc(peerId: string) {
     this.pc?.close();
     this.pendingIce = [];
-    const pc = new RTCPeerConnection({ iceServers: ICE });
+    const pc = new RTCPeerConnection({ iceServers: meshIceServers() });
     this.pc = pc;
     pc.onicecandidate = (ev) => {
       if (ev.candidate) {

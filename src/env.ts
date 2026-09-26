@@ -17,6 +17,8 @@ export interface EnvConfig {
   iceServersJson: string;
   emergencyNumber: string;
   appVersion: string;
+  peerPath: string;
+  sentryDsn: string;
 }
 
 /** Hard local-only config — cloud keys always blank */
@@ -35,6 +37,7 @@ export const env: EnvConfig = {
   iceServersJson: "",
   emergencyNumber: "112",
   appVersion: "3.0.0-local",
+  sentryDsn: viteEnv.VITE_SENTRY_DSN || "",
 };
 
 export const DEMO_MODE = false;
