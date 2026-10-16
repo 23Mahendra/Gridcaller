@@ -37,7 +37,7 @@
     "@capacitor/network": "7.0.2",
     "@capacitor/share": "^7.0.1",
     "@capacitor/status-bar": "^7.0.1",
-    "@sentry/react": "^10.67.0",
+    "@sentry/react": "^10.75.2",
     "dexie": "^4.4.4",
     "gun": "^0.2020.1241",
     "html2canvas": "^1.4.1",
